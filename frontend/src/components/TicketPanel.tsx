@@ -1,12 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Ticket } from '../types';
 import { getTickets, submitTicketEvent } from '../api/client';
-
-const EXAMPLES = [
-  'How do I prepare for a meeting?',
-  'Where is Meeting Summary?',
-  'How can Copilot help with customer meetings?',
-];
+import { randomSampleTicket } from '../api/sampleTickets';
 
 interface Props {
   onAgentActivity: () => void;
@@ -49,9 +44,16 @@ export default function TicketPanel({ onAgentActivity }: Props) {
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-          placeholder={`e.g. "${EXAMPLES[tickets.length % EXAMPLES.length]}"`}
+          placeholder='e.g. "Where is Meeting Summary?"'
           className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
         />
+        <button
+          onClick={() => setText(randomSampleTicket(text))}
+          title="Fill with a random sample ticket"
+          className="px-3 py-2 rounded-lg border border-slate-200 text-sm hover:bg-slate-50 transition-colors"
+        >
+          🎲
+        </button>
         <button
           onClick={handleSubmit}
           disabled={submitting || !text.trim()}
