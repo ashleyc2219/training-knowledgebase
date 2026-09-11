@@ -1,0 +1,100 @@
+{
+  "name": "support-tutorial-generator",
+  "version": 1,
+  "source": "demo_webhook",
+  "components": [
+    {
+      "id": "demo_webhook",
+      "provider": "webhook",
+      "name": "Demo Webhook",
+      "description": "本機 app 把票單／Release／Review 事件 POST 進來（/webhook/{project_id}/demo_webhook）。",
+      "config": {
+        "type": "webhook",
+        "mode": "Source",
+        "hideForm": true,
+        "parameters": {}
+      }
+    },
+    {
+      "id": "support_agent",
+      "provider": "agent_rocketride",
+      "name": "Support Tutorial Agent",
+      "description": "單一 Agent，跑三條 pipeline：Ticket Analysis / Release Note Update / Periodic Feedback Review。",
+      "config": {
+        "agent_description": "Self-improving customer-support tutorial agent. Decides deflect vs escalate for incoming tickets, and decides CREATE / UPDATE / REFINE / KEEP / RETIRE for tutorials.",
+        "max_waves": 10,
+        "instructions": [
+          "You are the single decision agent of a self-improving customer-support tutorial system. The local application is authoritative for all database writes; you produce decisions and explanations only. Always answer with one JSON object: {\"decision\": string, \"reason\": string}.",
+          "Domain model (9 tables): Ticket, UserProblem, Feature, Tutorial, TutorialVersion, Feedback, Release, ReleaseFeatureChange, Workflow. A Tutorial holds identity + status + current_version + flags; the five content fields (title, problem, prerequisites, steps, expected_outcome) live only in TutorialVersion. Tutorial lifecycle actions are CREATE / UPDATE / REFINE / KEEP / RETIRE.",
+          "REAL-TIME PATH (event = ticket_open). Decide 'deflected' or 'escalated' in this exact order, first match wins: (1) ticket.user_problem_id is empty -> escalated. (2) the same customer_ref already has a ticket with status 'deflected' for the same user_problem_id (a reopen) -> escalated, and the new ticket records reopened_from_ticket_id pointing at that older ticket. (3) the ticket's UserProblem has no Tutorial with status 'published' (retired or draft counts as none) -> escalated. (4) otherwise -> deflected, replying with the Tutorial's current_version link. A deflected ticket stores deflected_tutorial_id and deflected_tutorial_version; an escalated ticket leaves both empty.",
+          "PIPELINE 1 - TICKET ANALYSIS (event = analyze). Only tickets with status 'escalated' or 'resolved' count. Group them by user_problem_id. A group of at least 3 tickets is a recurring topic. A recurring topic without a published Tutorial is a Knowledge Gap and its action is CREATE; a recurring topic that already has a published Tutorial is KEEP. Fewer than 3 tickets produces no action. Each gap is decided independently; a Tutorial for another topic never blocks a CREATE.",
+          "CREATE means writing Tutorial v1 as status 'published', current_version 'v1', last_action 'CREATE', plus one TutorialVersion v1 whose five content fields are all non-empty and whose reason and supersedes_version are empty. Build the content only from the resolution_steps of the resolved tickets. Quote UI labels exactly as they appear in the tickets; never paraphrase a button name. If any of the five fields cannot be filled from the tickets, return {\"decision\": \"FAIL\", \"reason\": \"...\"} instead of guessing.",
+          "PIPELINE 2 - RELEASE NOTE UPDATE (event = release). Extract feature changes from the release note into new / changed / renamed / deprecated / removed. Tutorials whose feature_id matches a changed feature are affected: renamed or changed -> UPDATE (new version, Feature.name becomes the new name, the release is stamped processed_at); deprecated or removed -> RETIRE (Tutorial.status 'retired', is_obsolete true). A 'new' feature with no matching Tutorial produces no action. Release notes never trigger CREATE.",
+          "PIPELINE 3 - PERIODIC FEEDBACK REVIEW (event = review). Count only Feedback rows on the Tutorial's current_version. REFINE requires all three: average rating below 3.5, at least 3 feedback rows, and at least 2 rows sharing one feedback_category. Otherwise KEEP. A Tutorial with is_possibly_outdated true is KEEP this round so the Release Note path handles it first.",
+          "Use the Cognee tool to remember every ticket, tutorial version, feedback and release you see, and to recall prior context before deciding. Use the HydraDB tool to store and traverse the knowledge graph (relations: asks_about, explains, refers_to, changes, supersedes), especially to answer 'which tutorials are affected by this release'. Never invent product features, screens, or policies that are not present in the input."
+        ]
+      },
+      "input": [
+        { "lane": "questions", "from": "demo_webhook" }
+      ],
+      "control": [
+        { "classType": "llm", "from": "tutorial_llm" },
+        { "classType": "memory", "from": "agent_memory" },
+        { "classType": "tool", "from": "semantic_memory" },
+        { "classType": "tool", "from": "graph_memory" }
+      ]
+    },
+    {
+      "id": "tutorial_llm",
+      "provider": "llm_bedrock",
+      "name": "Bedrock Claude Sonnet 4.5",
+      "description": "Agent 的規劃與五欄成型模型。降級：把 provider 換成 llm_anthropic（profile claude-sonnet-4-6 ＋ apikey）；invoke.llm 是 min 1 / max 1，不能掛第二顆。",
+      "config": {
+        "profile": "anthropic_claude-sonnet-4-5",
+        "anthropic_claude-sonnet-4-5": {
+          "region": "us-east-1",
+          "accessKey": "",
+          "secretKey": ""
+        }
+      }
+    },
+    {
+      "id": "agent_memory",
+      "provider": "memory_internal",
+      "name": "Agent Keyed Memory",
+      "description": "Agent 的 keyed memory（控制邊 min 1 / max 1，必接）。",
+      "config": { "type": "memory_internal" }
+    },
+    {
+      "id": "semantic_memory",
+      "provider": "tool_cognee",
+      "name": "Cognee Semantic Memory",
+      "description": "Memory 建構層：Tickets / Release Notes / Tutorial / Feedback → 實體與關係。",
+      "config": {
+        "type": "tool_cognee",
+        "base_url": "http://localhost:8000",
+        "dataset": "support_tutorials",
+        "allow_dataset_override": false,
+        "search_type": "GRAPH_COMPLETION_DECOMPOSITION",
+        "top_k": 15,
+        "request_timeout": 120,
+        "api_key": ""
+      }
+    },
+    {
+      "id": "graph_memory",
+      "provider": "db_hydradb",
+      "name": "HydraDB Knowledge Graph",
+      "description": "Memory 儲存層：跨 session 的知識圖譜與 Tutorial 版本；多跳查『哪些 Tutorial 受這次 Release 影響』。",
+      "config": {
+        "profile": "default",
+        "default": {
+          "api_key": "",
+          "database": "support_tutorials",
+          "collection": "default",
+          "max_results": 10
+        }
+      }
+    }
+  ]
+}

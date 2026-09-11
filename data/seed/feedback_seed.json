@@ -1,0 +1,92 @@
+[
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 2,
+    "feedback_category": "指示不清楚",
+    "comment": "Step 3 說得太模糊，不知道要按哪裡。",
+    "submitter_id": "alice@example.com",
+    "timestamp": "2026-09-05T09:00:00Z"
+  },
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 3,
+    "feedback_category": "指示不清楚",
+    "comment": "照著做找不到那個按鈕。",
+    "submitter_id": "bob@example.com",
+    "timestamp": "2026-09-05T11:00:00Z"
+  },
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 3,
+    "feedback_category": "指示不清楚",
+    "comment": "步驟順序看不懂。",
+    "submitter_id": "alice@example.com",
+    "timestamp": "2026-09-05T13:00:00Z"
+  },
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 3,
+    "feedback_category": "缺少資訊",
+    "comment": "沒有寫訂單已出貨要怎麼辦。",
+    "submitter_id": "bob@example.com",
+    "timestamp": "2026-09-05T15:00:00Z"
+  },
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 3,
+    "feedback_category": "缺少資訊",
+    "comment": "少了前置條件說明。",
+    "submitter_id": "alice@example.com",
+    "timestamp": "2026-09-06T09:00:00Z"
+  },
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 3,
+    "feedback_category": "UI 與 Tutorial 不一致",
+    "comment": "畫面上的字跟教學不一樣。",
+    "submitter_id": "bob@example.com",
+    "timestamp": "2026-09-06T11:00:00Z"
+  },
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 3,
+    "feedback_category": "Tutorial 沒有解決問題",
+    "comment": "跟著做還是沒取消成功。",
+    "submitter_id": "alice@example.com",
+    "timestamp": "2026-09-06T13:00:00Z"
+  },
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 3,
+    "feedback_category": "指示不清楚",
+    "comment": "Step 3 的指示需要更清楚。",
+    "submitter_id": "bob@example.com",
+    "timestamp": "2026-09-06T15:00:00Z"
+  },
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 3,
+    "feedback_category": "缺少資訊",
+    "comment": "缺少退款時間的資訊。",
+    "submitter_id": "alice@example.com",
+    "timestamp": "2026-09-07T09:00:00Z"
+  },
+  {
+    "tutorial_id": 1,
+    "tutorial_version": "v1",
+    "rating": 3,
+    "feedback_category": "其他",
+    "comment": "普通。",
+    "submitter_id": "bob@example.com",
+    "timestamp": "2026-09-07T11:00:00Z"
+  }
+]

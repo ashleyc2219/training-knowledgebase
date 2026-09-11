@@ -1,0 +1,110 @@
+[
+  {
+    "content": "i need help cancelling puchase {{Order Number}}",
+    "category": "ORDER",
+    "intent": "cancel_order",
+    "feature_name": "Cancel Order",
+    "customer_ref": "alice@example.com",
+    "created_at": "2026-09-01T15:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "I need to cancel purchase {{Order Number}}",
+    "category": "ORDER",
+    "intent": "cancel_order",
+    "feature_name": "Cancel Order",
+    "customer_ref": "bob@example.com",
+    "created_at": "2026-09-01T16:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "I cannot afford this order, cancel purchase {{Order Number}}",
+    "category": "ORDER",
+    "intent": "cancel_order",
+    "feature_name": "Cancel Order",
+    "customer_ref": "alice@example.com",
+    "created_at": "2026-09-01T17:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "I need to cancel purchase {{Order Number}}",
+    "category": "ORDER",
+    "intent": "cancel_order",
+    "feature_name": "Cancel Order",
+    "customer_ref": "bob@example.com",
+    "created_at": "2026-09-01T18:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "i need help cancelling puchase {{Order Number}}",
+    "category": "ORDER",
+    "intent": "cancel_order",
+    "feature_name": "Cancel Order",
+    "customer_ref": "alice@example.com",
+    "created_at": "2026-09-01T19:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "I already read the tutorial but still cannot cancel my order. I cannot afford this order, cancel purchase {{Order Number}}",
+    "category": "ORDER",
+    "intent": "cancel_order",
+    "feature_name": "Cancel Order",
+    "customer_ref": "alice@example.com",
+    "created_at": "2026-09-01T20:00:00Z",
+    "reopen_hint": true
+  },
+  {
+    "content": "how to know if there are any updates on my reimbursement?",
+    "category": "REFUND",
+    "intent": "track_refund",
+    "feature_name": "Track Refund",
+    "customer_ref": "bob@example.com",
+    "created_at": "2026-09-01T21:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "i expect a reimbursement of {{Refund Amount}} dollars",
+    "category": "REFUND",
+    "intent": "track_refund",
+    "feature_name": "Track Refund",
+    "customer_ref": "alice@example.com",
+    "created_at": "2026-09-01T22:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "I don't know what to do to check the status of my rebate",
+    "category": "REFUND",
+    "intent": "track_refund",
+    "feature_name": "Track Refund",
+    "customer_ref": "bob@example.com",
+    "created_at": "2026-09-01T23:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "I entered a wrong address, update it",
+    "category": "SHIPPING",
+    "intent": "change_shipping_address",
+    "feature_name": "Change Shipping Address",
+    "customer_ref": "alice@example.com",
+    "created_at": "2026-09-02T00:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "i have an trouble editing the address",
+    "category": "SHIPPING",
+    "intent": "change_shipping_address",
+    "feature_name": "Change Shipping Address",
+    "customer_ref": "bob@example.com",
+    "created_at": "2026-09-02T01:00:00Z",
+    "reopen_hint": false
+  },
+  {
+    "content": "help modifying the shipping address",
+    "category": "SHIPPING",
+    "intent": "change_shipping_address",
+    "feature_name": "Change Shipping Address",
+    "customer_ref": "alice@example.com",
+    "created_at": "2026-09-02T02:00:00Z",
+    "reopen_hint": false
+  }
+]

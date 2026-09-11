@@ -1,0 +1,163 @@
+// 來源：docs/客服自助教學生成器 — 系統架構規格.md（產品主軸）＋ docs/spec/draft/design-draft.md（Tutorial 生命週期）
+// Clarify 決策見 docs/spec/.clarify/resolved/決策總表.md；本檔只放已定案的實體、屬性與關係。
+// 型別限 int / long / float / bool / string。時間一律 string（ISO 8601）。
+
+Project SupportTutorialGenerator {
+  database_type: 'Generic'
+  Note: '''客服自助教學生成器（Self-Improving Support Tutorial Generator）。
+顧客票單（Ticket）聚成問題類型（UserProblem）→ 產生教學（Tutorial / TutorialVersion）→ 同類新票自動回覆教學連結（deflection）→ 顧客評分（Feedback）與再開票訊號驅動 REFINE；Release Note 驅動 UPDATE / RETIRE；成功的攔截流程由 Workflow 重放。
+Self-learning 的定義：past outcomes change future system behavior，不是 fine-tuning。
+Demo 領域資料：Bitext Customer Support 公開資料集（category / intent / instruction / response）。'''
+}
+
+Table Ticket {
+  id int [pk, note: '票單識別碼']
+  content string [note: '顧客問題本文；對應 Bitext instruction，例如「I want to cancel order {{Order Number}}」']
+  resolution_steps string [note: '客服解決步驤；對應 Bitext response。可空：新進票尚未解決時為空']
+  category string [note: '客服分類；對應 Bitext category，例如 ORDER、REFUND、ACCOUNT。可空']
+  customer_ref string [note: '顧客識別字串（demo 用假名或 email）。可空。不建 Customer 表，日後要歸戶再升級成 FK']
+  feature_id int [note: 'asks_about：此票詢問的產品功能。可空；分析前或無法對應功能時為 null']
+  user_problem_id int [note: '此票被聚到哪個問題類型。可空；輪詢進來時為 null，自動回覆或分析後填入']
+  status string [note: '票單狀態，值限 open / deflected / escalated / resolved。open：剛進來；deflected：已自動回覆教學連結；escalated：轉真人（含 user_problem_id 為空、無 published Tutorial、再開票三種情況）；resolved：真人已結案（歷史匯入票直接為 resolved）']
+  deflected_tutorial_id int [note: '自動回覆時送出的 Tutorial。只有 status = deflected 才有值']
+  deflected_tutorial_version string [note: '自動回覆時送出的 TutorialVersion。只有 status = deflected 才有值']
+  reopened_from_ticket_id int [note: '同一 customer_ref 在被攔截後又開同一 user_problem_id 的新票時，指向被攔截的那張舊票。可空。這是「教學無效」的隱性訊號']
+  created_at string [note: '進票時間，必填；輪詢新票用 created_at > 上次檢查時間']
+
+  Note: '''顧客客服票單。同時保存顧客問題與（已解決時的）客服解決步驟。
+主要用途：(1) 聚成 UserProblem 決定是否 CREATE Tutorial（只納入 status IN (escalated, resolved) 的票）；(2) 新票依 user_problem_id 匹配已發布 Tutorial 做 deflection；(3) reopened_from_ticket_id 提供再開票訊號。
+狀態轉換：open → deflected | escalated（自動回覆顧客）；escalated → resolved（真人結案，規格外）；歷史匯入票直接為 resolved。
+不變條件：status = deflected ⇔ deflected_tutorial_id 與 deflected_tutorial_version 皆有值。
+不變條件：reopened_from_ticket_id 指向的票 status 必須為 deflected。
+deflection rate = COUNT(status = deflected) / COUNT(status IN (deflected, escalated))，由 hotdata 查詢層計算，不落欄。
+關係：Ticket N:1 Feature（asks_about）；Ticket N:1 UserProblem；Ticket N:1 Tutorial（deflected_by）；Ticket N:1 Ticket（reopened_from）。'''
+}
+
+Table UserProblem {
+  id int [pk, note: '問題類型識別碼']
+  topic string [note: '問題類型名稱，全域唯一；對應 Bitext intent，例如 cancel_order、track_refund、change_shipping_address。同一 topic 重跑分析必須重用既有列']
+  feature_id int [note: '此問題類型主要涉及的產品功能。可空']
+
+  Note: '''問題類型。同義詞：recurring topic、Knowledge Gap、問題類型；規格一律用 UserProblem。
+由語意相似的 Ticket 聚集而成（demo 以 Bitext intent 標籤為聚集依據）。
+「Knowledge Gap」= 已聚成 topic 且目前沒有 status = published 的 Tutorial 對應此 UserProblem。
+是否已有教學不落欄，以 Tutorial.user_problem_id 查詢。
+關係：UserProblem 1:N Ticket；UserProblem N:1 Feature；UserProblem 1:1 Tutorial；UserProblem 1:1 Workflow。'''
+}
+
+Table Feature {
+  id int [pk, note: '產品功能識別碼']
+  name string [note: '產品功能名稱，例如 "Cancel Order"、"Track Refund"。Release Note 更名後直接改成新名稱，舊名稱只留在 Release.content']
+  status string [note: '功能狀態，值限 active / deprecated / removed。Release Note 擷取到 deprecated / removed 時更新']
+
+  Note: '''產品功能。Release 可 new / change / rename / deprecate / remove Feature。
+每篇 Tutorial 必須連回一個 Feature，這是依 Release Note 找受影響 Tutorial 的依據。
+關係：Feature 1:N Ticket（asks_about）；Feature 1:N Tutorial（explains）；Feature 1:N UserProblem；Feature N:M Release（透過 ReleaseFeatureChange）。'''
+}
+
+Table Tutorial {
+  tutorial_id int [pk, note: 'Tutorial 識別碼']
+  feature_id int [note: 'explains：此教學解釋的產品功能，必填；沒有 Feature 不得建立 Tutorial']
+  user_problem_id int [note: '此教學解決的問題類型，必填；一個 UserProblem 最多一篇 Tutorial']
+  path string [note: '教學檔案路徑，例如 tutorials/cancel-order.md']
+  status string [note: '發布狀態，值限 draft / published / retired。建立成功即 published（黑客松不走人工審核，保留 draft 供日後加審核）；RETIRE 後為 retired，不再用於自動回覆']
+  current_version string [note: '目前對外的 TutorialVersion.tutorial_version，例如 v2。平均 rating 只算此版的 Feedback']
+  is_possibly_outdated bool [note: 'Release Note 比對到受影響時設為 true；產出新版本後設回 false']
+  is_obsolete bool [note: 'Feature 被 deprecated / removed 後設為 true；等同 RETIRE']
+  last_action string [note: '最後一次生命週期動作，值限 CREATE / UPDATE / REFINE / KEEP / RETIRE']
+
+  Note: '''教學（Tutorial）。同義詞：教學文章；規格一律用 Tutorial。內容欄位（title / problem / prerequisites / steps / expected_outcome）只存在 TutorialVersion，Tutorial 只存身分、狀態與旗標。
+不變條件：is_obsolete = true 時 is_possibly_outdated 必為 false、status 必為 retired、last_action 必為 RETIRE。
+不變條件：status = published 時 current_version 必有值且對應一筆 TutorialVersion。
+不變條件：last_action = CREATE 時 current_version = v1。
+關係：Tutorial N:1 Feature（explains）；Tutorial 1:1 UserProblem；Tutorial 1:N TutorialVersion；Tutorial 1:N Ticket（deflected_by）。'''
+}
+
+Table TutorialVersion {
+  tutorial_id int [note: '所屬 Tutorial']
+  tutorial_version string [note: '版本識別，v1、v2、v3 …']
+  title string [note: 'Tutorial 內容欄位：Title，必填']
+  problem string [note: 'Tutorial 內容欄位：Problem，必填']
+  prerequisites string [note: 'Tutorial 內容欄位：Prerequisites，必填（自由文字，不建先備知識關聯）']
+  steps string [note: 'Tutorial 內容欄位：Steps，必填']
+  expected_outcome string [note: 'Tutorial 內容欄位：Expected Outcome，必填']
+  reason string [note: '產生此版本的原因，例如 "Repeated feedback indicates Step 3 lacks context."。v1 可空']
+  supersedes_version string [note: '被此版本取代的上一版 tutorial_version，只能指向同一 tutorial_id。v1 必為空，v2 起必填']
+  created_at string [note: '版本建立時間，必填']
+
+  indexes {
+    (tutorial_id, tutorial_version) [pk]
+  }
+
+  Note: '''Tutorial 的一版內容快照。五個內容欄位缺任一則建立失敗。
+關係：TutorialVersion N:1 Tutorial；TutorialVersion 1:1 TutorialVersion（supersedes，同篇）；TutorialVersion 1:N Feedback（refers_to）。'''
+}
+
+Table Feedback {
+  id int [pk, note: '回饋識別碼']
+  tutorial_id int [note: '回饋所屬 Tutorial，必填']
+  tutorial_version string [note: '回饋所屬 TutorialVersion，必填；顧客未指定時預設為該 Tutorial 的 current_version']
+  rating int [note: '1–5 整數，必填；小於 1 或大於 5 則提交失敗']
+  feedback_category string [note: '回饋類別，值限：指示不清楚 / 缺少資訊 / UI 與 Tutorial 不一致 / Tutorial 太長 / Tutorial 沒有解決問題 / 缺少自己的使用情境 / 其他。可空，未填存空字串']
+  comment string [note: '顧客留言，可空，未填存空字串']
+  submitter_id string [note: '提交者識別（對應 Ticket.customer_ref）。可空；同一提交者可對同一版本重複評分，每次新增一筆']
+  timestamp string [note: '回饋時間，必填']
+
+  Note: '''顧客對某一 TutorialVersion 的顯性回饋。
+隱性回饋（看完教學後又開同類票）不寫進本表，記在 Ticket.reopened_from_ticket_id。
+Hotdata 計算 avg_rating 與 feedback_count（只算 Tutorial.current_version 那一版）。
+進入 Periodic Refinement 的條件：avg_rating < 3.5 且 feedback_count >= 3 且存在 recurring complaints（同一 feedback_category >= 2 筆）。
+關係：Feedback N:1 TutorialVersion（refers_to）。'''
+}
+
+Table Release {
+  id int [pk, note: 'Release 識別碼']
+  content string [note: 'Release Note 本文，例如 "Cancel Order has been renamed to Cancel Purchase."']
+  created_at string [note: '發布時間，必填；輪詢入庫用 created_at > 上次檢查時間']
+  processed_at string [note: '系統處理完成時間。可空；入庫時為空；有值代表已跑過更新流程，不得重複觸發']
+
+  Note: '''Release Note。demo 的模擬 changelog 表就是本表，一列一則。
+系統定期輪詢 changelog 來源，把 created_at > 上次檢查時間的新列寫入本表（processed_at 為空）；相同 content + created_at 不重複寫入。
+入庫後才由「依ReleaseNote更新Tutorial」擷取 new / changed / renamed / deprecated / removed，寫入 ReleaseFeatureChange。
+主要用途：入庫產品變更訊號，再找出受影響 Tutorial → UPDATE 或 RETIRE。Release Note 不直接觸發 CREATE。
+關係：Release 1:N ReleaseFeatureChange。'''
+}
+
+Table ReleaseFeatureChange {
+  id int [pk, note: '變更識別碼']
+  release_id int [note: '所屬 Release，必填']
+  feature_id int [note: '受變更的 Feature，必填']
+  change_type string [note: '變更類型，值限 new / changed / renamed / deprecated / removed']
+  from_name string [note: 'renamed 時的舊名稱。其他類型可空']
+  to_name string [note: 'renamed 時的新名稱。其他類型可空']
+
+  Note: '''Release 與 Feature 的多對多關聯，並記錄變更類型。
+受影響 Tutorial = Tutorial.feature_id IN (此 Release 的 feature_id)。
+關係：ReleaseFeatureChange N:1 Release；ReleaseFeatureChange N:1 Feature。'''
+}
+
+Table Workflow {
+  id int [pk, note: 'Workflow 識別碼']
+  user_problem_id int [note: '此流程解決的問題類型，必填且唯一；一個 UserProblem 最多一條已捕捉流程']
+  steps string [note: 'Rote 捕捉的攔截流程步驟序列（匹配 UserProblem → 取 published Tutorial → 回覆連結 → 更新 Ticket）']
+  captured_at string [note: '第一次成功捕捉時間，必填']
+  replay_count int [note: '已重放次數，初始 0；每次同類新票用重放處理時 +1']
+
+  Note: '''Rote Muscle Memory。第一次成功攔截某 UserProblem 後立刻捕捉為可重放流程；下一張同類票直接重放，不再讓 Agent 重新推理。
+重放解決率 = SUM(replay_count) / COUNT(Ticket.status = deflected)，由 hotdata 計算。
+關係：Workflow 1:1 UserProblem。'''
+}
+
+Ref: Ticket.feature_id > Feature.id
+Ref: Ticket.user_problem_id > UserProblem.id
+Ref: Ticket.(deflected_tutorial_id, deflected_tutorial_version) > TutorialVersion.(tutorial_id, tutorial_version)
+Ref: Ticket.reopened_from_ticket_id > Ticket.id
+Ref: UserProblem.feature_id > Feature.id
+Ref: Tutorial.feature_id > Feature.id
+Ref: Tutorial.user_problem_id - UserProblem.id
+Ref: TutorialVersion.tutorial_id > Tutorial.tutorial_id
+Ref: TutorialVersion.(tutorial_id, supersedes_version) - TutorialVersion.(tutorial_id, tutorial_version)
+Ref: Feedback.(tutorial_id, tutorial_version) > TutorialVersion.(tutorial_id, tutorial_version)
+Ref: ReleaseFeatureChange.release_id > Release.id
+Ref: ReleaseFeatureChange.feature_id > Feature.id
+Ref: Workflow.user_problem_id - UserProblem.id

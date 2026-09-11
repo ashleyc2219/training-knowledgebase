@@ -1,0 +1,59 @@
+# Snyk 掃描報告
+日期：2026-09-11T22:06:24Z
+專案：客服自助教學生成器（AWS-Hackathon）
+
+## Snyk CLI 版本：1.1307.2
+
+## 依賴清單：.state/requirements.txt（166 行）
+
+## Snyk 帳號（snyk whoami）：5961timtim
+
+## snyk test（依賴，--severity-threshold=high）
+```
+
+Testing /Users/linjunting/AWS-Hackathon...
+
+Organization:      5961timtim
+Package manager:   pip
+Target file:       .state/requirements.txt
+Project name:      .state
+Open source:       no
+Project path:      /Users/linjunting/AWS-Hackathon
+Licenses:          enabled
+
+✔ Tested 54 dependencies for known issues, no vulnerable paths found.
+
+Next steps:
+- Run `snyk monitor` to be notified about new related vulnerabilities.
+- Run `snyk test` as part of your CI/test.
+
+
+```
+exit code: 0
+
+## snyk code test（原始碼）
+```
+
+ ERROR   Snyk Code is not enabled (SNYK-CODE-0005)
+         This error occurs when Snyk Code is not enabled for the current Organization.  
+         Activate Snyk Code and try again..                                             
+                                                                                        
+           Snyk Code is not supported for your current organization: `5961timtim`.      
+
+Status:  403 Forbidden 
+Docs:    https://docs.snyk.io/scan-with-snyk/error-catalog#snyk-code-0005 
+Tip:     Try snyk doctor: `snyk <command> -d 2>&1 | snyk doctor --stdin` 
+                                                                         
+ID:      urn:snyk:interaction:ff64a46b-78a2-4f46-9360-ca7ba626a255 
+```
+exit code: 2
+
+## 判讀：0 = 無漏洞（驗收只接受 0）／1 = 找到漏洞／2 = 執行失敗／3 = 無支援專案
+
+⚠️ Snyk Code 尚未在 org「5961timtim」開啟（SNYK-CODE-0005，登入本身沒問題）。
+🖐️ 手動（需 org admin）：https://app.snyk.io/org/5961timtim/manage/settings
+   → 左側 Snyk Code → Enable Snyk Code → Save，再重跑 bash scripts/snyk_scan.sh
+
+## .env 未進 git 檢查
+  ✅ git status 看不到 .env
+  ✅ git check-ignore .env 命中 .gitignore
