@@ -264,7 +264,9 @@ export function ingestReleaseNote(text: string): IngestResult {
 
   const oldTerm = match[1].trim().replace(/^["']|["']$/g, '');
   const newTerm = match[2].trim().replace(/^["']|["']$/g, '');
-  const oldRegex = new RegExp(oldTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  const escaped = oldTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const testRegex = () => new RegExp(escaped, 'i'); // fresh instance — no lastIndex state
+  const replaceRegex = () => new RegExp(escaped, 'gi');
 
   const actions: AgentAction[] = [];
   let affected = 0;
@@ -275,15 +277,16 @@ export function ingestReleaseNote(text: string): IngestResult {
       .filter((v) => v.tutorial_id === tutorial.id)
       .sort((a, b) => a.version - b.version);
     const current = versions[versions.length - 1];
-    if (!current || !oldRegex.test(current.content)) continue;
-    oldRegex.lastIndex = 0;
+    const mentionsTerm =
+      current && (testRegex().test(current.content) || testRegex().test(tutorial.title) || testRegex().test(tutorial.description));
+    if (!current || !mentionsTerm) continue;
 
     affected += 1;
     const newVersion: TutorialVersion = {
       id: nextId('tv'),
       tutorial_id: tutorial.id,
       version: current.version + 1,
-      content: current.content.replace(oldRegex, newTerm),
+      content: current.content.replace(replaceRegex(), newTerm),
       change_type: 'UPDATE',
       change_reason: `${release.id} renamed "${oldTerm}" to "${newTerm}".`,
       evidence: [release.id],
@@ -295,6 +298,10 @@ export function ingestReleaseNote(text: string): IngestResult {
     tutorial.current_version_id = newVersion.id;
     tutorial.version_count += 1;
     tutorial.updated_at = now;
+    // Keep the tutorial's own title/description in sync too, not just the
+    // version body — otherwise the Hub card and page header go stale.
+    tutorial.title = tutorial.title.replace(replaceRegex(), newTerm);
+    tutorial.description = tutorial.description.replace(replaceRegex(), newTerm);
 
     const action: AgentAction = {
       id: nextId('aa'),
