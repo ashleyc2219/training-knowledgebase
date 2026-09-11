@@ -90,6 +90,40 @@ Follow the on-screen guidance to complete the task.
 This tutorial was auto-generated from recurring support tickets. Expect the agent to refine it as feedback comes in.`;
 }
 
+// Hand-written content for the demo's known scenarios, used when Claude
+// isn't available (no key / no credits / offline). This is the second
+// fallback tier — real, specific writing instead of the generic template,
+// costs nothing, and has zero live-demo risk. Falls through to the plain
+// template for any topic that isn't one of these.
+const CURATED_TUTORIALS: Record<string, string> = {
+  'building pivottables with copilot': `# Building PivotTables with Copilot
+
+## Overview
+
+Copilot can build a starting PivotTable for you directly from a data range in Excel — no need to manually pick fields and drag them into the Rows, Columns, and Values areas yourself.
+
+## Step 1
+
+Select any cell inside your data range, then open Copilot from the Home tab (or the Copilot icon in the ribbon).
+
+## Step 2
+
+Type a request like "Build a PivotTable summarizing revenue by region and month" and press Enter. Copilot reads your column headers to figure out which fields are numeric (for Values) and which are categorical (for Rows/Columns).
+
+## Step 3
+
+Copilot inserts the PivotTable on a new sheet and highlights the fields it chose. Review the field list on the right — you can drag fields between Rows, Columns, and Values just like a normal PivotTable to fine-tune it.
+
+## Tips
+
+- Be specific ("by region and month") rather than "summarize this" — Copilot produces a more useful starting layout.
+- If a column looks numeric but is formatted as text, Copilot may skip it — check the Values area and reformat the column if a field is missing.`,
+};
+
+function curatedTutorial(topic: string): string | null {
+  return CURATED_TUTORIALS[topic.trim().toLowerCase()] ?? null;
+}
+
 // Real generation when a Claude key is configured (see vite.config.ts);
 // falls back to the plain template on any failure so a missing/invalid
 // key or a network hiccup never breaks the demo.
@@ -114,7 +148,7 @@ Write the tutorial in Markdown with this exact structure:
 Keep it concise, like an internal quick-reference card. Output ONLY the markdown, no commentary before or after.`;
 
   const generated = await generateWithClaude(prompt);
-  return generated ?? generateTutorialTemplate(gap.topic, gap.description);
+  return generated ?? curatedTutorial(gap.topic) ?? generateTutorialTemplate(gap.topic, gap.description);
 }
 
 async function createTutorialFromGap(gap: KnowledgeGap): Promise<{ tutorial: Tutorial; version: TutorialVersion }> {
@@ -358,9 +392,40 @@ export function ingestReleaseNote(text: string): IngestResult {
 
 const NEGATIVE_FEEDBACK_THRESHOLD = 2;
 
-// Real rewrite when a Claude key is configured; falls back to appending a
-// generic clarifying note on any failure.
+// Same two-tier fallback as tutorial creation: hand-written revision for
+// the demo's known scenario, generic appended note for anything else.
+const CURATED_REFINEMENTS: Record<string, string> = {
+  'summarizing data in excel with copilot': `# Summarizing Data in Excel with Copilot
+
+## Overview
+
+Ask Copilot to summarize and highlight trends in a worksheet.
+
+## Step 1
+
+Open your workbook and select a data range, including the header row.
+
+## Step 2
+
+Open Copilot. Depending on your ribbon layout, the Copilot icon appears either on the **Home** tab or in a dedicated **Copilot** tab at the far right of the ribbon. If you don't see it in either place, check *View > Ribbon* to confirm the Copilot add-in is enabled, or search "Copilot" in the top search bar to launch it directly.
+
+## Step 3
+
+Ask "Summarize this data" or "Highlight the top 5 rows by revenue".
+
+## Tips
+
+Copilot works best on data with headers in row 1. If it doesn't respond to a request, make sure your selection includes the header row, not just the data.`,
+};
+
+function curatedRefinement(title: string): string | null {
+  return CURATED_REFINEMENTS[title.trim().toLowerCase()] ?? null;
+}
+
+// Real rewrite when a Claude key is configured; falls back to curated
+// content for the demo's known scenario, then a generic appended note.
 async function generateRefinedContent(
+  tutorialTitle: string,
   currentContent: string,
   topComment: string | undefined,
   negativeCount: number,
@@ -381,6 +446,7 @@ Rewrite the tutorial to address this feedback — clarify the confusing part (li
   const generated = await generateWithClaude(prompt);
   return (
     generated ??
+    curatedRefinement(tutorialTitle) ??
     `${currentContent}\n\n## Update\n\nThis tutorial was clarified based on recent user feedback.`
   );
 }
@@ -414,7 +480,7 @@ export async function reviewTutorial(tutorialId: string): Promise<IngestResult> 
     id: nextId('tv'),
     tutorial_id: tutorialId,
     version: current.version + 1,
-    content: await generateRefinedContent(current.content, topComment, negative.length, avg),
+    content: await generateRefinedContent(tutorial.title, current.content, topComment, negative.length, avg),
     change_type: 'REFINE',
     change_reason: reason,
     evidence: [
