@@ -9,6 +9,7 @@
 // these functions get replaced by fetch() calls; callers don't change.
 
 import { store, nextId } from './store';
+import { generateWithClaude } from './llm';
 import type {
   AgentAction,
   IngestResult,
@@ -89,7 +90,34 @@ Follow the on-screen guidance to complete the task.
 This tutorial was auto-generated from recurring support tickets. Expect the agent to refine it as feedback comes in.`;
 }
 
-function createTutorialFromGap(gap: KnowledgeGap): { tutorial: Tutorial; version: TutorialVersion } {
+// Real generation when a Claude key is configured (see vite.config.ts);
+// falls back to the plain template on any failure so a missing/invalid
+// key or a network hiccup never breaks the demo.
+async function generateTutorialContent(gap: KnowledgeGap): Promise<string> {
+  const prompt = `You are a technical writer creating a short internal training tutorial for Microsoft Copilot users.
+
+Topic: "${gap.topic}"
+Why this is needed: ${gap.description}
+It was requested because employees submitted support tickets like: ${gap.source_tickets.join(', ')}
+
+Write the tutorial in Markdown with this exact structure:
+# ${gap.topic}
+## Overview
+(1-2 sentences)
+## Step 1
+## Step 2
+## Step 3
+(concrete, plausible Copilot UI instructions — invent realistic but reasonable button/menu names)
+## Tips
+(1-2 sentences)
+
+Keep it concise, like an internal quick-reference card. Output ONLY the markdown, no commentary before or after.`;
+
+  const generated = await generateWithClaude(prompt);
+  return generated ?? generateTutorialTemplate(gap.topic, gap.description);
+}
+
+async function createTutorialFromGap(gap: KnowledgeGap): Promise<{ tutorial: Tutorial; version: TutorialVersion }> {
   const now = new Date().toISOString();
   const tutorial: Tutorial = {
     id: nextId('tut'),
@@ -109,7 +137,7 @@ function createTutorialFromGap(gap: KnowledgeGap): { tutorial: Tutorial; version
     id: nextId('tv'),
     tutorial_id: tutorial.id,
     version: 1,
-    content: generateTutorialTemplate(gap.topic, gap.description),
+    content: await generateTutorialContent(gap),
     change_type: 'CREATE',
     change_reason: `Recurring knowledge gap detected across ${gap.evidence_count} support tickets.`,
     evidence: [...gap.source_tickets],
@@ -125,7 +153,7 @@ function createTutorialFromGap(gap: KnowledgeGap): { tutorial: Tutorial; version
 
 // ---- Ticket workflow (§14-15) ---------------------------------------------
 
-export function ingestTicket(text: string): IngestResult {
+export async function ingestTicket(text: string): Promise<IngestResult> {
   const trimmed = text.trim();
   if (!trimmed) return { message: 'Ticket text is empty.', agent_actions: [] };
 
@@ -166,7 +194,7 @@ export function ingestTicket(text: string): IngestResult {
 
     if (bestGap.evidence_count >= RECURRING_THRESHOLD && bestGap.status === 'candidate') {
       bestGap.status = 'recurring';
-      const { tutorial, version } = createTutorialFromGap(bestGap);
+      const { tutorial, version } = await createTutorialFromGap(bestGap);
       bestGap.status = 'resolved';
       bestGap.resolved_tutorial_id = tutorial.id;
       const action: AgentAction = {
@@ -330,7 +358,34 @@ export function ingestReleaseNote(text: string): IngestResult {
 
 const NEGATIVE_FEEDBACK_THRESHOLD = 2;
 
-export function reviewTutorial(tutorialId: string): IngestResult {
+// Real rewrite when a Claude key is configured; falls back to appending a
+// generic clarifying note on any failure.
+async function generateRefinedContent(
+  currentContent: string,
+  topComment: string | undefined,
+  negativeCount: number,
+  avg: number,
+): Promise<string> {
+  const prompt = `You are refining an internal Microsoft Copilot tutorial based on user feedback.
+
+Current tutorial (Markdown):
+---
+${currentContent}
+---
+
+Feedback signal: ${negativeCount} users rated it 2/5 or lower (average ${avg.toFixed(1)}/5).
+${topComment ? `A representative comment: "${topComment}"` : 'No specific comment was left, but users found a step unclear.'}
+
+Rewrite the tutorial to address this feedback — clarify the confusing part (likely the step the comment refers to), keep the same Markdown heading structure (# title, ## Overview, ## Step N, ## Tips), and keep the same overall length. Output ONLY the full revised Markdown tutorial, no commentary before or after.`;
+
+  const generated = await generateWithClaude(prompt);
+  return (
+    generated ??
+    `${currentContent}\n\n## Update\n\nThis tutorial was clarified based on recent user feedback.`
+  );
+}
+
+export async function reviewTutorial(tutorialId: string): Promise<IngestResult> {
   const tutorial = store.tutorials.find((t) => t.id === tutorialId);
   if (!tutorial) return { message: 'Tutorial not found.', agent_actions: [] };
 
@@ -359,7 +414,7 @@ export function reviewTutorial(tutorialId: string): IngestResult {
     id: nextId('tv'),
     tutorial_id: tutorialId,
     version: current.version + 1,
-    content: `${current.content}\n\n## Update\n\nThis tutorial was clarified based on recent user feedback.`,
+    content: await generateRefinedContent(current.content, topComment, negative.length, avg),
     change_type: 'REFINE',
     change_reason: reason,
     evidence: [

@@ -22,11 +22,17 @@ const LATENCY = 150;
 const delay = <T>(value: T): Promise<T> =>
   new Promise((resolve) => setTimeout(() => resolve(value), LATENCY));
 
-// Simulated "agent thinking" latency for event submissions — real work,
-// just slower, so the UI can show a processing state that feels honest.
+// Event submissions now do real async work (a Claude call, when configured
+// — see vite.config.ts / src/api/llm.ts). This just enforces a minimum
+// "thinking" delay so the UI's processing state reads consistently whether
+// the call was instant (template fallback) or took a couple of seconds
+// (a real Claude round trip) — it never adds to real latency, only floors it.
 const AGENT_LATENCY = 700;
-const agentDelay = <T>(value: T): Promise<T> =>
-  new Promise((resolve) => setTimeout(() => resolve(value), AGENT_LATENCY));
+function withMinDelay<T>(promise: Promise<T>, ms = AGENT_LATENCY): Promise<T> {
+  return Promise.all([promise, new Promise<void>((resolve) => setTimeout(resolve, ms))]).then(
+    ([result]) => result,
+  );
+}
 
 // ---- Tutorials --------------------------------------------------------
 
@@ -151,15 +157,15 @@ export async function getReleases(): Promise<ReleaseNote[]> {
 }
 
 export async function submitTicketEvent(text: string): Promise<IngestResult> {
-  return agentDelay(ingestTicket(text));
+  return withMinDelay(ingestTicket(text));
 }
 
 export async function submitReleaseEvent(text: string): Promise<IngestResult> {
-  return agentDelay(ingestReleaseNote(text));
+  return withMinDelay(Promise.resolve(ingestReleaseNote(text)));
 }
 
 export async function reviewTutorial(tutorialId: string): Promise<IngestResult> {
-  return agentDelay(runReview(tutorialId));
+  return withMinDelay(runReview(tutorialId));
 }
 
 // ---- Analytics / tutorial health ------------------------------------------
