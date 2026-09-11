@@ -4,6 +4,8 @@ import type {
   Feedback,
   KnowledgeGap,
   AgentAction,
+  Ticket,
+  ReleaseNote,
 } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -242,6 +244,7 @@ export const feedback: Feedback[] = [
   // excel — needs review
   { id: 'fb17', tutorial_id: 'tut_excel_summarize', tutorial_version_id: 'tv_excel_summarize_1', user_id: 'employee_442', rating: 2, comment: 'Copilot button was not in the ribbon for me.', created_at: '2026-08-22T10:00:00Z' },
   { id: 'fb18', tutorial_id: 'tut_excel_summarize', tutorial_version_id: 'tv_excel_summarize_1', user_id: 'employee_301', rating: 3, comment: 'Steps are a bit generic.', created_at: '2026-08-24T10:00:00Z' },
+  { id: 'fb19', tutorial_id: 'tut_excel_summarize', tutorial_version_id: 'tv_excel_summarize_1', user_id: 'employee_559', rating: 1, comment: 'Step 2 button is missing on my ribbon layout.', created_at: '2026-08-26T09:00:00Z' },
 ];
 
 export const knowledgeGaps: KnowledgeGap[] = [
@@ -330,5 +333,37 @@ export const agentActions: AgentAction[] = [
     evidence: ['Ticket #210', 'Ticket #233', 'Ticket #240'],
     outcome: 'Tutorial published; early ratings are mixed (2.8 avg) — flagged for review.',
     created_at: '2026-08-20T11:00:00Z',
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Tickets — the raw events that fed the knowledge gaps above, plus a couple
+// of unrelated one-offs to show the agent correctly ignoring noise.
+// ---------------------------------------------------------------------------
+
+export const tickets: Ticket[] = [
+  { id: 'Ticket #101', title: 'How do I prepare for a meeting?', description: 'How do I prepare for a meeting?', status: 'triaged', matched_gap_id: 'kg_meeting_prep', matched_gap_topic: 'Meeting Preparation', created_at: '2026-07-28T09:10:00Z' },
+  { id: 'Ticket #145', title: 'Where is Meeting Summary?', description: 'Where is Meeting Summary?', status: 'triaged', matched_gap_id: 'kg_meeting_prep', matched_gap_topic: 'Meeting Preparation', created_at: '2026-07-30T14:00:00Z' },
+  { id: 'Ticket #192', title: 'How can Copilot help with customer meetings?', description: 'How can Copilot help with customer meetings?', status: 'triaged', matched_gap_id: 'kg_meeting_prep', matched_gap_topic: 'Meeting Preparation', created_at: '2026-08-01T17:00:00Z' },
+  { id: 'Ticket #260', title: 'Can Copilot build a PivotTable for me?', description: 'Can Copilot build a PivotTable for me?', status: 'triaged', matched_gap_id: 'kg_excel_pivot', matched_gap_topic: 'Building PivotTables with Copilot', created_at: '2026-09-05T09:00:00Z' },
+  { id: 'Ticket #266', title: 'Asked Copilot to make a pivot table, nothing happened', description: 'Asked Copilot to make a pivot table, nothing happened', status: 'triaged', matched_gap_id: 'kg_excel_pivot', matched_gap_topic: 'Building PivotTables with Copilot', created_at: '2026-09-09T12:00:00Z' },
+  { id: 'Ticket #305', title: 'My password reset email never arrived', description: 'My password reset email never arrived', status: 'triaged', created_at: '2026-09-02T10:00:00Z' },
+  { id: 'Ticket #311', title: 'Copilot license not showing up after purchase', description: 'Copilot license not showing up after purchase', status: 'triaged', created_at: '2026-09-04T08:30:00Z' },
+];
+
+// ---------------------------------------------------------------------------
+// Product releases — Release #45 is the one already reflected in Meeting
+// Preparation v3. New ones can be submitted live from the Improvement
+// Console to demo the release workflow.
+// ---------------------------------------------------------------------------
+
+export const releases: ReleaseNote[] = [
+  {
+    id: 'Release #45',
+    title: 'Meeting Summary renamed to Prepare',
+    description: 'Meeting Summary has been renamed to Prepare.',
+    release_date: '2026-09-10T00:00:00Z',
+    status: 'processed',
+    created_at: '2026-09-10T14:15:00Z',
   },
 ];

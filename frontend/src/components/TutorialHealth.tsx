@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { TutorialHealth as TutorialHealthType } from '../types';
+import { reviewTutorial } from '../api/client';
 import StatusBadge from './StatusBadge';
 
 interface Props {
@@ -7,9 +9,19 @@ interface Props {
   slug: string;
   onViewHistory: () => void;
   expanded: boolean;
+  onReviewed: (message: string) => void;
 }
 
-export default function TutorialHealth({ health, slug, onViewHistory, expanded }: Props) {
+export default function TutorialHealth({ health, slug, onViewHistory, expanded, onReviewed }: Props) {
+  const [reviewing, setReviewing] = useState(false);
+
+  const handleReview = async () => {
+    setReviewing(true);
+    const result = await reviewTutorial(health.tutorial_id);
+    setReviewing(false);
+    onReviewed(result.message);
+  };
+
   return (
     <div className="bg-white border border-slate-200 rounded-xl p-5">
       <div className="flex items-start justify-between gap-3">
@@ -49,6 +61,15 @@ export default function TutorialHealth({ health, slug, onViewHistory, expanded }
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {health.recommended_action === 'REFINE' && (
+            <button
+              onClick={handleReview}
+              disabled={reviewing}
+              className="text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 px-3 py-1.5 rounded-lg transition-colors"
+            >
+              {reviewing ? 'Analyzing feedback…' : 'Run Agent Review'}
+            </button>
+          )}
           <Link
             to={`/tutorials/${slug}`}
             className="text-sm font-medium text-slate-600 hover:text-slate-900 px-3 py-1.5 rounded-lg hover:bg-slate-100"

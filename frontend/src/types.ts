@@ -110,3 +110,33 @@ export interface VersionDiff {
   agent_action: string;
   outcome: string;
 }
+
+// ---- Event sources (§29 /api/events/*) ------------------------------------
+// Tickets and release notes are ingestion inputs, not knowledge-base
+// artifacts — they don't get a browsing page, but the Improvement Console
+// needs to show them arriving and show the agent reacting to them.
+
+export interface Ticket {
+  id: string;
+  title: string;
+  description: string;
+  status: 'new' | 'triaged';
+  matched_gap_id?: string;
+  matched_gap_topic?: string;
+  created_at: string;
+}
+
+export interface ReleaseNote {
+  id: string;
+  title: string;
+  description: string;
+  release_date: string;
+  status: 'new' | 'processed';
+  created_at: string;
+}
+
+// Result of an ingestion call — lets the UI narrate what the agent just did.
+export interface IngestResult {
+  message: string;
+  agent_actions: AgentAction[];
+}

@@ -3,50 +3,51 @@
 // for, and each resolves a Promise (like a real fetch would) so swapping in
 // `fetch(...)` later touches only this file, not the components that call it.
 
-import {
-  tutorials,
-  tutorialVersions,
-  feedback as feedbackSeed,
-  knowledgeGaps,
-  agentActions,
-} from './mockData';
+import { store } from './store';
+import { ingestTicket, ingestReleaseNote, reviewTutorial as runReview } from './agentEngine';
 import type {
   Tutorial,
   TutorialVersion,
   Feedback,
   KnowledgeGap,
   AgentAction,
+  Ticket,
+  ReleaseNote,
   TutorialHealth,
   VersionDiff,
+  IngestResult,
 } from '../types';
 
 const LATENCY = 150;
 const delay = <T>(value: T): Promise<T> =>
   new Promise((resolve) => setTimeout(() => resolve(value), LATENCY));
 
-// In-memory mutable copy so submitted feedback shows up without a reload.
-let feedbackStore: Feedback[] = [...feedbackSeed];
+// Simulated "agent thinking" latency for event submissions — real work,
+// just slower, so the UI can show a processing state that feels honest.
+const AGENT_LATENCY = 700;
+const agentDelay = <T>(value: T): Promise<T> =>
+  new Promise((resolve) => setTimeout(() => resolve(value), AGENT_LATENCY));
 
 // ---- Tutorials --------------------------------------------------------
 
 export async function getTutorials(): Promise<Tutorial[]> {
-  return delay([...tutorials]);
+  return delay([...store.tutorials]);
 }
 
 export async function getTutorial(id: string): Promise<Tutorial | undefined> {
-  return delay(tutorials.find((t) => t.id === id || t.slug === id));
+  return delay(store.tutorials.find((t) => t.id === id || t.slug === id));
 }
 
 export async function getTutorialVersions(tutorialId: string): Promise<TutorialVersion[]> {
   return delay(
-    tutorialVersions
+    store.tutorialVersions
       .filter((v) => v.tutorial_id === tutorialId)
       .sort((a, b) => a.version - b.version),
   );
 }
 
 export async function getTutorialVersion(versionId: string): Promise<TutorialVersion | undefined> {
-  return delay(tutorialVersions.find((v) => v.id === versionId));
+  return delay(store.tutorialVersions.find((v) => v.id === versionId));
 }
 
 function diffContent(fromContent: string, toContent: string) {
@@ -72,7 +73,7 @@ export async function getTutorialDiff(
   fromVersion: number,
   toVersion: number,
 ): Promise<VersionDiff | undefined> {
-  const versions = tutorialVersions.filter((v) => v.tutorial_id === tutorialId);
+  const versions = store.tutorialVersions.filter((v) => v.tutorial_id === tutorialId);
   const from = versions.find((v) => v.version === fromVersion);
   const to = versions.find((v) => v.version === toVersion);
   if (!from || !to) return delay(undefined);
@@ -92,7 +93,7 @@ export async function getTutorialDiff(
 
 export async function getFeedback(tutorialId: string): Promise<Feedback[]> {
   return delay(
-    feedbackStore
+    store.feedback
       .filter((f) => f.tutorial_id === tutorialId)
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
   );
@@ -113,59 +114,86 @@ export async function submitFeedback(
     comment,
     created_at: new Date().toISOString(),
   };
-  feedbackStore = [entry, ...feedbackStore];
+  store.feedback.unshift(entry);
   return delay(entry);
 }
 
 // ---- Knowledge gaps -------------------------------------------------------
 
 export async function getKnowledgeGaps(): Promise<KnowledgeGap[]> {
-  return delay([...knowledgeGaps]);
+  return delay([...store.knowledgeGaps]);
 }
 
 export async function getKnowledgeGap(id: string): Promise<KnowledgeGap | undefined> {
-  return delay(knowledgeGaps.find((g) => g.id === id));
+  return delay(store.knowledgeGaps.find((g) => g.id === id));
 }
 
 // ---- Agent actions -------------------------------------------------------
 
 export async function getAgentActions(): Promise<AgentAction[]> {
   return delay(
-    [...agentActions].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
+    [...store.agentActions].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
   );
 }
 
 export async function getAgentAction(id: string): Promise<AgentAction | undefined> {
-  return delay(agentActions.find((a) => a.id === id));
+  return delay(store.agentActions.find((a) => a.id === id));
+}
+
+// ---- Events (§29 /api/events/*) — tickets, releases, feedback review ------
+
+export async function getTickets(): Promise<Ticket[]> {
+  return delay([...store.tickets].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)));
+}
+
+export async function getReleases(): Promise<ReleaseNote[]> {
+  return delay([...store.releases].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)));
+}
+
+export async function submitTicketEvent(text: string): Promise<IngestResult> {
+  return agentDelay(ingestTicket(text));
+}
+
+export async function submitReleaseEvent(text: string): Promise<IngestResult> {
+  return agentDelay(ingestReleaseNote(text));
+}
+
+export async function reviewTutorial(tutorialId: string): Promise<IngestResult> {
+  return agentDelay(runReview(tutorialId));
 }
 
 // ---- Analytics / tutorial health ------------------------------------------
 
 export async function getTutorialHealth(): Promise<TutorialHealth[]> {
-  const results: TutorialHealth[] = tutorials.map((t) => {
-    const versions = tutorialVersions
+  const results: TutorialHealth[] = store.tutorials.map((t) => {
+    const versions = store.tutorialVersions
       .filter((v) => v.tutorial_id === t.id)
       .sort((a, b) => a.version - b.version);
 
     const history = versions.map((v) => {
-      const fb = feedbackStore.filter((f) => f.tutorial_version_id === v.id);
+      const fb = store.feedback.filter((f) => f.tutorial_version_id === v.id);
       const avg = fb.length ? fb.reduce((s, f) => s + f.rating, 0) / fb.length : t.average_rating;
       const negative = fb.filter((f) => f.rating <= 2).length;
       return {
         version: v.version,
         average_rating: Math.round(avg * 10) / 10,
+        feedback_count: fb.length,
         negative_feedback_count: negative,
         related_ticket_count: v.change_type === 'CREATE' ? v.evidence.length : 0,
-        outdated_steps: v.change_type === 'UPDATE' ? 0 : 0,
+        outdated_steps: 0,
       };
     });
 
     const latest = history[history.length - 1];
-    const relatedTickets = knowledgeGaps
+    const relatedTickets = store.knowledgeGaps
       .filter((g) => g.feature_id === t.feature_id)
       .reduce((s, g) => s + g.evidence_count, 0);
 
-    const needsAttention = t.status === 'needs_review' || (latest?.average_rating ?? 5) < 3.2;
+    // Only flag on rating/status — a version with no feedback yet isn't
+    // "bad", it's just unrated, and shouldn't trip REFINE.
+    const hasFeedback = (latest?.feedback_count ?? 0) > 0;
+    const needsAttention =
+      t.status === 'needs_review' || (hasFeedback && (latest?.average_rating ?? 5) < 3.2);
 
     return {
       tutorial_id: t.id,
@@ -193,11 +221,11 @@ export interface AnalyticsOverview {
 
 export async function getAnalyticsOverview(): Promise<AnalyticsOverview> {
   const avg =
-    tutorials.reduce((s, t) => s + t.average_rating, 0) / (tutorials.length || 1);
+    store.tutorials.reduce((s, t) => s + t.average_rating, 0) / (store.tutorials.length || 1);
   return delay({
-    total_tutorials: tutorials.length,
-    active_knowledge_gaps: knowledgeGaps.filter((g) => g.status !== 'resolved' && g.status !== 'ignored').length,
-    agent_actions_last_30_days: agentActions.length,
+    total_tutorials: store.tutorials.length,
+    active_knowledge_gaps: store.knowledgeGaps.filter((g) => g.status !== 'resolved' && g.status !== 'ignored').length,
+    agent_actions_last_30_days: store.agentActions.length,
     average_rating_across_tutorials: Math.round(avg * 10) / 10,
   });
 }
