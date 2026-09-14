@@ -24,6 +24,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "aws: 需要真實 AWS 帳號與憑證的整合測試；未設 TKB_RUN_AWS_INTEGRATION=1 時由 tests/conftest.py 自動跳過",
+]
 
 [tool.ruff]
 line-length = 100
