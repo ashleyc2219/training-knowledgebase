@@ -6,21 +6,22 @@
 AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**不是** `TransientError`，
 呼叫端不得自動重試）。
 
-檔案分成四段，Phase 07／08／10 直接接在後面，不必改動前面幾段：
+檔案分成四段，Phase 10 直接接在後面，不必改動前面幾段：
 1. 型別別名與保留屬性
 2. 實體 → PK 的分派
 3. Decimal codec 與 `item_to_model`（DynamoDB 只收 `Decimal`，不收 `float`）
 4. `Repository`：metadata CRUD、`revision_of`、四個具名 getter，不走模型的
    `put_meta_item`／`get_meta_item`（服務 `OPS#`／`CONFIG#`／`SEQ#`／`LEASE#`），
    再往下是 Phase 07 的 S3 物件（`put_object`／`get_object`／`object_exists`）與
-   關係邊（`put_edge`／`list_edges`，共用私有的 `_paged`）
+   關係邊（`put_edge`／`list_edges`，共用私有的 `_paged`），最後是 Phase 08 的三個公開查詢
+   （`query_pk`／`query_by_target`／`scan_entity`）與六個固定讀取（`get_steps` 與五個 `list_*`）
 """
 
 from collections.abc import Callable, Mapping
 from decimal import Decimal
 from typing import Any, TypeVar
 
-from boto3.dynamodb.conditions import ConditionBase, Key
+from boto3.dynamodb.conditions import Attr, ConditionBase, Key
 from botocore.exceptions import ClientError
 
 from training_kb.errors import (
@@ -156,9 +157,11 @@ class Repository:
     物件沒有穩定的靜態型別，用 `Any` 才能在 mypy strict 下呼叫 `put_item`／`get_item`。
     """
 
-    def __init__(self, table: object, bucket: object | None = None) -> None:
+    def __init__(self, table: object, bucket: object | None = None, *,
+                 page_size: int | None = None) -> None:
         self._table: Any = table
         self._bucket: Any = bucket
+        self._page_size = page_size
 
     # --- metadata 寫入 ---
 
@@ -394,9 +397,14 @@ class Repository:
         """反覆呼叫同一個 boto3 操作直到回應沒有 `LastEvaluatedKey`，**空頁不早停**。
 
         DynamoDB 的一頁可能沒有任何 `Items` 卻仍帶 `LastEvaluatedKey`（被過濾掉或撞到 1 MB
-        上限），看到空頁就 `break` 會靜默漏資料。本 Phase 只有 `list_edges` 用它；
-        Phase 08 會擴充（加 `Limit`）再給三個公開查詢共用，所以留在 `Repository` 內部。
+        上限），看到空頁就 `break` 會靜默漏資料。`list_edges` 與 Phase 08 的三個公開查詢
+        共用它，所以留在 `Repository` 內部，外部不得 import。
+
+        `page_size` 有值時每個請求都帶同一個 `Limit`（含續查的那幾次），讓小資料也能製造
+        多頁與空頁；正式程式不設定它，讓 DynamoDB 用預設的 1 MB 分頁。
         """
+        if self._page_size is not None:
+            arguments["Limit"] = self._page_size
         items: list[DynamoItem] = []
         while True:
             response = operation(**arguments)
@@ -428,3 +436,47 @@ class Repository:
                     f"edge target does not match sort key: {str(item['PK'])} {sort_key}")
             edges.append(item)
         return edges
+
+    # --- 三個公開查詢 ---
+
+    def query_pk(self, pk: str, *, sk_prefix: str | None = None,
+                 consistent: bool = True) -> list[DynamoItem]:
+        """基表 Query：一個 PK 上的全部 item（`META` 與各種邊都算），讀完所有分頁。
+
+        `sk_prefix` 走 `begins_with`，所以 `query_pk(pk, sk_prefix="REFERENCES#")` 只回那一種
+        關係。基表可以一致讀取，結果能直接當業務判斷依據（設計 §10）。回的是 raw item，
+        要模型一律經 `item_to_model`。
+        """
+        condition: ConditionBase = Key("PK").eq(pk)
+        if sk_prefix is not None:
+            condition = condition & Key("SK").begins_with(sk_prefix)
+        return self._paged(self._table.query, KeyConditionExpression=condition,
+                           ConsistentRead=consistent)
+
+    def query_by_target(self, target_pk: str) -> list[DynamoItem]:
+        """`by_target` GSI Query：誰指向這個終點。回的是**候選**，不是答案。
+
+        GSI 只有最終一致而且是 `KEYS_ONLY`（索引裡只有 `PK`／`SK`／`target`），所以這裡沒有、
+        也不能有 `ConsistentRead`；任何業務判斷都要拿候選的 PK 回基表一致讀取核對，
+        `list_feedback_of_version` 就是範例。等固定秒數不算核對（設計 §10 明文禁止）。
+        索引名稱與 Phase 09 CDK 的 `TARGET_INDEX` 是同一個值，改名要一起改。
+        """
+        return self._paged(self._table.query, IndexName="by_target",
+                           KeyConditionExpression=Key("target").eq(target_pk))
+
+    def scan_entity(self, entity: str, *, consistent: bool = True,
+                    meta_only: bool = True) -> list[DynamoItem]:
+        """基表 Scan + `entity` 過濾；預設只回實體本體（`SK == META`）。
+
+        `entity` 的值等於 PK 前綴（00A §3.6），所以同一個起點的關係邊也帶同一個 `entity`，
+        `scan_entity("RULE")` 會連 `APPLIED_TO#` 邊一起掃到。邊沒有模型欄位，直接
+        `item_to_model` 會整筆 `ValidationError`，所以預設 `meta_only=True`，五個 `list_*`
+        什麼都不用做就只看得到本體；唯一要傳 `meta_only=False` 的是 `get_steps`
+        （STEP 沒有 `META` item）。過濾放在讀完所有分頁之後，不寫進 `FilterExpression`：
+        一個請求只送一條 filter，而且空頁不早停的行為只由 `_paged` 負責。
+        """
+        rows = self._paged(self._table.scan, FilterExpression=Attr("entity").eq(entity),
+                           ConsistentRead=consistent)
+        if not meta_only:
+            return rows
+        return [row for row in rows if str(row["SK"]) == META]
