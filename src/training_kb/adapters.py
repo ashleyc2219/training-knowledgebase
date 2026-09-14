@@ -14,7 +14,8 @@ PROC 保存的是 path 字串，不保存 Ticket 文字、使用者、ID 或任�
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 from training_kb.errors import PermanentError
 from training_kb.pipelines.common import JSONValue
@@ -66,3 +67,69 @@ def resolve_jsonpath(root: JSONValue, path: str) -> JSONValue:
             value = value[index]
         position = match.end()
     return value
+
+
+# --- 2. 工具白名單（Phase 36）-------------------------------------------------
+
+TOOL_NAMES: frozenset[str] = frozenset({
+    "parse_github_issue", "parse_discord_message", "parse_support_email", "parse_pr_diff",
+    "parse_changelog", "normalize_ticket", "normalize_release", "validate"})
+"""Training KB 明列的八個接入工具（00A §6.8）。
+
+**固定八個**，不得由事件 payload 或模型輸出動態擴充：這裡沒有 shell、browser、發布
+或任意 AWS 工具，Agent 的自由度只到「挑哪一個 parser」為止（設計 §7.2、ING Rule 10）。
+"""
+
+FINAL_TOOL = "validate"
+"""已記錄序列的最後一步一定要是它（ING Rule 13）。"""
+
+SUB_RELEASE_INDEX = "index"
+"""`normalize_release` 的子 Release 序號參數名（決策 F14）；也是唯一允許字面值的參數名。"""
+
+PARSER_KIND: Mapping[str, str] = {
+    "parse_github_issue": "ticket", "parse_discord_message": "ticket", "parse_pr_diff": "release",
+    "parse_support_email": "ticket", "parse_changelog": "release"}
+"""每個 parser 產出哪一種類型；`normalize_*` 用它擋掉「PR diff 拿去做 Ticket」的配對。"""
+
+AdapterTool = Callable[[Mapping[str, JSONValue]], JSONValue]
+"""一個接入工具：吃已解析好的參數、回一個可直接進 JSON 的值。工具拿不到 `Settings`。"""
+
+_INDEX_LITERAL = re.compile(r"[1-9][0-9]*")
+
+
+def is_index_literal(tool: str, name: str, value: str) -> bool:
+    """這個參數是不是「唯一允許的字面值」——F14 的子 Release 序號。
+
+    三個條件要**同時**成立：工具是 `normalize_release`、參數名是 `SUB_RELEASE_INDEX`、
+    值符合 `[1-9][0-9]*`（`k` 從 1 起算，所以 `"0"` 不算）。這是這條例外的唯一判斷處
+    （00A §6.8），`rote.py` 的兩個函式都 import 它，不各自再寫一次條件。
+
+    序號是「這條序列的第幾筆」這個位置資訊，不含 ID、文字、使用者或時間，所以它不是
+    事件真值；其餘任何不以 `$event`／`$steps` 開頭的參數值一律視為真值而拒絕。
+    """
+    return (tool == "normalize_release" and name == SUB_RELEASE_INDEX
+            and _INDEX_LITERAL.fullmatch(value) is not None)
+
+
+@dataclass(frozen=True)
+class ToolRegistry:
+    """可呼叫工具的白名單；建構時與 `run()` 都比對 `TOOL_NAMES`。
+
+    兩處都擋是刻意的：建構時擋住「把 shell 註冊進來」，`run()` 擋住「模型輸出一個沒註冊
+    的名字」。不提供執行期註冊 API——registry 的內容在啟動時就固定（設計 §7.2）。
+    測試可以只放子集合，但**名稱**永遠只能來自那八個。
+    """
+
+    tools: Mapping[str, AdapterTool]
+
+    def __post_init__(self) -> None:
+        unknown = sorted(set(self.tools) - TOOL_NAMES)
+        if unknown:
+            raise PermanentError(f"工具不在白名單: {', '.join(unknown)}")
+
+    def run(self, name: str, arguments: Mapping[str, JSONValue]) -> JSONValue:
+        """執行一個已註冊工具；未註冊名稱丟 `PermanentError`，不 fallback 也不動態載入。"""
+        tool = self.tools.get(name)
+        if tool is None:
+            raise PermanentError(f"工具不在白名單或未註冊: {name}")
+        return tool(arguments)

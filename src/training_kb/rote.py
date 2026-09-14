@@ -20,9 +20,17 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from training_kb.adapters import (
+    FINAL_TOOL,
+    PATH_ROOTS,
+    TOOL_NAMES,
+    ToolRegistry,
+    is_index_literal,
+    resolve_jsonpath,
+)
 from training_kb.clock import to_iso
 from training_kb.errors import PermanentError
-from training_kb.models import ProcStatus, ProvenWorkflow
+from training_kb.models import ProcStatus, ProcStep, ProvenWorkflow
 from training_kb.operations import OperationCoordinator
 from training_kb.pipelines.common import JSONValue
 from training_kb.repository import DynamoValue, Repository
@@ -243,4 +251,59 @@ def proc_changes(proc: ProvenWorkflow) -> dict[str, DynamoValue]:
 
 
 # --- 5. 記錄步驟的驗證與執行（Phase 36 追加）----------------------------------
+
+
+def validate_recorded_steps(steps: Sequence[ProcStep]) -> None:
+    """檢查一串已記錄步驟是否可以保存／重放；不合法一律 `PermanentError`。
+
+    三件事，缺一不可（設計 §7.2、ING Rule 12／13）：
+
+    1. **至少一步，而且最後一步是 `validate`**——「中途驗證過」不算數，所以檢查的是
+       `steps[-1].tool == FINAL_TOOL`，而不是「validate 曾經出現」。
+    2. 每個工具名都在 `TOOL_NAMES` 裡，且 `validate` 只能出現在最後一步。
+    3. 每個參數值都是 JSONPath（`$event…`／`$steps…`）。唯一例外是 F14 的子 Release
+       序號，由 `is_index_literal` 判斷；其餘字面值一律視為**可能含事件真值**而拒絕。
+
+    這裡只看形狀，不解析 path 也不碰事件：真正的取值在 `execute_recorded_steps`。
+    """
+    if not steps or steps[-1].tool != FINAL_TOOL:
+        raise PermanentError("PROC 至少要有一步，且最後一步必須是 validate")
+    for position, step in enumerate(steps):
+        if step.tool not in TOOL_NAMES:
+            raise PermanentError(f"工具不在白名單: {step.tool}")
+        if step.tool == FINAL_TOOL and position != len(steps) - 1:
+            raise PermanentError("validate 只能是最後一步，不能只是「曾經出現」")
+        for name, value in step.args.items():
+            if is_index_literal(step.tool, name, value):
+                continue          # F14 子 Release 序號：是位置，不是事件真值
+            if not value.startswith(PATH_ROOTS):
+                raise PermanentError(f"步驟 {position} 的參數 {name} 不是 JSONPath，可能含事件真值")
+
+
+def execute_recorded_steps(event: RawEvent, steps: Sequence[ProcStep],
+                           registry: ToolRegistry) -> JSONValue:
+    """依序重放已記錄步驟，回最後一步（`validate`）的輸出。
+
+    值**只在執行當下**才解析：`ProcStep.args` 進來是什麼 path、出去還是同一個 path，
+    函式不回寫也不快取任何事件值（ING Rule 12）。前一步的輸出只留在記憶體的 `outputs`
+    清單裡，下一步用 `$steps[k]` 指過去；`root["steps"]` 與 `outputs` 是同一個 list 物件，
+    所以 append 之後上一步的結果立刻可被引用。
+
+    先 `validate_recorded_steps` 再跑：白名單、順序與真值三道檢查都在**呼叫任何工具之前**
+    完成，不合法時工具呼叫數是 0（設計 §7.2、決策 F07）。
+    """
+    validate_recorded_steps(steps)
+    outputs: list[JSONValue] = []
+    root: JSONValue = {"steps": outputs, "event": {
+        "domain": event.domain, "adapter": event.adapter, "event_type": event.event_type,
+        "headers": dict(event.headers), "payload": dict(event.payload)}}
+    for step in steps:
+        arguments: dict[str, JSONValue] = {
+            name: int(value) if is_index_literal(step.tool, name, value)
+            else resolve_jsonpath(root, value)
+            for name, value in step.args.items()}
+        outputs.append(registry.run(step.tool, arguments))
+    return outputs[-1]
+
+
 # --- 6. 三層 normalize 與成功提交（Phase 37 追加）-----------------------------
