@@ -10,7 +10,7 @@
 
 ## 全域限制
 
-- 唯一主來源是 [Training KB 設計 §7.3、§7.4、§9.2、§10](../../design/training-kb.md)。前置為 [Phase 26：教學退役與後繼導向](./26-Phase26-教學退役與後繼導向.md)，未通過時停止；下一階段是 [Phase 28：引用 Backfill 與規則投影重建](./28-Phase28-引用Backfill與規則投影重建.md)。
+- 唯一主來源是 [Training KB 設計 §7.3、§7.4、§9.2、§10](../../design/training-kb.md)。**前置更正（controller 2026-09-14 的實作波次）：** 真正的前置是 [Phase 24：單篇教學發布提交](./24-Phase24-單篇教學發布提交.md)（`Tutorial.current_version` 與 `VERSION.published_at` 由它同筆切換，本 Phase 的「目前已發布版」判定才有資料可讀）；[Phase 26：教學退役與後繼導向](./26-Phase26-教學退役與後繼導向.md) 排在本 Phase **之後**（依賴鏈是 P24→P27→P28，P26 與 P28 同一波），本 Phase 只讀 `Tutorial.status`（Phase 04 的模型欄位），不依賴 P26 的退役流程，所以不必等它。下一階段是 [Phase 28：引用 Backfill 與規則投影重建](./28-Phase28-引用Backfill與規則投影重建.md)。
 - 本階段不做：不寫入任何 item 或邊（補邊與投影重建是 [Phase 28](./28-Phase28-引用Backfill與規則投影重建.md)）、不做語意搜尋與 safety net（[Phase 49](./49-Phase49-Release功能定位與Alias.md)、[Phase 50](./50-Phase50-Release步驟反查與Safety-Net.md)）、不決定 CREATE／KEEP（[Phase 40](./40-Phase40-Ticket-CREATE與KEEP.md)）、不新增第二個索引或圖資料庫。
 - **正常關係遍歷不呼叫 AI。** 本模組的函式一律不接受 `Writer` 參數；測試要直接斷言 FakeWriter 的呼叫次數為 0。
 - 歷史版本與 `published_at=null` 的未發布版本，命中只供追溯，**不得**被當成目前版；`current_version` 與 `published_at` 兩個條件必須同時成立。
@@ -152,9 +152,11 @@ A. GSI 候選（可能少，不會多） query_by_target(FEATURE#Prepare)
 
 ### Task 1：Feature 定位與版本清單
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
-`repo` 是本測試檔自備的假 `Repository` fixture：底層用一個 dict 當表，`add_feature`／`add_edge`／`set_rules_applied`／`set_current_version`／`set_status` 寫資料，`paginate(*pages)` 指定 Scan 切成哪幾頁（允許空頁），`gsi_hide(pk)` 讓某筆邊暫時不出現在 `query_by_target`（模擬 GSI 落後）。它只覆寫 Phase 08 的四個原語，被測的六個查詢都是真的程式。
+`repo` 是本測試檔自備的 fixture：底層用一個 dict 當表，`add_feature`／`add_edge`／`set_rules_applied`／`set_current_version`／`set_status` 寫資料，`paginate(*pages)` 指定 Scan 切成哪幾頁（允許空頁），`gsi_hide(pk)` 讓某筆邊暫時不出現在 `query_by_target`（模擬 GSI 落後），`gsi_only_edge(...)` 加一筆只在 GSI 看得到、基表沒有的候選。
+
+**實作時的調整（比原本更嚴）：** 假的不是 `Repository` 而是它底下的**儲存層**——`FakeTable` 只實作 `Repository` 真的會呼叫的四個 boto3 操作（`put_item`／`get_item`／`query`／`scan`），一個 Phase 08 的原語都沒有被覆寫。因此 `query_pk`／`query_by_target`／`scan_entity`／`get_steps`／`get_meta` 與 `_paged` 的分頁迴圈全部跑真的程式，「空頁不早停」與「GSI 候選回基表核對」是被真的程式碼驗到的，而不是由假物件直接餵答案。`FakeTable` 用 boto3 的 `ConditionBase.get_expression()` 解讀條件，只支援 `=`／`begins_with`／`AND` 三種，`Repository` 多送一種出來就 `AssertionError`，假表因此不會比真表寬鬆。
 
 ```python
 import pytest
@@ -181,7 +183,7 @@ def test_list_versions_of_tutorial_sorts_by_number_and_reads_every_page(repo):
         version_sort_key("prepare-meeting")
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_graph_queries.py -q
@@ -189,19 +191,22 @@ uv run pytest tests/unit/test_graph_queries.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'version_sort_key'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 三個 Task 都寫在 `src/training_kb/repository.py`，需要的 import（`PermanentError`、`META`、`feature_pk`／`rule_pk`／`parse_pk`／`parse_edge_sk`、Phase 04 的四個模型、`item_to_model`）加一次就好。
+
+實作時把 `isdigit()` 換成 `isdecimal()` 並加一次 round-trip 比較，與 `content.parse_version_id`、`keys.parse_step_pk` 同一套寫法：`isdigit()` 會放行 `²`（`int()` 要丟自己的 `ValueError`）、也會放行 `a@v01` 的前導零與 `a@v１` 的全形數字，它們 `int()` 得到同一個值卻是不同字串，排序就不再是全序。
 
 ```python
 def version_sort_key(version_id: str) -> tuple[str, int]:
     slug, marker, suffix = version_id.partition("@v")
-    if not slug or not marker or not suffix.isdigit():
+    number = int(suffix) if suffix.isdecimal() else 0
+    if not slug or not marker or number < 1 or f"{slug}@v{number}" != version_id:
         raise PermanentError(f"不是合法的 version_id：{version_id}")
-    return slug, int(suffix)
+    return slug, number
 
 
-def _meta_models(self, entity, model):
+def _meta_models(self, entity, model):   # 與既有 _scan_models 的差別：不接 equals、不排序
     rows = [item for item in self.scan_entity(entity) if str(item["SK"]) == META]
     return [item_to_model(item, model) for item in rows]
 
@@ -221,7 +226,7 @@ def list_versions_of_tutorial(self, slug):
     return sorted(chosen, key=lambda version: version_sort_key(version.version_id))
 ```
 
-- [ ] **Step 4：補上空分頁案例並跑完整檔案確認綠燈**
+- [x] **Step 4：補上空分頁案例並跑完整檔案確認綠燈**
 
 `repo.paginate(...)` 的第二頁刻意為空但仍帶 `LastEvaluatedKey`；斷言結果包含第三頁的 `v10`，證明沒有提早停止。`_meta_models` 的 `SK == META` 過濾也要有案例：在同一張表放一筆 `VERSION#prepare-meeting@v2` 的 `SUPERSEDES` 邊，斷言它不會被當成版本。
 
@@ -229,7 +234,7 @@ def list_versions_of_tutorial(self, slug):
 uv run pytest tests/unit/test_graph_queries.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/repository.py tests/unit/test_graph_queries.py
@@ -238,7 +243,7 @@ git commit -m "feat(repository): 固定 Feature 與版本查詢"
 
 ### Task 2：只回傳目前已發布版本的引用步驟
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_referencing_steps_exclude_history_and_unpublished(repo):
@@ -258,15 +263,15 @@ def test_referencing_steps_ignore_other_relations(repo):
                repo.find_current_published_steps_referencing("Prepare"))
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_graph_queries.py -q -k referencing
 ```
 
-預期：FAIL，訊號包含 `'Repository' object has no attribute 'find_current_published_steps_referencing'`。
+預期：FAIL，訊號包含 `object has no attribute 'find_current_published_steps_referencing'`（fixture 是 `Repository` 的子類別，實際訊息是 `'GraphRepository' object ...`）。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def _is_current_published(self, version_id):
@@ -292,37 +297,40 @@ def find_current_published_steps_referencing(self, feature_id):
                 found[(current, step.number)] = step
     for edge in self.query_by_target(target):          # A：GSI 候選
         relation, endpoint = parse_edge_sk(str(edge["SK"]))
-        kind, body = parse_pk(str(edge["PK"]))
-        if relation != "REFERENCES" or kind != "STEP" or endpoint != target:
+        if relation != "REFERENCES" or parse_pk(str(edge["PK"]))[0] != "STEP" \
+                or endpoint != target:
             continue
-        version_id, _, number = body.rpartition("#")
-        if (version_id, int(number)) in found or not self._is_current_published(version_id):
+        version_id, number = parse_step_pk(str(edge["PK"]))   # 不自己 rpartition
+        if (version_id, number) in found or not self._is_current_published(version_id):
             continue
         raise PermanentError(f"GSI 候選在基表讀不到對應步驟：{edge['PK']}")
     return [found[key] for key in sorted(found, key=lambda k: (version_sort_key(k[0]), k[1]))]
 ```
 
-B 已經用一致讀取列出每個目前已發布版的全部步驟，所以走到最後一行 `raise` 就代表這筆候選的 STEP item 在基表缺失或缺 `entity` 屬性。
+B 已經用一致讀取列出每個目前已發布版的全部步驟，所以走到最後一行 `raise` 就代表這筆候選的 STEP item 在基表缺失或缺 `entity` 屬性。步驟 PK 的解析改用 [Phase 05](./05-Phase05-單表鍵與關係邊契約.md) 的 `parse_step_pk`（`step_pk` 的反函式，`get_steps` 也用它），不在本 Phase 自己 `rpartition` 再 `int()`：那樣 `STEP#a@v1#03` 這種組不回原鍵的字串會被靜默接受，兩個不同字串就對應到同一步。
 
-- [ ] **Step 4：補上 GSI 多回一筆歷史版的案例並跑綠燈**
+- [x] **Step 4：補上 GSI 多回一筆歷史版的案例並跑綠燈**
 
-GSI 回傳 `prepare-meeting@v1 #3` 與 `share-summary@v2 #1`（未發布）時，兩者都必須被 `_is_current_published` 濾掉。再加一個「GSI 有、基表沒有」的案例：塞一筆 current 已發布版的 `REFERENCES` 邊到假 GSI 但不寫基表，斷言丟 `PermanentError`。
+GSI 回傳 `prepare-meeting@v1 #3` 與 `share-summary@v2 #1`（未發布）時，兩者都必須被 `_is_current_published` 濾掉。再加一個「GSI 有、基表沒有」的案例：塞一筆 current 已發布版的 `REFERENCES` 邊到假 GSI 但不寫基表，斷言丟 `PermanentError`；同一筆若落在歷史版上則只跳過，不是錯誤。
+
+整合測試（moto）的兩點實作說明：**moto 的 GSI 是即時的**，沒有辦法讓某一筆索引項目暫時消失，所以「GSI 落後」用「`query_by_target` 回空清單」模擬——那比真實落後更嚴格，結果集合必須完全由基表一致讀取決定。「GSI 有、基表沒有」則直接對 moto 的表寫一筆**沒有 `entity` 屬性**的 `REFERENCES` 邊：`by_target` 看得到它（它有 `target`），`scan_entity` 的 `entity` 過濾卻掃不到，正好就是 §6 說的那個情況。
 
 ```bash
 uv run pytest tests/unit/test_graph_queries.py -q
 uv run pytest tests/integration/test_current_published_steps.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
-git add src/training_kb/repository.py tests/unit tests/integration
+git add src/training_kb/repository.py tests/unit/test_graph_queries.py \
+        tests/integration/test_current_published_steps.py
 git commit -m "feat(repository): 反查目前已發布版本的引用步驟"
 ```
 
 ### Task 3：規則套用版本、active 教學與零 AI
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_rule_versions_follow_rules_applied_only(repo):
@@ -345,15 +353,15 @@ def test_graph_queries_never_call_the_model(repo, fake_writer):
     assert fake_writer.calls == []
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_graph_queries.py -q -k "rule_versions or active_tutorial or never_call"
 ```
 
-預期：FAIL，訊號包含 `'Repository' object has no attribute 'list_versions_applying_rule'`。
+預期：FAIL，訊號包含 `object has no attribute 'list_versions_applying_rule'`（同上，實際是 `'GraphRepository' object ...`）。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def list_versions_applying_rule(self, rule_id):
@@ -373,13 +381,13 @@ def find_active_tutorial_for_feature(self, feature_id):
     return min(active, key=lambda tutorial: tutorial.slug) if active else None
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_graph_queries.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/repository.py tests/unit/test_graph_queries.py
@@ -431,11 +439,11 @@ git commit -m "feat(repository): 規則套用版本與 active 教學查詢"
 
 ## 11. 完成清單
 
-- [ ] 六個查詢的名稱與簽名符合本文件與 00A 第 6.3 節。
-- [ ] `find_current_published_steps_referencing` 同時使用 GSI 候選與基表一致讀取核對，且「GSI 有、基表沒有」會丟 `PermanentError`。
-- [ ] 歷史版、未發布版與 `ASKS_ABOUT` 等其他關係全部被排除。
-- [ ] 每個 Query／Scan 都讀完分頁，空頁不早停，且有測試證明。
-- [ ] raw item 一律先濾 `SK != META` 再經 `item_to_model`，沒有任何 `Model.model_validate(item)`。
-- [ ] `list_versions_applying_rule` 以 `VERSION.rules_applied` 為唯一權威並去重；排序用 `version_sort_key`，`@v10` 在 `@v2` 之後，格式不合丟 `PermanentError`。
-- [ ] 查詢知識圖譜 Rule 3、4、5 各有直接 assertion（Rule 3 以呼叫次數 0 證明），Rule 1、2、6 標為相關並指向 Phase 08。
-- [ ] 本 Phase 沒有任何寫入；未把基表核對描述成跨併發寫入的快照或大型站點方案。
+- [x] 六個查詢的名稱與簽名符合本文件與 00A 第 6.3 節。
+- [x] `find_current_published_steps_referencing` 同時使用 GSI 候選與基表一致讀取核對，且「GSI 有、基表沒有」會丟 `PermanentError`。
+- [x] 歷史版、未發布版與 `ASKS_ABOUT` 等其他關係全部被排除。
+- [x] 每個 Query／Scan 都讀完分頁，空頁不早停，且有測試證明。
+- [x] raw item 一律先濾 `SK != META` 再經 `item_to_model`，沒有任何 `Model.model_validate(item)`。
+- [x] `list_versions_applying_rule` 以 `VERSION.rules_applied` 為唯一權威並去重；排序用 `version_sort_key`，`@v10` 在 `@v2` 之後，格式不合丟 `PermanentError`。
+- [x] 查詢知識圖譜 Rule 3、4、5 各有直接 assertion（Rule 3 以呼叫次數 0 證明），Rule 1、2、6 標為相關並指向 Phase 08。
+- [x] 本 Phase 沒有任何寫入；未把基表核對描述成跨併發寫入的快照或大型站點方案。
