@@ -62,6 +62,7 @@ from training_kb.models import (
     StrictModel,
     Ticket,
     Tutorial,
+    TutorialStatus,
     TutorialStep,
     TutorialVersion,
     TutorialView,
@@ -725,3 +726,35 @@ class Repository:
                 continue
             raise PermanentError(f"GSI 候選在基表讀不到對應步驟：{pk}")
         return [found[key] for key in sorted(found, key=lambda k: (version_sort_key(k[0]), k[1]))]
+
+    def list_versions_applying_rule(self, rule_id: str) -> list[str]:
+        """這條規則套用過哪些版本，依版號升序去重（設計 §10 六問之一）。
+
+        從 RULE 起點的 `APPLIED_TO` 邊出發取候選，但**以 `VERSION.rules_applied` 為唯一權威**
+        （D17）：邊存在而該版的 `rules_applied` 不含這條規則時不回傳，因為多餘邊會讓
+        「規則套用次數」這個指標多計。邊指向已不存在的版本時只跳過——本 Phase 只讀，
+        清理與投影重建是 Phase 28 的事。回的是 version_id 字串（不是模型），因為呼叫端
+        （Phase 28、Phase 54）要的就是集合比對。
+        """
+        version_ids: set[str] = set()
+        for edge in self.query_pk(rule_pk(rule_id), sk_prefix="APPLIED_TO#"):
+            _, endpoint = parse_edge_sk(str(edge["SK"]))
+            _, version_id = parse_pk(endpoint)
+            version = self.get_version(version_id)
+            if version is not None and rule_id in version.rules_applied:
+                version_ids.add(version_id)
+        return sorted(version_ids, key=version_sort_key)
+
+    def find_active_tutorial_for_feature(self, feature_id: str) -> Tutorial | None:
+        """這個 Feature 有沒有 active 教學（設計 §7.3，CREATE／KEEP 的判斷依據）。
+
+        只看 `status == "active"`：即使 `current_version` 還是 `None`（尚待首次發布）也算
+        已有教學（F12），`retired` 則不算，所以不會擋住 CREATE。走基表 Scan 而不是
+        `ASKS_ABOUT` 邊，所以 Phase 40 還沒開始寫那條邊也能用。真的出現多篇時回 slug 升序
+        第一筆，讓結果可重現；這裡不決定 CREATE／KEEP，只回事實（決定在 Phase 40）。
+        """
+        hits = self._meta_models("TUTORIAL", Tutorial)
+        active = [tutorial for tutorial in hits
+                  if tutorial.status == TutorialStatus.ACTIVE
+                  and feature_id in tutorial.feature_ids]
+        return min(active, key=lambda tutorial: tutorial.slug) if active else None

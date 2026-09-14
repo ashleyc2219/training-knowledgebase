@@ -302,3 +302,54 @@ def test_current_version_without_published_at_is_not_current_published(repo) -> 
     """`current_version` 與 `published_at` 必須同時成立；只切了指標不算已發布。"""
     repo.set_current_version(SLUG, DRAFT)
     assert repo.find_current_published_steps_referencing(FEATURE) == []
+
+
+# --- Task 3：規則套用版本、active 教學與零 AI --------------------------------
+
+
+def test_rule_versions_follow_rules_applied_only(repo) -> None:
+    """GPH Rule 5、D17：`VERSION.rules_applied` 是唯一權威，多餘的邊不算套用過。"""
+    repo.add_edge("RULE#R-007", "APPLIED_TO", "VERSION#share-summary@v1")
+    repo.set_rules_applied("share-summary@v1", [])
+    assert repo.list_versions_applying_rule("R-007") == ["prepare-meeting@v2"]
+
+
+def test_rule_versions_are_sorted_by_number_not_lexicographically(repo) -> None:
+    """兩個 `APPLIED_TO` 邊皆有 `rules_applied`：回兩個 version_id，`@v10` 排在 `@v2` 之後。"""
+    repo.add_version(V10, published=True, rules_applied=[RULE])
+    repo.add_edge(rule_pk(RULE), "APPLIED_TO", version_pk(V10))
+    assert repo.list_versions_applying_rule(RULE) == [V2, V10]
+
+
+def test_rule_versions_ignore_a_missing_version(repo) -> None:
+    """邊指向已不存在的版本時只跳過：查詢只讀，補寫與清理是 Phase 28 的事。"""
+    repo.add_edge(rule_pk(RULE), "APPLIED_TO", version_pk("gone@v3"))
+    assert repo.list_versions_applying_rule(RULE) == [V2]
+    assert repo.list_versions_applying_rule("R-999") == []
+
+
+def test_active_tutorial_found_even_before_first_publish(repo) -> None:
+    """F12：active 但尚未首次發布仍算已有教學（KEEP）；retired 不阻擋 CREATE。"""
+    repo.set_current_version("share-summary", None)
+    assert repo.find_active_tutorial_for_feature("Share").slug == "share-summary"
+    repo.set_status("share-summary", "retired")
+    assert repo.find_active_tutorial_for_feature("Share") is None
+
+
+def test_active_tutorial_is_the_first_slug_when_several_match(repo) -> None:
+    """真的出現多篇時回 slug 升序第一筆，讓結果可重現；別的 Feature 不入選。"""
+    repo.add_tutorial("archive-summary", current_version=None, feature_ids=["Share"])
+    assert repo.find_active_tutorial_for_feature("Share").slug == "archive-summary"
+    assert repo.find_active_tutorial_for_feature("Nobody") is None
+
+
+def test_graph_queries_never_call_the_model(repo, fake_writer) -> None:
+    """GPH Rule 3：正常關係遍歷不呼叫 AI——六個查詢跑一輪，模型呼叫次數為 0。"""
+    repo.find_current_published_steps_referencing("Prepare")
+    repo.list_versions_applying_rule("R-007")
+    repo.find_feature_by_name_or_alias("Prepare")
+    repo.list_versions_of_tutorial(SLUG)
+    repo.find_active_tutorial_for_feature("Share")
+    repo.list_feedback_of_version(V2)
+    assert fake_writer.calls == []
+    assert fake_writer.request_attempts == 0
