@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from training_kb.errors import ContentError, CoordinationError, ObjectAlreadyExists
-from training_kb.keys import feature_pk, rule_pk, step_pk, version_pk
+from training_kb.keys import edge_sk, feature_pk, parse_pk, rule_pk, step_pk, version_pk
 from training_kb.models import Feature, StepDraft, StepType, TutorialContent, TutorialVersion
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import Repository, item_to_model
@@ -620,13 +620,62 @@ def _write_edges(plan: VersionPlan, content: TutorialContent, repository: Reposi
         repository.put_edge(rule_pk(rule_id), "APPLIED_TO", version_key)
 
 
+def verify_version_complete(version_id: str, repository: Repository) -> bool:
+    """這個版本的 S3 產物、VERSION item、STEP 與三種邊是否齊全；只回 `True`／`False`。
+
+    Phase 24 發布前一定要先問過它：關係不完整的版本一律不可發布。缺漏明細是
+    module-private 的 `_missing_parts`，`create_version` 用它組出可讀的 `ContentError`；
+    那不是跨模組 public API，呼叫端拿到的是一個布林值。
+    """
+    return not _missing_parts(version_id, repository)
+
+
+def _has_edge(repository: Repository, pk: str, relation: str, target_pk: str) -> bool:
+    """起點上有沒有指向這個終點的某一種邊；一律基表一致讀取，不查 `by_target`。"""
+    sort_key = edge_sk(relation, target_pk)
+    return any(row.get("SK") == sort_key
+               for row in repository.query_pk(pk, sk_prefix=f"{relation}#", consistent=True))
+
+
+def _step_edge_problems(version_id: str, steps: Sequence[StepDraft],
+                        repository: Repository) -> list[str]:
+    """每一步都要恰好一條 `REFERENCES` 邊，`target` 等於 SK 終點，而且該 Feature 真的存在。
+
+    「恰好一條」是 D05 在寫入端的最後一道確認：零條代表這一步根本沒寫出來，兩條代表同一步
+    引用了多個 Feature，兩種都不可保存（`建立教學版本` Rule 9）。`target` 與 SK 終點不一致
+    時停在這裡、不自動修正——寫壞的邊由 Phase 28 的維護批次處理。
+    """
+    problems: list[str] = []
+    for step in steps:
+        rows = repository.query_pk(step_pk(version_id, step.number), consistent=True)
+        if len(rows) != 1:
+            problems.append(f"第 {step.number} 步應恰好一條引用邊，實際 {len(rows)} 條")
+            continue
+        sort_key, target = str(rows[0].get("SK", "")), str(rows[0].get("target", ""))
+        if not target.startswith("FEATURE#") or sort_key != edge_sk("REFERENCES", target):
+            problems.append(f"第 {step.number} 步的 SK 與 target 不一致：{sort_key}")
+        elif repository.get_feature(parse_pk(target)[1]) is None:
+            problems.append(f"第 {step.number} 步引用的 Feature 不存在：{target}")
+    return problems
+
+
 def _missing_parts(version_id: str, repository: Repository) -> list[str]:
-    """回缺漏明細（空 list 代表完整）；module-private，不是跨模組 public API。"""
+    """回缺漏明細（空 list 代表完整）；module-private，不是跨模組 public API。
+
+    **應有步驟的權威是 S3 全文**（設計 §10、D-39）：VERSION item 上沒有、也不可以有
+    `step_count`（strict 模型只收模型欄位加保留屬性），所以步驟清單一律由
+    `parse_markdown(全文).steps` 推得。全文讀不回來時後面的核對都沒有意義，直接返回。
+
+    **全部用完整 PK 的 `query_pk(..., consistent=True)`**，不查最終一致的 `by_target`：
+    剛寫入的邊在 GSI 裡可能還看不到，用它核對會誤判「關係不完整」，或更糟地把別人的
+    舊資料當成本版的邊而誤判「完整」。
+    """
     version = repository.get_version(version_id)
     if version is None:
         return [f"找不到 VERSION item {version_id}"]
     slug, number = parse_version_id(version_id)
     md_key, df_key = markdown_key(slug, number), diff_key(slug, number)
+    version_key = version_pk(version_id)
     problems = [f"找不到 TUTORIAL item {slug}"] if repository.get_tutorial(slug) is None else []
     if version.s3_key != md_key:
         problems.append(f"s3_key 應為 {md_key}，實際 {version.s3_key}")
@@ -635,4 +684,11 @@ def _missing_parts(version_id: str, repository: Repository) -> list[str]:
         return problems + [f"缺少 S3 全文 {md_key}"]
     if not repository.object_exists(df_key):
         problems.append(f"缺少 S3 差異檔 {df_key}")
+    steps = parse_markdown(body.decode("utf-8")).steps
+    problems += _step_edge_problems(version_id, steps, repository)
+    if version.supersedes is not None and not _has_edge(
+            repository, version_key, "SUPERSEDES", version_pk(version.supersedes)):
+        problems.append(f"缺少 SUPERSEDES 邊：{version.supersedes}")
+    problems += [f"規則 {rule_id} 缺少 APPLIED_TO 邊" for rule_id in version.rules_applied
+                 if not _has_edge(repository, rule_pk(rule_id), "APPLIED_TO", version_key)]
     return problems
