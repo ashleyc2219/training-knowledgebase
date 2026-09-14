@@ -144,7 +144,7 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
 - `operation_id_for` 固定回 `op-<kind>-<canonical_id>`（`op-ticket-t_881`、`op-release-r_42`）。本 Phase 只用到 `ticket`／`release` 兩種 kind，但型別就用 Phase 10 的 `OperationKind`；[Phase 42](./42-Phase42-Feedback與View固定匯入.md) 之後直接沿用同一個函式處理 `feedback`／`view`，行為不變。
 - `execution_name(operation_id)` 必須符合 `[A-Za-z0-9_-]{1,80}`；不合規時以固定 UTF-8 SHA-256 截取，並保留 `op-<kind>-` 前綴。
 - ASL input 固定只含 `operation_id`、`project_id`、`input_ref`（00A §7、設計 §14.3）。Release 沒有 `project_id` 欄位，單一專案的 Release 由 `Settings.project_id` 取得後寫進 operation 紀錄與 ASL input，**不把完整 evidence 放進 execution history**。
-- **本計畫選擇：** `operations`／`starter`／`repository`／`settings` 由模組層一個可覆寫的工廠 `_wiring()` 取得（回傳 frozen dataclass，測試直接注入 fake），所以 `accept_ticket` 的簽名維持 00A 的兩個參數。`deadline` 是 Phase 30 傳進來的整體八秒期限（一個 `time.monotonic()` 浮點數），每一步開始前用 `assert_time_left(deadline, step=...)` 檢查剩餘時間，**不自己呼叫 `monotonic()`、也不重新計八秒**。
+- **本計畫選擇：** `operations`／`starter`／`repository`／`settings` 由模組層一個可覆寫的工廠 `_wiring()` 取得（回傳 frozen dataclass，測試直接注入 fake），所以 `accept_ticket` 的簽名維持 00A 的兩個參數。工廠有模組層快取，所以另外提供 `_reset_wiring()`：兩支測試檔都用 autouse fixture 在每個測試前後重設，並把 `_build_wiring` 換成會當場 `AssertionError` 的守門員——忘了注入 fake 的測試會立刻失敗，而不是安靜地去打 STS／DynamoDB／Step Functions（修正回合 1）。`deadline` 是 Phase 30 傳進來的整體八秒期限（一個 `time.monotonic()` 浮點數），每一步開始前用 `assert_time_left(deadline, step=...)` 檢查剩餘時間，**不自己呼叫 `monotonic()`、也不重新計八秒**。
 - `normalize_then_accept` 的六個參數全部是 keyword-only（00A D-60）：`domain`、`adapter`、`event_type`、小寫化的 `headers`、已解析的 `payload`、`deadline`。本 Phase 補**接受**那半邊（`accept_normalized` 依型別分派到 `accept_ticket`／`accept_release`）；正規化那半邊留一個 `_normalize(...)` 接縫，內容由 [Phase 37](./37-Phase37-Rote-Agent回退與成功提交.md) 用 Rote 填上，在那之前照 Phase 30 的做法丟 `PermanentError`，**不得先回成功**。
 
 ## 6. Task 1：固定 operation 與 execution 名稱
@@ -206,7 +206,24 @@ def execution_name(operation_id: str) -> str:
     return f"{head}-{digest}"
 ```
 
-`15 + 1 + 64 = 80`，所以截取後仍在長度上限內；SHA-256 取全長 64 個十六進位字元，不截短到有碰撞風險卻沒有測試的長度。名稱只由 kind 與已核定的 canonical ID 組成，**不含 user、comment 或 title**。
+名稱只由 kind 與已核定的 canonical ID 組成，**不含 user、comment 或 title**。
+
+**修正回合 1（2026-09-14）：`_NAME_HEAD = 15` 保不住最長的 kind 前綴。** `op-feedback-review-` 是 19 個字元，截到 15 會變成 `op-feedback-rev`，看不出是哪一條 pipeline。改成由 `OperationKind` 自己導出長度，雜湊長度再由上限反推：
+
+```python
+MAX_EXECUTION_NAME = 80
+_NAME_HEAD = len("op-") + max(len(kind) for kind in KINDS) + len("-")   # 19
+_DIGEST_LENGTH = MAX_EXECUTION_NAME - _NAME_HEAD - 1                    # 60 個十六進位字元
+
+def execution_name(operation_id: str) -> str:
+    if SAFE_EXECUTION_NAME.match(operation_id):
+        return operation_id
+    digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+    head = "".join(ch for ch in operation_id if ch in _ALLOWED)[:_NAME_HEAD].rstrip("-")
+    return f"{head}-{digest[:_DIGEST_LENGTH]}"
+```
+
+`19 + 1 + 60 = 80`。60 個十六進位字元＝240 bits，遠超過撞名需要的強度；**長度是算出來的，不是猜的**，所以之後多一種 kind、前綴變長時雜湊會跟著縮，不會出現「超過 80 字被 AWS 拒絕」這種只在雲端才炸的錯。
 
 - [x] **Step 4：跑完整檔案確認綠燈**
 
@@ -295,7 +312,9 @@ def _accept(kind: OperationKind, pipeline: PipelineName, canonical_id: str,
         operations.record_normalized(operation_id, input_ref)
     assert_time_left(deadline, step="start-execution")
     arn = wiring.starter.start(pipeline, execution_name(operation_id), {
-        "operation_id": operation_id, "project_id": project_id, "input_ref": input_ref,
+        "operation_id": operation_id,
+        "project_id": accepted.record.project_id,   # 修正回合 1：以 ledger 為準
+        "input_ref": input_ref,
     })
     operations.record_execution(operation_id, arn)
     record = operations.load(operation_id)
@@ -502,6 +521,29 @@ class BotoPipelineStarter:
 
 `STATE_MACHINE_NAMES` 是 00A §3.5 固定的 state machine 名稱；部署時由它與帳號、Region 組出 `arns`，測試直接注入假 ARN。ledger 沒有 `execution_arn` 時才推導執行 ARN，這是**本計畫選擇**，必須由 [Phase 41](./41-Phase41-Ticket-Analysis雲端流程驗收.md) 的雲端驗收實證後才可信賴。
 
+**修正回合 1（2026-09-14）：adapter 要自己分類暫時性失敗。** 上面的偽碼只攔 `ExecutionAlreadyExists`，其他 botocore 錯誤原樣冒出，於是 `_start_once` 的 `isinstance(error, TransientError)` 在正式 adapter 上**永遠是 `False`**——§9 驗收表「StartExecution 暫時失敗 → `retryable=True`」那一列會變成只有測試替身自己丟 `TransientError` 時才成立。修法與 `repository.py` 同一條慣例（**只翻已知的碼**）：
+
+```python
+TRANSIENT_START_CODES = frozenset({
+    "ThrottlingException", "ThrottledException", "TooManyRequestsException",
+    "ServiceUnavailable", "ServiceUnavailableException",
+    "InternalServerError", "InternalError", "InternalFailure",
+    "RequestTimeout", "RequestTimeoutException"})
+TIMEOUT_ERRORS = (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError)
+
+except self._client.exceptions.ExecutionAlreadyExists:   # 一定排在 ClientError 之前（它是子類）
+    return self._reuse(...)
+except TIMEOUT_ERRORS as error:
+    raise TransientError(f"Step Functions 連線逾時：{type(error).__name__}") from error
+except ClientError as error:
+    transient = _transient(error)        # 已知碼或 HTTPStatusCode >= 500
+    if transient is not None:
+        raise transient from error
+    raise                                # 不認得的碼原樣往外冒，不猜它可不可以重送
+```
+
+`describe_execution` 走**同一套**分類（私有的 `_describe`）：判斷「這次到底成功了沒」的那次查詢被節流時，如果原樣冒出 `ClientError`，一次純粹的暫時性失敗會被記成 `retryable=False`。錯誤訊息只留錯誤碼與 HTTP 狀態，不回填 input（00A §3.8）。
+
 - [x] **Step 4：補重啟與禁止改名測試並跑完整檔案確認綠燈**
 
 - 建立新的 adapter 物件（模擬程序重啟），只憑持久 ledger 仍取得同一個 `operation_id`、`input_ref` 與 ARN。
@@ -530,7 +572,7 @@ uv run pytest tests/integration/test_start_execution_idempotency.py -q
 
 | 路徑 | 輸入 | 預期資料結果 |
 |---|---|---|
-| Happy | 新的合法 `Ticket`／`Release` | `Acceptance(status="accepted")`；一個 `OPS#op-ticket-t_881`、一個 input 物件、一次對應 pipeline 的 StartExecution；Release 的 `project_id` 來自 `Settings`。 |
+| Happy | 新的合法 `Ticket`／`Release` | `Acceptance(status="accepted")`；一個 `OPS#op-ticket-t_881`、一個 input 物件、一次對應 pipeline 的 StartExecution；Release 的 `project_id` 第一次來自 `Settings`，之後**以 ledger 為準**（續跑時設定值可能已經換過，但這筆 operation 從接受當下就綁定一個專案）。 |
 | Failure | StartExecution 暫時失敗 | operation 保留 `input_ref` 並標 `retryable=True`；重試沿用同一 execution name。 |
 | Failure | closed `ExecutionAlreadyExists`、ledger `status != "done"` | `CoordinationError`；不回成功、不改名重跑。 |
 | Boundary | 同 canonical ID 不同 kind；duplicate 但 `execution_arn` 為 `None` | `op-ticket-t_881` 與 `op-release-t_881` 不碰撞；後者續跑補齊，仍只有一筆 operation、一個 input 物件。 |
@@ -591,3 +633,14 @@ uv run pytest tests/integration/test_start_execution_idempotency.py -q
 | 10 | 00A §6.8 說 `WEBHOOK_DEADLINE_SECONDS` 在 `ingress.py` | 實際在 `training_kb/handlers/github_webhook.py`（Phase 30 的落點） | 不動別人的檔案；測試依實際落點 import。**建議主導者在 00A §6.8 更正落點，或請 P30 搬家。** |
 | 11 | 00A §8 D-08 要求修正本文件 §5／§6 的舊名稱 | **本文件已無舊名稱**（`is_duplicate`／`running`／`result_ref` 只出現在 §10「常見錯誤」表，是「不要這樣寫」的提醒） | D-08 已在先前版本套用完畢，本次無需再改。 |
 | 12 | §12「O2 gate 未通過時維持 blocked 標示」 | O2 已於 Phase 11 以真實 DynamoDB PASS（COMMON.md），但本 Phase 的 moto／mock 綠燈**仍然只證明程式邏輯**，不是 gate 證據；「lease 不等於接受順序、TTL 不是準時解鎖」兩句保留 | 依 controller 2026-09-14 的裁決：離線開發照常，真實 Step Functions 驗證延後到 Phase 41／52。 |
+
+## 14. 修正回合 1（2026-09-14）
+
+| # | 問題 | 修法 | commit |
+|---|---|---|---|
+| 1（必修） | `BotoPipelineStarter.start` 只攔 `ExecutionAlreadyExists`，其他 botocore 錯誤原樣冒出，`_start_once` 在正式 adapter 上永遠記成 `retryable=False`；§9 驗收表那一列只靠測試替身成立。 | adapter 依 `error.response["Error"]["Code"]` 與 `HTTPStatusCode >= 500` 把已知的可重試碼、以及 botocore 的 `ConnectTimeoutError`／`ReadTimeoutError`／`EndpointConnectionError` 轉成 `TransientError`（訊息只留錯誤碼）；其餘 `ClientError` 原樣往外冒。`describe_execution` 走同一套。補 11 個測試（六種暫時性失敗、三種原樣冒出的碼、節流的 describe、以及**正式 adapter ＋真 ledger** 的 `ThrottlingException` → `retryable=True` 與 `ValidationException` → `retryable=False`）。 | `f0c13e0` |
+| 2（minor） | `_NAME_HEAD = 15` 保不住 `op-feedback-review-`（19 字元）的 kind 前綴。 | `_NAME_HEAD` 由 `max(len(kind) for kind in KINDS)` 導出（19），`_DIGEST_LENGTH` 由 `MAX_EXECUTION_NAME` 反推（60）；`head` 去掉尾端連字號。補兩個測試：四種 kind 的超長 Unicode ID 前綴仍完整且長度 ≤ 80；同 kind 的兩個長 ID 仍可分辨且同輸入同輸出。 | `fd14986` |
+| 3（minor） | 續跑時 ASL input 的 `project_id` 用本次請求的值，不是 ledger 的值。 | 改成 `accepted.record.project_id`；補一個測試（ledger 是 `demo`、本次 `Settings.project_id` 是 `acme`，input 與紀錄都必須是 `demo`）。 | `8fa34a1` |
+| 4（minor） | `_WIRING` 是模組層快取，忘了 monkeypatch 的測試會真的打 STS。 | 新增 `_reset_wiring()`；兩支測試檔各加一個 autouse fixture，前後重設並把 `_build_wiring` 換成會 `AssertionError` 的守門員，另補一個「守門員自己的測試」。 | `2f32173` |
+
+**未處理（controller 記在 ledger，交最終 review／P41）：** `fail()` 覆蓋成功 ledger 的窄縫、冷啟動 STS 發生在期限檢查之前、`_reuse` 只在 RUNNING 補寫 ARN。
