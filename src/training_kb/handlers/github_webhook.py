@@ -111,9 +111,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, object]:
         adapter = GITHUB_ADAPTERS.get(event_type)
         if adapter is None:
             raise IngressError("未支援的 GitHub 事件型別", ("X-GitHub-Event",))
-        acceptance = normalize_then_accept(domain=GITHUB_DOMAIN, adapter=adapter,
-                                           event_type=event_type, headers=headers,
-                                           payload=payload, deadline=deadline)
+        accepted = normalize_then_accept(domain=GITHUB_DOMAIN, adapter=adapter,
+                                         event_type=event_type, headers=headers,
+                                         payload=payload, deadline=deadline)
     except IngressError as error:
         _record(delivery, "rejected", None)
         return {"ok": False, "message": str(error), "fields": list(error.fields),
@@ -121,5 +121,8 @@ def handler(event: dict[str, Any], context: object) -> dict[str, object]:
     except TimeoutError as error:
         _record(delivery, "timeout", None)
         return {"ok": False, "message": str(error), "operation_id": None}
-    _record(delivery, "accepted", acceptance.operation_id)
-    return {"ok": True, "operation_id": acceptance.operation_id}
+    # F14：一個 PR 改到 n 個功能會展開成 n 筆子 Release，各自一個 operation（裁決 D-73）。
+    # `operation_id` 保留第一筆，讓只認單筆的既有消費端行為不變；全部的 ID 在 `operation_ids`。
+    operation_ids = [acceptance.operation_id for acceptance in accepted]
+    _record(delivery, "accepted", operation_ids[0])
+    return {"ok": True, "operation_id": operation_ids[0], "operation_ids": operation_ids}

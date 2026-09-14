@@ -9,7 +9,7 @@ import json
 import re
 from collections.abc import Iterator, Mapping
 from time import monotonic
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -339,15 +339,21 @@ def test_normalize_then_accept_stops_when_the_deadline_is_gone(harness: Harness)
     assert harness.operation_ids == []
 
 
-def test_normalize_is_still_the_phase_37_seam(harness: Harness) -> None:
-    """期限還有剩時走到 `_normalize`，它必須明確失敗，不得先回一個假的成功。"""
-    with pytest.raises(PermanentError, match="Phase 37"):
+def test_the_phase_37_seam_is_wired_to_rote(harness: Harness, rote_deps: Any) -> None:
+    """期限還有剩時走進 Rote 三層；正規化不出合法物件時仍明確失敗，不假成功。
+
+    Phase 30／32 期間這裡是丟 `PermanentError("Phase 37 尚未接線")` 的 stub；Phase 37 之後
+    `_normalize` 已經不存在，接線點直接走 `Rote.normalize_all`（見
+    `tests/integration/test_rote_commit.py`）。`rote_deps` 注入假相依，不連 AWS 或 Bedrock。
+    """
+    deps = rote_deps(fail_at="validate")
+    with pytest.raises(PermanentError):
         normalize_then_accept(
             domain="github.com", adapter="github_issue", event_type="issues",
             headers={"x-github-event": "issues"}, payload={"action": "opened"},
             deadline=harness.deadline,
         )
-    assert harness.starter.calls == 0
+    assert harness.starter.calls == 0 and deps.started == []
 
 
 def test_a_transient_start_failure_keeps_the_input_and_the_execution_name(

@@ -20,6 +20,9 @@ from training_kb.ingress import assert_time_left, normalize_then_accept, time_le
 
 SECRET = b"test-secret"
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "github" / "issue-opened.json"
+ACCEPTED: dict[str, Any] = {"ok": True, "operation_id": "op-ticket-t_881",
+                            "operation_ids": ["op-ticket-t_881"]}
+"""成功回應的形狀（裁決 D-73）：`operation_id` 是第一筆，`operation_ids` 列出全部。"""
 
 
 def sign(body: bytes) -> str:
@@ -53,9 +56,9 @@ def spies(monkeypatch: pytest.MonkeyPatch) -> Spies:
         parsed.append(raw)
         return {"action": "opened"}
 
-    def fake_accept(**passed: Any) -> SimpleNamespace:  # 六個參數都是 keyword
+    def fake_accept(**passed: Any) -> list[SimpleNamespace]:  # 六個參數都是 keyword
         accepted.append(passed)
-        return SimpleNamespace(operation_id="op-ticket-t_881")
+        return [SimpleNamespace(operation_id="op-ticket-t_881")]   # D-73：回 list
 
     monkeypatch.setattr(github_webhook, "load_secret", lambda: SECRET)
     monkeypatch.setattr(github_webhook, "parse_json", fake_parse_json)
@@ -76,7 +79,7 @@ def test_valid_signature_passes_exact_bytes_to_parser(spies: Spies) -> None:
     parsed, accepted = spies
     body = FIXTURE.read_bytes()
     result = github_webhook.handler(make_event(body, header=sign(body)), None)
-    assert result == {"ok": True, "operation_id": "op-ticket-t_881"}
+    assert result == ACCEPTED
     assert parsed == [body] and len(accepted) == 1  # 交給 parser 的是原封不動的 bytes
     assert accepted[0]["domain"] == "github.com" and accepted[0]["adapter"] == "github_issue"
     assert accepted[0]["event_type"] == "issues"  # 來自 X-GitHub-Event，不從 payload 猜
@@ -99,7 +102,7 @@ def test_base64_body_is_decoded_to_the_original_bytes(spies: Spies) -> None:
     body = FIXTURE.read_bytes()
     event = make_event(body, header=sign(body), base64_encoded=True)
     result = github_webhook.handler(event, None)
-    assert result == {"ok": True, "operation_id": "op-ticket-t_881"}
+    assert result == ACCEPTED
     assert parsed == [body]  # decode 後與原檔 bytes 完全相同
     assert len(accepted) == 1
 
@@ -119,7 +122,7 @@ def test_signature_header_lookup_is_case_insensitive(spies: Spies, signature_key
     parsed, accepted = spies
     body = FIXTURE.read_bytes()
     event = make_event(body, header=sign(body), signature_key=signature_key)
-    assert github_webhook.handler(event, None) == {"ok": True, "operation_id": "op-ticket-t_881"}
+    assert github_webhook.handler(event, None) == ACCEPTED
     assert parsed == [body] and len(accepted) == 1
 
 
@@ -176,11 +179,29 @@ def test_missing_secret_is_a_configuration_error(monkeypatch: pytest.MonkeyPatch
         github_webhook.handler(make_event(body, header=sign(body)), None)
 
 
-def test_wiring_point_refuses_to_pretend_success() -> None:
-    """P30 的 stub 明確失敗；不得「先回成功、之後再背景處理」。"""
+def test_wiring_point_refuses_to_pretend_success(rote_deps: Any) -> None:
+    """接線點已由 Phase 37 接上 Rote 三層；正規化不出合法物件時仍明確失敗。
+
+    `fail_at="validate"` 讓每一次 `validate` 都不過，Agent 用完額度後整次接入回失敗——
+    不得「先回成功、之後再背景處理」（設計 §14.1）。
+    """
+    deps = rote_deps(fail_at="validate")
     with pytest.raises(PermanentError):
         normalize_then_accept(domain="github.com", adapter="github_issue", event_type="issues",
                               headers={}, payload={"action": "opened"}, deadline=monotonic() + 8.0)
+    assert deps.started == [] and deps.commit_calls == 0
+
+
+def test_wiring_point_returns_one_acceptance_per_canonical_object(rote_deps: Any,
+                                                                  raw_issue: Any) -> None:
+    """D-73：`normalize_then_accept` 回 `list[Acceptance]`，單一 Ticket 就是長度 1。"""
+    deps = rote_deps()
+    event = raw_issue()
+    accepted = normalize_then_accept(domain=event.domain, adapter=event.adapter,
+                                     event_type=event.event_type, headers=event.headers,
+                                     payload=event.payload, deadline=deps.deadline)
+    assert [acceptance.operation_id for acceptance in accepted] == [
+        "op-ticket-t_gh-acme-copilot-128"]
 
 
 # --- Task 3：八秒整體期限 -----------------------------------------------------
