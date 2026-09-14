@@ -93,8 +93,8 @@ Repository.put_object(key, body, content_type, *, if_none_match) -> None     # P
 Repository.put_edge(pk, relation, target_pk, attrs=None) -> None             # Phase 07
 Repository.list_rules(status: RuleStatus | None = None) -> list[AuthoringRule]   # Phase 08
 operation_ref(operation_id, name) -> str                                     # Phase 10
-Writer.generate_json(system: str, user: str, schema: Mapping[str, Any], *,
-                     operation_id: str, node: str) -> dict[str, Any]         # Phase 15
+generate_validated_json(writer, system, user, schema, validate, *,
+                        operation_id: str, node: str) -> dict[str, Any]      # Phase 18
 prompt_write_tutorial(source_text: str, allowed_features: Sequence[str],
                       rules_block: str) -> tuple[str, str]                   # Phase 17
 TutorialDraft: dict[str, object]                                             # Phase 17 的 JSON schema 常數
@@ -104,7 +104,7 @@ allocate_version(tutorial_id, operation_id, operations, *, repository,
                  reason, rules_applied) -> VersionPlan                       # Phase 20
 validate_content(content, known_feature_ids: frozenset[str]) -> None         # Phase 21
 create_version(plan, content, repository) -> TutorialVersion                 # Phase 23
-Repository.find_active_tutorial_for_feature(feature_id) -> Tutorial | None   # Phase 27
+Repository.find_active_tutorial_for_feature(feature_id) -> Tutorial | None   # Phase 27（尚未落地，見 §6）
 known_features(repository) -> tuple[Feature, ...]                            # Phase 39
 load_validated_at(repository) -> dict[str, datetime]                         # 讀取端由本 Phase 首建（見下方說明）
 ```
@@ -167,8 +167,9 @@ def create_first_version(gap: TicketGap, *, repository: "Repository", writer: "W
 ```text
 1. 再判一次 decide_ticket_action -> 不是 CREATE 就 PermanentError
 2. list_rules(ACTIVE) + load_validated_at -> rules_for_content -> 去重後的 injected 清單
-3. render_rules_block(injected) 進 prompt -> generate_json(TutorialDraft) -> dict
-4. TutorialContent.model_validate(dict) + validate_content（五段齊全、每步恰一個既有 Feature）
+3. render_rules_block(injected) 進 prompt -> generate_validated_json(TutorialDraft) -> dict
+4. 驗證在步驟 3 裡面：`_tutorial_draft_validator` 把 `TutorialContent.model_validate` 與
+   `validate_content`（五段齊全、每步恰一個既有 Feature）包成 `BusinessValidator`
 5. tutorial_slug 產生並驗證 kebab-case 與唯一
 6. create_tutorial_identity（create_only=True、feature_ids=[feature_id]；重試沿用同一篇）
 7. allocate_version(reason="gap:<cluster_id>", rules_applied=applied_rule_ids)
@@ -186,9 +187,9 @@ slug 規則：先把 `content.title` 轉成 ASCII kebab-case，轉不出東西�
 
 ### Task 1：三種結果與 active／retired 邊界
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
-`replace` 是 `dataclasses.replace`、`dt(value)` 是包一層 Phase 02 `parse_iso` 的 helper；`fake_repo` 是同檔 fixture，用 dict 當表並提供 `save_feature`／`save_tutorial`／`save_ticket`／`save_rule`／`save_validated_at_file`／`edges`／`writes` 與 Phase 06–08、27 的讀寫原語；`fake_ops` 必須實作 Phase 10 的 `load`／`record_version`／`record_model_output`（`allocate_version` 在 `load` 回 `None` 時會丟 `CoordinationError`，所以 fixture 要先放一筆 accepted 紀錄）；`fake_writer` 與 [Phase 39](./39-Phase39-Recurring與Knowledge-Gap命名.md) 的同名 double 形狀相同（記下每次 `generate_json` 的 `(system, user, schema, node)` 到 `calls`、回 `self.reply`），也是**測試檔自備**，不是 [Phase 15](./15-Phase15-Writing介面與呼叫追蹤.md) `tests/unit/conftest.py` 的那個共用 `fake_writer`。四者都放在測試檔的 fixture 區。
+`replace` 是 `dataclasses.replace`、`dt(value)` 是包一層 Phase 02 `parse_iso` 的 helper；`fake_repo` 用兩個 dict 當 DynamoDB 表與 S3 bucket，提供 `save_feature`／`save_tutorial`／`save_ticket`／`save_rule`／`save_validated_at_file`／`edges`／`written(prefix)`／`writes` 與 Phase 06–08、27 的讀寫原語（`put_meta`／`get_meta`／`get_tutorial`／`get_version`／`get_feature`／`put_object`／`get_object`／`object_exists`／`put_edge`／`query_pk`／`list_edges`／`scan_entity`／**`get_steps`**／`list_rules`／`find_active_tutorial_for_feature`；`get_steps` 是 Phase 23 `_missing_parts` 的核對會走到的，少了它 `create_version` 會 `AttributeError`）；`fake_ops` 必須實作 Phase 10 的 `load`／`record_version`／`record_model_output`（`allocate_version` 在 `load` 回 `None` 時會丟 `CoordinationError`，所以 fixture 要先放一筆 accepted 紀錄）；`fake_writer` 記下每次 `generate_json` 的 `(system, user, schema, node)` 到 `calls`、固定回 `self.reply`（**不是佇列**：`generate_validated_json` 的修正路徑會呼叫第二次，佇列版會因空佇列而炸掉，看不出「同一個壞回應被修正一次後確定失敗」），也是**測試檔自備**，不是 [Phase 15](./15-Phase15-Writing介面與呼叫追蹤.md) `tests/unit/conftest.py` 的那個共用 `fake_writer`。三個替身與 `GAP`／`dt` 都定義在 `test_ticket_decide.py`，另外兩支測試檔 `from test_ticket_decide import ...` 取類別再各自宣告 fixture（fixture 靠 import 傳遞會被 ruff 判成未使用的 import）；模組層級的 `fake_repo` 會**刻意遮蔽** `tests/unit/pipelines/conftest.py`（owner 是 Phase 38，本 Phase 不得修改）那個只有三個方法的同名 fixture。
 
 ```python
 GAP = TicketGap(cluster_id="c12", gap="找不到會前摘要入口", feature_id="Prepare", ticket_ids=("t_881",))
@@ -225,11 +226,11 @@ def test_record_decision_links_tickets_only_when_feature_is_valid(fake_repo, fak
         ["FEATURE#Prepare"] if linked else [])
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_decide.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_decide.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `cannot import name 'decide_ticket_action'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def decide_ticket_action(gap, *, repository):
@@ -264,16 +265,16 @@ def _link_tickets(gap, *, repository):
         repository.put_edge(ticket_pk(ticket_id), "ASKS_ABOUT", feature_pk(gap.feature_id))
 ```
 
-- [ ] **Step 4：補 KEEP 不寫內容的測試後跑綠並提交**
+- [x] **Step 4：補 KEEP 不寫內容的測試後跑綠並提交**
 
 KEEP 與 NO_FEATURE 兩條路徑都要斷言：沒有新的 `TUTORIAL#`／`VERSION#`／`STEP#` item，既有教學的 `current_version` 與全文完全沒變，而 `ticket-decision.json` 有可讀的 `action` 與 `gap`。再補一個重跑案例：同一個 `operation_id` 連呼叫兩次 `record_decision`，`ASKS_ABOUT` 邊仍只有一條、`feature_ids` 仍只有一個元素。執行 `uv run pytest tests/unit/pipelines/test_ticket_decide.py -q` 後 `git add src/training_kb/pipelines/ticket.py tests/unit/pipelines/test_ticket_decide.py` 並 `git commit -m "feat(ticket): 判斷 CREATE 與 KEEP"`。
 
 ### Task 2：slug 由程式決定，且只有 ticket pipeline 能建身分
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
-import inspect
+from pathlib import Path
 
 
 def test_slug_is_kebab_case_and_stable_across_retries(fake_repo):
@@ -285,19 +286,26 @@ def test_slug_is_kebab_case_and_stable_across_retries(fake_repo):
 
 
 def test_only_ticket_pipeline_creates_tutorial_identity():
-    from training_kb.pipelines import feedback, release, ticket
+    from training_kb.pipelines import ticket
 
     assert hasattr(ticket, "create_tutorial_identity")
-    for module in (release, feedback):
-        source = inspect.getsource(module)
+    others = sorted(path for path in Path(ticket.__file__).parent.glob("*.py")
+                    if path.name not in {"__init__.py", "ticket.py"})
+    assert others
+    for path in others:
+        source = path.read_text(encoding="utf-8")
         assert "create_tutorial_identity" not in source and "Tutorial(" not in source
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_create_v1.py tests/unit/pipelines/test_tutorial_identity_owner.py -q` 確認紅燈**
+`release.py` 與 `feedback.py` 是 Phase 44／46／52 的檔案，本 Phase 實作時**還不存在**，
+所以不 `import` 它們（會 `ImportError`），改掃 `pipelines/` 套件的 `*.py`：它們一落地
+就自動被這條測試蓋到，不必回來改測試。`inspect.getsource` 因此也換成 `Path.read_text`。
+
+- [x] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_create_v1.py tests/unit/pipelines/test_tutorial_identity_owner.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `cannot import name 'tutorial_slug'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -334,13 +342,13 @@ def create_tutorial_identity(gap, *, slug, topic, repository):
 
 `Tutorial` 的七個欄位就是模型的全部，不得多塞第八個（00A D-40）。先 `get_tutorial` 再 `put_meta(create_only=True)` 是刻意的：重試時直接回既有那一篇，只有真正併發撞鍵才會讓 `put_meta` 丟 `CoordinationError`。
 
-- [ ] **Step 4：補身分建立測試後跑綠並提交**
+- [x] **Step 4：補身分建立測試後跑綠並提交**
 
-斷言同群重試回同一篇且 `repository` 沒有第二次寫入、別群佔用時丟 `ContentError`、item 屬性只有模型七個欄位加 `RESERVED_ATTRS`。再直接斷言 `find_active_tutorial_for_feature("Prepare").slug == "prepare-meeting"`，證明下一輪同群工單會走 KEEP。執行同一組測試後 `git add src/training_kb/pipelines/ticket.py tests/unit/pipelines/test_ticket_create_v1.py tests/unit/pipelines/test_tutorial_identity_owner.py` 並 `git commit -m "feat(ticket): 建立教學身分與 slug"`。
+斷言同群重試回同一篇且 `repository` 沒有第二次寫入、別群佔用時丟 `ContentError`、item 屬性只有模型七個欄位加 `RESERVED_ATTRS`。再直接斷言 `find_active_tutorial_for_feature("Prepare").slug == "prepare-meeting"`，證明下一輪同群工單會走 KEEP。執行同一組測試後提交。**實作時 Task 2 與 Task 3 合成一次提交** `feat(ticket): 建立教學身分與未發布第一版`：§6 與 §7 在同一支 `pipelines/ticket.py` 上，拆成兩次會留下 import 不完整、測試紅燈的中間狀態。
 
 ### Task 3：建立未發布的第一版
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_create_first_version_writes_unpublished_v1(fake_repo, fake_writer, fake_ops):
@@ -363,26 +371,29 @@ def test_create_first_version_writes_unpublished_v1(fake_repo, fake_writer, fake
 
 `applies_when` 傳的是 `StepType` 的值 `"click_ui"`（Phase 04 的欄位型別就是 `StepType`），**不是** `"step.type == click_ui"` 這種條件字串（00A D-10）。`save_validated_at_file` 是測試替身寫 `operations/rules/validated_at.json` 的捷徑；少了它，Phase 19 會因為「active 規則缺驗證時間」直接丟 `PermanentError`。`four_step_draft(feature_id=...)` 是同檔 helper，回一個**符合 `TutorialDraft` schema 的 dict**，`title` 固定是 ASCII 的 `"Prepare Meeting"`（slug 才會是 `prepare-meeting`；若 `title` 是中文，依 Task 2 的規則會退回 `prepare`），四步型態 `read`／`click_ui`／`click_ui`／`read`、`feature_id` 全是傳入值。
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_create_v1.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_create_v1.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `cannot import name 'create_first_version'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def create_first_version(gap, *, repository, writer, operations, operation_id, now):
-    if decide_ticket_action(gap, repository=repository) != "CREATE":
+    if decide_ticket_action(gap, repository=repository) != "CREATE" \
+            and _own_retry_tutorial(gap, repository=repository) is None:
         raise PermanentError(f"群 {gap.cluster_id} 不是 CREATE，不能建立第一版")
     rules = repository.list_rules(RuleStatus.ACTIVE)
     by_type = rules_for_content(rules, ALL_STEP_TYPES, load_validated_at(repository))
     injected = list({r.rule_id: r for st in ALL_STEP_TYPES for r in by_type[st]}.values())
     features = known_features(repository)
+    known = frozenset(feature.feature_id for feature in features)
     system, user = prompt_write_tutorial(_evidence_text(gap, repository),
                                          [feature.feature_id for feature in features],
                                          render_rules_block(injected))
-    draft = writer.generate_json(system, user, TutorialDraft, operation_id=operation_id, node="create_v1")
-    content = TutorialContent.model_validate(draft)      # draft 是 dict，不是模型
-    validate_content(content, frozenset(feature.feature_id for feature in features))
+    draft = generate_validated_json(writer, system, user, TutorialDraft,
+                                    _tutorial_draft_validator(known),   # 00A §6.5：唯一修正入口
+                                    operation_id=operation_id, node="create_v1")
+    content = _as_content(draft)                         # draft 是 dict，不是模型
     slug = tutorial_slug(gap, content.title, repository=repository)
     create_tutorial_identity(gap, slug=slug, topic=content.title, repository=repository)
     plan = allocate_version(slug, operation_id, operations, repository=repository,
@@ -392,9 +403,9 @@ def create_first_version(gap, *, repository, writer, operations, operation_id, n
     return plan
 ```
 
-- [ ] **Step 4：補失敗與重試測試後跑綠並提交**
+- [x] **Step 4：補失敗與重試測試後跑綠並提交**
 
-模型回三段內容或某一步沒有 Feature 時，`validate_content` 丟錯且**沒有**任何 `TUTORIAL#` 被建立；同一個 `operation_id` 重跑取得同一個 `version_id`（Phase 20 保證）且不重複建立教學；`ALL_STEP_TYPES` 以外的 `step.type` 被拒絕。執行 `uv run pytest tests/unit/pipelines/test_ticket_create_v1.py -q` 後 `git add src/training_kb/pipelines/ticket.py src/training_kb/analytics/status_writer.py tests/unit/pipelines/test_ticket_create_v1.py` 並 `git commit -m "feat(ticket): 建立未發布第一版"`。
+模型回三段內容或某一步沒有 Feature 時，`validate_content` 丟錯且**沒有**任何 `TUTORIAL#` 被建立；同一個 `operation_id` 重跑取得同一個 `version_id`（Phase 20 保證）且不重複建立教學；`ALL_STEP_TYPES` 以外的 `step.type` 被拒絕。執行 `uv run pytest tests/unit/pipelines/test_ticket_create_v1.py -q` 後與 Task 2 一起提交（見 Task 2 Step 4 的說明）。
 
 ## 8. 驗收矩陣
 
@@ -441,10 +452,26 @@ def create_first_version(gap, *, repository, writer, operations, operation_id, n
 
 ## 11. 完成清單
 
-- [ ] 五個產出函式加 `TicketAction`、`TicketGap`、`ALL_STEP_TYPES` 的簽名與本文件一致，三種結果都有直接斷言。
-- [ ] active 未發布 KEEP 與 retired 不阻擋 CREATE 兩個邊界都有獨立測試，且兩條路徑的教學內容與版本數完全沒變。
-- [ ] `create_tutorial_identity` 寫進 `feature_ids=[feature_id]`，且有測試證明下一輪會走 KEEP；item 沒有模型以外的欄位。
-- [ ] CREATE／KEEP 會寫 `Ticket.feature_ids`（0 或 1 個元素）與一條 `ASKS_ABOUT` 邊，`NO_FEATURE` 兩者都不寫；重跑不會變成兩條。
-- [ ] slug 由程式產生、驗證 kebab-case 且重試穩定；模型不產任何 ID；`generate_json` 拿回的是 `dict`，全檔沒有把 schema 當模型用的寫法。
-- [ ] 第一版 `reason` 精確等於 `gap:<cluster_id>`、`published_at` 為 `null`，`rules_applied` 只含本次實際注入 prompt 的 ID，驗證時間來自 `load_validated_at`。
-- [ ] 有測試守住「只有 ticket pipeline 能建立 Tutorial 身分」；未把未發布 v1 描述成已發布，O3 未過不得宣稱公開發布通過。
+- [x] 五個產出函式加 `TicketAction`、`TicketGap`、`ALL_STEP_TYPES` 的簽名與本文件一致，三種結果都有直接斷言。
+- [x] active 未發布 KEEP 與 retired 不阻擋 CREATE 兩個邊界都有獨立測試，且兩條路徑的教學內容與版本數完全沒變。
+- [x] `create_tutorial_identity` 寫進 `feature_ids=[feature_id]`，且有測試證明下一輪會走 KEEP；item 沒有模型以外的欄位。
+- [x] CREATE／KEEP 會寫 `Ticket.feature_ids`（0 或 1 個元素）與一條 `ASKS_ABOUT` 邊，`NO_FEATURE` 兩者都不寫；重跑不會變成兩條。
+- [x] slug 由程式產生、驗證 kebab-case 且重試穩定；模型不產任何 ID；`generate_json` 拿回的是 `dict`，全檔沒有把 schema 當模型用的寫法。
+- [x] 第一版 `reason` 精確等於 `gap:<cluster_id>`、`published_at` 為 `null`，`rules_applied` 只含本次實際注入 prompt 的 ID，驗證時間來自 `load_validated_at`。
+- [x] 有測試守住「只有 ticket pipeline 能建立 Tutorial 身分」；未把未發布 v1 描述成已發布，O3 未過不得宣稱公開發布通過。
+
+## 12. 實作裁決紀錄（2026-09-14）
+
+實作時與本文件、00A 或既有程式對不上的地方，依 COMMON.md 的「設計 > 00A > Phase 文件」自行裁決，
+逐條記在這裡；上面的內文已同步改成實際行為。
+
+| # | 衝突 | 裁決與理由 |
+|---|---|---|
+| 1 | §5 Consumes 與 §7 Task 3 Step 3 用 `writer.generate_json(...)` 之後由呼叫端自己 `model_validate` ＋ `validate_content`；00A §6.5 與 COMMON.md 都寫「`generate_validated_json` 是唯一合法的『schema 後業務驗證＋最多一次修正』入口，呼叫端不得自己重試」，而 `writing/validators.py` 的表格也把 `TutorialDraft` 的 correction 記成「是」。 | **採 00A**：`create_first_version` 呼叫 `generate_validated_json(...)` **一次**，業務檢查包成 `_tutorial_draft_validator`（內容仍然只是 Phase 21 的 `validate_content`，一份都沒重寫）。副作用是「模型回三段內容」的失敗型別從 `ContentError` 變成 `PermanentError`（`generate_validated_json` 修正一次後丟的型別）——`ContentError` 是 `PermanentError` 的子類，測試一律 `pytest.raises(PermanentError)`，兩種情況都蓋得到。 |
+| 2 | §5 Consumes 列的 `Repository.find_active_tutorial_for_feature`（Phase 27）**還沒實作**，而本 Phase 不得修改 `repository.py`。 | 模組私有的 `_active_tutorial(repository, feature_id)`：`repository` 滿足 `_ActiveTutorialFinder`（`@runtime_checkable` Protocol）時直接委派，否則走**同一份判準**的基表查法（`scan_entity("TUTORIAL")` ＋ `SK == META` ＋ `status == active` ＋ `feature_id in feature_ids`，多篇取 slug 升序第一筆，與 Phase 27 §6 逐字相同）。測試的 `fake_repo` 有這個方法，所以委派路徑是被跑到的；P27 落地後 Protocol 與 fallback 可以一起刪掉，判準不變。 |
+| 3 | §6 步驟 1「不是 CREATE 就 `PermanentError`」與 §7 Task 3 Step 4「同一個 `operation_id` 重跑取得同一個 `version_id`」互相矛盾：第一次跑完之後 `TUTORIAL#<slug>` 已經 active，重跑時 `decide_ticket_action` 會回 KEEP。 | 守衛改成「不是 CREATE **而且** `_own_retry_tutorial(...)` 是 `None`」才 `PermanentError`。`_own_retry_tutorial` 用 `Tutorial.cluster_id` 分辨兩件事：**同一群**的 active 教學就是自己上一次留下的，允許沿用同版號補齊（F36、D26）；**別群**（含 Demo 直接寫入的種子教學）佔住 Feature 就是真正的 KEEP，照樣 `PermanentError`。 |
+| 4 | §7 Task 2 Step 1 的 `test_only_ticket_pipeline_creates_tutorial_identity` 直接 `from training_kb.pipelines import feedback, release`，但這兩支檔案是 Phase 44／46／52 的，本 Phase 實作時不存在（會 `ImportError`）。 | 改掃 `pipelines/` 套件的 `*.py`（排除 `__init__.py` 與 `ticket.py`）：它們一落地就自動被蓋到，不必回來改測試。內文已改。 |
+| 5 | §7 Task 2／Task 3 各要一次提交。 | 合成一次 `feat(ticket): 建立教學身分與未發布第一版`：§6 與 §7 在同一支檔案上，拆成兩次會留下 import 不完整、測試紅燈的中間狀態。 |
+| 6 | `create_tutorial_identity` 與 `_link_tickets` 的片段直接用 `gap.feature_id`，但它的型別是 `str \| None`（mypy strict 過不了）。 | 兩者都先收成區域變數並在 `None` 時丟 `ContentError`。這不只是型別問題：`NO_FEATURE` 永遠不得建立教學身分、也不得連工單（D-52），多這一道守衛剛好把它變成可執行的斷言。 |
+| 7 | §4 預計檔案沒有列 `src/training_kb/analytics/__init__.py`，而 00A §3.2 把它的 owner 記給 P53。 | 本 Phase 建立**最小**版本（只有 docstring、不 re-export 任何名稱），否則 `[tool.setuptools.packages.find]` 找不到 `training_kb.analytics` 子套件。P53 要加東西時直接改，不必先刪。 |
+| 8 | `writing/prompts.py` 的 `prompt_write_tutorial` 只有一行 docstring，沒有 D-67 要求的那句「不可信文字一律經 `_as_data` 包進 `<source_data>`」。 | 只補 docstring（證據組法、三個參數不可改、`<active_rules>` 只放本次注入的規則），**行為一個字都沒改**——證據挑選在 `pipelines/ticket.py` 的 `_evidence_text`。 |
