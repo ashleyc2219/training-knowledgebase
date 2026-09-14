@@ -10,7 +10,9 @@
 
 ## 全域限制
 
-- 唯一主來源是 [Training KB 設計 §8.2、§9.2、§10、§14.3](../../design/training-kb.md)。前置為 [Phase 27：固定圖譜查詢](./27-Phase27-固定圖譜查詢.md)，未通過時停止；下一階段是 [Phase 29：共用 Pipeline 執行器與 ASL 失敗語意](./29-Phase29-共用Pipeline執行器與ASL失敗語意.md)。
+- 唯一主來源是 [Training KB 設計 §8.2、§9.2、§10、§14.3](../../design/training-kb.md)。前置為 [Phase 23](./23-Phase23-未發布版本與關係完整寫入.md) 與 [Phase 27：固定圖譜查詢](./27-Phase27-固定圖譜查詢.md)，未通過時停止；下一階段是 [Phase 29：共用 Pipeline 執行器與 ASL 失敗語意](./29-Phase29-共用Pipeline執行器與ASL失敗語意.md)。
+- **與 Phase 23 修正後的核對對接（controller 2026-09-14）：** `verify_version_complete` 現在也會把「多出來的 STEP／`APPLIED_TO`／`SUPERSEDES` 邊」當成問題，所以刪多餘邊與改寫 `applied_to` 必須一起做；本 Phase 的重建結果必須讓 `verify_version_complete` 回 `True`（整合測試直接斷言）。
+- **IAM 相依（controller 2026-09-14 裁決）：** Phase 09 的真實資料角色刻意沒有 `dynamodb:DeleteItem`，所以 `delete_edge` 在雲端還不能用。本 Phase 照 00A 實作它並在 moto 上驗收；授權留給下一批（P41／P57 改 CDK 時）以「只對 `SK begins_with APPLIED_TO#`」的條件補上。
 - 本階段不做：**不替換錯邊、不移除既有 `REFERENCES` 引用、不修改既有步驟的文字、不產生新版本、不改 `published_at` 或 `current_version`**、不新增第四條教學 pipeline、不建立 Feature。
 - `backfill_references` 只處理**已發布版本**（設計 §10）；`published_at` 為 `None` 的版本可能正在 [Phase 23](./23-Phase23-未發布版本與關係完整寫入.md) 的建版途中，補寫會把半成品補成「看起來完整」，一律丟 `PermanentError` 拒絕。
 - `backfill_references` 一律不呼叫模型；需要從原文重新判讀 Feature 的案例全部列進 `unresolved`（見第 6 節的本計畫選擇）。
@@ -83,7 +85,7 @@ RULE#R-007.applied_to 改寫成這兩個；APPLIED_TO#VERSION#share-summary@v1 �
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 修改 | `src/training_kb/repository.py` | `BackfillReport`、`backfill_references`、`rebuild_rule_projection`、`delete_edge`。 |
+| 修改 | `src/training_kb/repository.py` | `DELETABLE_RELATIONS`、`BackfillReport`、`delete_edge`、`backfill_references`、`rebuild_rule_projection`。 |
 | 測試 | `tests/unit/test_backfill_references.py` | 補缺、不替換、conflicts、unresolved、不改歷史。 |
 | 測試 | `tests/unit/test_rule_projection.py` | 以 `rules_applied` 重建、去重、刪多餘邊、不動 VERSION。 |
 | 測試 | `tests/integration/test_maintenance_batch.py` | 分頁、空頁與重跑冪等（moto）。 |
@@ -110,8 +112,10 @@ TutorialVersion / AuthoringRule（Phase 04）、PermanentError / CoordinationErr
 ### Produces
 
 ```python
+DELETABLE_RELATIONS: frozenset[str] = frozenset({"APPLIED_TO"})   # 模組級
+
 @dataclass(frozen=True)
-class BackfillReport:
+class BackfillReport:                                             # 模組級
     added: tuple[str, ...]
     conflicts: tuple[str, ...]
     unresolved: tuple[str, ...]
@@ -120,6 +124,11 @@ def backfill_references(self, version_id: str) -> BackfillReport: ...
 def rebuild_rule_projection(self, rule_id: str) -> list[str]: ...
 def delete_edge(self, pk: str, relation: str, target_pk: str) -> None: ...
 ```
+
+`DELETABLE_RELATIONS` 與 `BackfillReport` 是模組級名稱，必須放在 `Repository` **之前**
+（方法的型別註解在 class body 求值時就要看得到它們）；三個方法接在 class 尾端。
+`parse_markdown` 一律在 `backfill_references` **函式內** import：相依方向是 `content` 呼叫
+`repository`（設計 §5），module 層反向 import 會循環（`adapters.py` 對 `ingress.py` 同樣處理）。
 
 三個名稱都加在既有 `Repository` 類別上。`BackfillReport` 的三個欄位都是**步驟 PK 字串**的 tuple（例如 `"STEP#prepare-meeting@v2#3"`），已排序且去重，讓兩次執行結果可以直接比對。`delete_edge` 是 `put_edge` 的反向操作，**只允許刪 `APPLIED_TO`**（00A 第 6.3 節）：`REFERENCES` 是已發布版的歷史事實，程式不得刪（F40），所以這道白名單就是「不替換錯邊」的程式保險絲。本 Phase 只在 `rebuild_rule_projection` 內用它。
 
@@ -139,7 +148,9 @@ version = get_version(version_id)；published_at 為 None 或版本不存在 -> 
    +-- 沒有邊，且 feature_id 查不到 Feature -> unresolved（不建立 Feature）
 ```
 
-**先看清楚資料形狀：** 設計 §9.1 把步驟與它的 Feature 引用放在同一筆 item（`SK=REFERENCES#FEATURE#…`），所以「缺邊」和「缺 STEP item」是同一件事，不是兩個分支。補邊就是照 S3 全文把那筆 item 寫回去：`target` 與 `entity` 由 `put_edge` 自己導出（**不可以把 `entity` 放進 `attrs`**，Phase 07 會因保留屬性丟 `PermanentError`），`attrs` 只帶 `tutorial_version`、`number`、`type`、`text`，值逐字取自 `parse_markdown`——這正是設計 §10 說的「優先沿用已保存的版本建立輸出」。
+**先看清楚資料形狀：** 設計 §9.1 把步驟與它的 Feature 引用放在同一筆 item（`SK=REFERENCES#FEATURE#…`），所以「缺邊」和「缺 STEP item」是同一件事，不是兩個分支。補邊就是照 S3 全文把那筆 item 寫回去：`target` 與 `entity` 由 `put_edge` 自己導出（**不可以把 `entity` 放進 `attrs`**，Phase 07 會因保留屬性丟 `PermanentError`），`attrs` **只帶 `type` 與 `text`**，值逐字取自 `parse_markdown`——這正是設計 §10 說的「優先沿用已保存的版本建立輸出」。
+
+**（2026-09-14 更正，00A §3.6 優先）** 本節原本寫 `attrs` 還要帶 `tutorial_version` 與 `number`，與 00A §3.6「模型欄位可以由鍵導出時不落成 item 屬性——STEP 邊只存 `type` 與 `text`」以及 Phase 23 `_write_edges` 的實際寫法都不一致，會讓同一份資訊在 item 上多出一份會不一致的副本。補回來的 item 必須與 Phase 23 寫的**完全一樣**：屬性集合恰好是 `{PK, SK, target, entity, type, text}`，`tutorial_version`／`number` 由 `parse_step_pk` 還原、`feature_id` 由 `target` 還原。
 
 **本計畫選擇（需要審閱者確認）：** 設計 §10 允許「若需從原文重新抽取 Feature，可呼叫文字分析」，但本 Phase 不呼叫模型，理由有三：`Repository` 依設計 §5 不得反向依賴 `writing`；`backfill_references(self, version_id)` 的簽名沒有 `Writer` 參數；設計同時要求「必須確認恰好一個既有 Feature 才補邊，不能確定就列為待處理」。已發布版的 S3 全文本來就把 `feature=<id>` 寫在步驟行上（Phase 22 的固定格式），所以正常情況根本不需要重新判讀；判讀不出來的（全文指向不存在的 Feature）一律進 `unresolved`，由維護者處理。這是收斂而非放寬，不影響任何 Rule 的可驗收性；若之後要加回模型輔助，必須另開明示入口並與「一般關係查詢不呼叫 AI」分開計數（D46）。
 
@@ -172,9 +183,9 @@ scan_entity("VERSION")（讀完分頁，只留 SK == META） -> rules_applied �
 
 ### Task 1：只補缺邊，不替換錯邊
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
-`repo` 是兩個測試檔共用的假 `Repository` fixture（放 `conftest.py`）：一個 dict 當 DynamoDB 表、一個 dict 當 S3；`drop_edge(pk, relation, target=None)`／`set_edge`／`add_edge` 直接動邊，`set_rules_applied(version_id, ids)` 改版本欄位，`edge_item(pk, relation)` 回整筆 item 供 byte 比對、`edge_targets(pk, relation)` 回排序後的 target 清單，`get_rule(rule_id)` 讀 `RULE` metadata，`markdown_step(version_id, number)` 回 S3 全文解析出的那一步，`snapshot(slug)`／`full_snapshot()` 記下版本清單、各步文字、S3 物件、`published_at`、`current_version`，以及本次寫過的 PK 與 S3 key。
+`repo` 是兩個測試檔共用的 fixture，定義在 `tests/unit/test_backfill_references.py`（**不放 `conftest.py`**：`tests/unit/conftest.py` 的 owner 是 P15、修改者只有 P55，00A §3.2；`test_rule_projection.py` 直接 import 本檔，與 Phase 23 的 `test_version_complete.py` 同一個作法）。它是一個**真的** `Repository`，只有底下的儲存層換成記憶體裡的 `FakeTable`／`FakeBucket`（**不是假的 `Repository`**：假掉被測物件的話「只補缺的邊」「不替換錯邊」「讀完分頁」全部會變成在測假物件；沿用 Phase 27 `test_graph_queries.py` 的作法）。`FakeTable` 只實作 `Repository` 真的會呼叫的六個 boto3 操作（`put_item`／`get_item`／`update_item`／`delete_item`／`query`／`scan`），`scan` 可以排出**空的中間頁**（空頁仍帶 `LastEvaluatedKey`）。器材方法：`drop_edge(pk, relation, target=None)`／`set_edge`／`add_edge` 直接動邊，`set_rules_applied(version_id, ids)` 改版本欄位，`edge_item(pk, relation)` 回整筆 item 供 byte 比對、`edge_targets(pk, relation)` 回排序後的 target 清單，`get_rule(rule_id)` 讀 `RULE` metadata，`markdown_step(version_id, number)` 回 S3 全文解析出的那一步，`snapshot(slug)`／`full_snapshot()` 記下版本清單、各步文字、S3 物件、`published_at`、`current_version`，以及本次寫過的 PK 與 S3 key。
 
 ```python
 import pytest
@@ -210,15 +221,15 @@ def test_backfill_refuses_unpublished_version(repo):
         repo.backfill_references("share-summary@v2")
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_backfill_references.py -q
 ```
 
-預期：FAIL，訊號包含 `cannot import name 'BackfillReport'`。
+預期：FAIL，訊號包含 `cannot import name 'BackfillReport'`（實測相符）。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 三個 Task 都寫在 `src/training_kb/repository.py`，需要的 import（`dataclasses.dataclass`、`PermanentError`、`META`／`step_pk`／`feature_pk`／`rule_pk`／`edge_sk`、`TutorialVersion`／`AuthoringRule`、`parse_markdown`、`item_to_model`）加一次就好。
 
@@ -250,21 +261,24 @@ def backfill_references(self, version_id):
         if self.get_feature(draft.feature_id) is None:
             unresolved.append(pk)                      # 無法確認恰好一個既有 Feature
             continue
-        self.put_edge(pk, "REFERENCES", target, {
-            "tutorial_version": version_id, "number": draft.number,
-            "type": str(draft.type), "text": draft.text,
-        })
+        self.put_edge(pk, "REFERENCES", target,
+                      {"type": str(draft.type), "text": draft.text})   # 只有兩個屬性
         added.append(pk)
-    return BackfillReport(tuple(sorted(added)), tuple(sorted(conflicts)), tuple(sorted(unresolved)))
+    return BackfillReport(_sorted_step_pks(added), _sorted_step_pks(conflicts),
+                          _sorted_step_pks(unresolved))
 ```
 
-- [ ] **Step 4：補上 unresolved 與冪等案例並跑綠燈**（`unresolved`：全文第 4 步的 `feature=` 指向基表不存在的 Feature，斷言 `added == ()` 且沒有新增任何 `FEATURE#` item；冪等：連跑兩次，第二次 `added == ()` 且其餘欄位相同）
+`_sorted_step_pks(values)` 是同檔的模組級私有函式：`tuple(sorted(set(values), key=parse_step_pk))`。
+排序鍵用 `parse_step_pk`（回 `(version_id, number)`）**不是字串本身**——字典序會把
+`STEP#a@v2#10` 排到 `#3` 前面，與 `version_sort_key` 擋掉的是同一個坑。
+
+- [x] **Step 4：補上 unresolved 與冪等案例並跑綠燈**（`unresolved`：全文第 4 步的 `feature=` 指向基表不存在的 Feature，斷言 `added == ()` 且沒有新增任何 `FEATURE#` item；冪等：連跑兩次，第二次 `added == ()` 且其餘欄位相同）
 
 ```bash
 uv run pytest tests/unit/test_backfill_references.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/repository.py tests/unit/test_backfill_references.py
@@ -273,7 +287,7 @@ git commit -m "feat(repository): 只補缺的 Feature 引用邊"
 
 ### Task 2：backfill 不改歷史、不產新版
 
-- [ ] **Step 1：建立失敗測試**（補邊必然寫出一筆 `PK=STEP#…`，要鎖的是**只寫 `added` 那幾個 PK、內容逐字等於 S3 全文，其餘一律不動**）
+- [x] **Step 1：建立失敗測試**（補邊必然寫出一筆 `PK=STEP#…`，要鎖的是**只寫 `added` 那幾個 PK、內容逐字等於 S3 全文，其餘一律不動**）
 
 ```python
 def test_backfill_never_touches_history_or_creates_versions(repo):
@@ -292,7 +306,7 @@ def test_backfill_never_touches_history_or_creates_versions(repo):
     assert after.steps_text[3] == repo.markdown_step("prepare-meeting@v2", 3).text
 ```
 
-- [ ] **Step 2：讓 fake repository 記錄每次寫入的鍵並確認紅燈**
+- [x] **Step 2：讓 fake repository 記錄每次寫入的鍵並確認紅燈**
 
 `written_pks` 記每次 `put_item` 的 PK、`written_s3_keys` 記每次 `put_object` 的 key。一旦出現 `VERSION#`、`TUTORIAL#`、`RULE#` 或任何 S3 key，測試就失敗。
 
@@ -300,9 +314,12 @@ def test_backfill_never_touches_history_or_creates_versions(repo):
 uv run pytest tests/unit/test_backfill_references.py -q -k never_touches
 ```
 
-預期：FAIL，訊號包含 `AttributeError` 或 `written_pks`（fixture 尚未記錄寫入）。
+預期：FAIL，訊號包含 `AttributeError` 或 `written_pks`（fixture 尚未記錄寫入）。實測：Task 1／2 的
+斷言寫在同一支檔、同一輪 RED 一起看到，訊號是 `'MaintenanceRepository' object has no attribute
+'backfill_references'`；`written_pks`／`written_s3_keys` 的記錄從一開始就做在 `FakeTable`／
+`FakeBucket` 上（快照會把寫入紀錄清空，所以 `after.written_pks` 恰好是那個動作寫過的 PK）。
 
-- [ ] **Step 3：跑綠燈並提交**
+- [x] **Step 3：跑綠燈並提交**
 
 ```bash
 uv run pytest tests/unit/test_backfill_references.py -q
@@ -310,9 +327,15 @@ git add tests/unit/test_backfill_references.py
 git commit -m "test(repository): 鎖定 backfill 不改歷史"
 ```
 
+**（2026-09-14 實作差異）** Task 1 與 Task 2 的斷言寫在同一支檔、同一輪 RED 一起看到，
+所以合併成 Task 1 的那一次提交（`feat(repository): 只補缺的 Feature 引用邊`），沒有另外一次
+test-only commit。`repository.py` 的 `delete_edge`／`rebuild_rule_projection` 也在同一次落地
+（Task 1 Step 3 已說明「三個 Task 都寫在 `src/training_kb/repository.py`」）；Task 3 的 RED 是
+把這兩個方法暫時移除後實測出來的，見報告第 3 節。
+
 ### Task 3：以 rules_applied 重建規則投影
 
-- [ ] **Step 1：建立失敗測試**（新檔 `tests/unit/test_rule_projection.py` 開頭同樣要 `import pytest` 與 `from training_kb.errors import PermanentError`）
+- [x] **Step 1：建立失敗測試**（新檔 `tests/unit/test_rule_projection.py` 開頭同樣要 `import pytest` 與 `from training_kb.errors import PermanentError`）
 
 ```python
 def test_rebuild_rule_projection_uses_rules_applied_as_the_only_authority(repo):
@@ -337,15 +360,16 @@ def test_delete_edge_only_accepts_applied_to(repo):
         repo.delete_edge("STEP#prepare-meeting@v2#3", "REFERENCES", "FEATURE#Prepare")
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_rule_projection.py -q
 ```
 
 預期：FAIL，訊號包含 `'Repository' object has no attribute 'rebuild_rule_projection'`。
+實測：fixture 是 `Repository` 的子類別，所以訊息前綴是 `'MaintenanceRepository'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 DELETABLE_RELATIONS = frozenset({"APPLIED_TO"})
@@ -367,33 +391,41 @@ def rebuild_rule_projection(self, rule_id):
         {v.version_id for v in versions if rule_id in v.rules_applied}, key=version_sort_key
     )
     pk = rule_pk(rule_id)
+    rule = self.get_meta(pk, AuthoringRule)      # 先確認規則在，才動任何一筆邊
+    if rule is None:
+        raise PermanentError(f"找不到規則 {rule_id}")
     wanted = {version_pk(version_id) for version_id in expected}   # 前綴只由 keys.py 加
     current = {str(edge["target"]) for edge in self.list_edges(pk, "APPLIED_TO")}
     for target in sorted(wanted - current):
         self.put_edge(pk, "APPLIED_TO", target)
     for target in sorted(current - wanted):
         self.delete_edge(pk, "APPLIED_TO", target)
-    rule = self.get_meta(pk, AuthoringRule)
-    if rule is None:
-        raise PermanentError(f"找不到規則 {rule_id}")
     if rule.applied_to != expected:
         self.update_meta(pk, {"applied_to": expected}, expected_revision=self.revision_of(pk))
     return expected
 ```
 
-- [ ] **Step 4：補上三個案例並跑綠燈**（沒有任何版本套用該規則時回 `[]`、刪光所有邊、`applied_to` 改成 `[]`；VERSION 的 Scan 中間夾一個空頁仍讀到最後一頁；`RULE.status` 與所有 `VERSION` item 前後完全不變）
+**（2026-09-14 更正）** `get_meta` 的存在確認移到**動邊之前**：規則不存在時（基表只剩孤兒邊）
+原本的順序會先刪掉幾條邊才丟 `PermanentError`，留下「邊改了一半、欄位沒改」的中間狀態。
+`update_meta` 的 `changes` 值要先宣告成 `list[DynamoValue]`（`list` 在 mypy 下是不變的，
+直接傳 `list[str]` 過不了 strict）。
+
+- [x] **Step 4：補上三個案例並跑綠燈**（沒有任何版本套用該規則時回 `[]`、刪光所有邊、`applied_to` 改成 `[]`；VERSION 的 Scan 中間夾一個空頁仍讀到最後一頁；`RULE.status` 與所有 `VERSION` item 前後完全不變）。另外補了四條：`@v10` 依版號而不是字典序排、`rules_applied` 含該規則的**未發布版**照樣算（權威是 `rules_applied` 不是 `published_at`，與 Phase 27 的 `list_versions_applying_rule` 同一套判準）、規則不存在時孤兒邊原封不動、`revision` 不符時 `CoordinationError` 往外拋且 `applied_to` 沒被覆寫。
 
 ```bash
 uv run pytest tests/unit/test_rule_projection.py -q
 uv run pytest tests/integration/test_maintenance_batch.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
-git add src/training_kb/repository.py tests/unit/test_rule_projection.py tests/integration
+git add tests/unit/test_rule_projection.py tests/integration/test_maintenance_batch.py
 git commit -m "feat(repository): 以 rules_applied 重建規則投影"
 ```
+
+（`git add tests/integration` 整個目錄會把別的 agent 進行中的檔案一起提交，COMMON.md 的 git 規則
+只允許逐檔 add；`repository.py` 的三個方法在 Task 1 那一次提交就一起落地，見下方說明。）
 
 ## 8. 驗收矩陣
 
@@ -412,6 +444,8 @@ git commit -m "feat(repository): 以 rules_applied 重建規則投影"
 
 人工驗收：對同一篇教學在執行前後各匯出一次 `VERSION`、`STEP`、`tutorials/<slug>/v<n>.md` 與 `v<n>.diff`，除了 `added` 那幾筆 `STEP` 以外必須 byte 相同，而補回來的那筆要逐欄比對 `.md` 的同一步；再用 [Phase 27](./27-Phase27-固定圖譜查詢.md) 的 `find_current_published_steps_referencing` 確認補邊後結果變完整。不能只看測試顯示 PASS。
 
+**moto 的 GSI 是即時的**（Phase 27 報告 §5）：整合測試刪掉 STEP item 之後 `by_target` 候選也跟著消失，所以看到的是「反查安靜地少一步」，不是 Phase 27 那條 `PermanentError`。真實 DynamoDB 的 GSI 落後時才會走到 `PermanentError` 那條路徑；兩種症狀的修法都是同一個 backfill，但**真實行為未驗證**，留給 P41 起的真實接線（controller 2026-09-14「離線開發優先」）。
+
 ## 9. 常見錯誤與停止條件
 
 | 症狀 | 原因 | 修正／停止 |
@@ -419,7 +453,7 @@ git commit -m "feat(repository): 以 rules_applied 重建規則投影"
 | 錯邊被改成「正確」的 Feature | 把 backfill 當資料清理 | 停止：F40 只允許增加缺少的邊；錯邊另列待處理，`delete_edge` 也擋掉 `REFERENCES`。 |
 | 同一步出現兩條 `REFERENCES` 邊 | 已有邊時仍追加 | 停止：每步恰好一個 Feature（D05）；改成記 `conflicts`。 |
 | `added` 永遠是空的 | 先用 `get_steps` 判斷「有沒有 STEP item」，再判斷「有沒有邊」——兩者是同一筆，第一關就把缺邊案例吃成 `unresolved` | 只用 `list_edges(step_pk(...), "REFERENCES")` 判斷，缺了就依 S3 全文補。 |
-| `PermanentError: edge attributes are reserved` | 把 `entity` 或 `target` 塞進 `put_edge` 的 `attrs` | 只傳 `tutorial_version`／`number`／`type`／`text`，其餘由 `put_edge` 導出。 |
+| `PermanentError: edge attributes are reserved` | 把 `entity` 或 `target` 塞進 `put_edge` 的 `attrs` | 只傳 `type`／`text`，其餘（`target`、`entity`、`tutorial_version`、`number`、`feature_id`）一律由 `put_edge` 導出或由鍵還原（00A §3.6）。 |
 | backfill 順手產生新版本或造出 Feature | 想「修好順便重發」、把 `unresolved` 當成要補齊 | 停止：不建版本、不改既有文字、不切 `current_version`、不造 Feature。 |
 | `applied_to` 只增不減；或重建時順手改 `rules_applied`／`RULE.status` | 把投影當歷史紀錄、搞反權威方向、把修復當驗證 | `applied_to` 是投影，多餘邊要刪；`VERSION` 一個欄位都不能寫，只有 Analytics 能寫驗證後 status。 |
 | 用 backfill 補救 partial publish | 把修復當 O3 解法 | 停止：發布同步問題留在 [Phase 12](./12-Phase12-O3發布切換整合驗證.md)／25 的 FAIL。 |
@@ -439,12 +473,12 @@ git commit -m "feat(repository): 以 rules_applied 重建規則投影"
 
 ## 11. 完成清單
 
-- [ ] `BackfillReport`、`backfill_references`、`rebuild_rule_projection`、`delete_edge` 簽名符合本文件與 00A 第 6.3 節。
-- [ ] `added`／`conflicts`／`unresolved` 都是排序去重的步驟 PK，重跑結果可直接比對。
-- [ ] 有測試證明：`backfill_references` 拒絕未發布或不存在的版本；`conflicts` 案例前後的錯邊 item byte 相同；`delete_edge` 擋掉 `REFERENCES`。
-- [ ] 有測試證明 backfill 只寫 `added` 列出的那幾個 `STEP#` PK、內容逐字取自 S3 全文；版本數、其他步驟文字與 S3 物件全部不變。
-- [ ] `rebuild_rule_projection` 以 `VERSION.rules_applied` 為唯一權威，補缺邊、刪多餘邊並去重排序；raw item 先濾 `SK != META` 再經 `item_to_model`。
-- [ ] 重建過程不寫任何 `VERSION` item，也不寫 `RULE.status`；`update_meta` 衝突時讓 `CoordinationError` 往外拋。
-- [ ] 分頁與空頁案例通過；兩個函式重跑皆冪等。
-- [ ] 查詢知識圖譜 Rule 7 與套用教學規則 Rule 6 各有直接 assertion，其餘 Rule 標為相關並指向 primary Phase。
-- [ ] 未把 backfill 描述成 O3 的替代方案或 partial publish 的補救手段。
+- [x] `BackfillReport`、`backfill_references`、`rebuild_rule_projection`、`delete_edge` 簽名符合本文件與 00A 第 6.3 節。
+- [x] `added`／`conflicts`／`unresolved` 都是排序去重的步驟 PK，重跑結果可直接比對。
+- [x] 有測試證明：`backfill_references` 拒絕未發布或不存在的版本；`conflicts` 案例前後的錯邊 item byte 相同；`delete_edge` 擋掉 `REFERENCES`。
+- [x] 有測試證明 backfill 只寫 `added` 列出的那幾個 `STEP#` PK、內容逐字取自 S3 全文；版本數、其他步驟文字與 S3 物件全部不變。
+- [x] `rebuild_rule_projection` 以 `VERSION.rules_applied` 為唯一權威，補缺邊、刪多餘邊並去重排序；raw item 先濾 `SK != META` 再經 `item_to_model`。
+- [x] 重建過程不寫任何 `VERSION` item，也不寫 `RULE.status`；`update_meta` 衝突時讓 `CoordinationError` 往外拋。
+- [x] 分頁與空頁案例通過；兩個函式重跑皆冪等。
+- [x] 查詢知識圖譜 Rule 7 與套用教學規則 Rule 6 各有直接 assertion，其餘 Rule 標為相關並指向 primary Phase。
+- [x] 未把 backfill 描述成 O3 的替代方案或 partial publish 的補救手段。
