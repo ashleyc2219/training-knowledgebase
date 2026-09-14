@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-09-14
-Approver: Timmy Lin
+Approver: controller（代維護者 Timmy Lin 依授權暫定；待維護者親自確認）
 Sort-Key: META
 
 上面四個欄位是 `tests/unit/test_keys.py::test_metadata_sort_key_matches_the_recorded_o1_decision`
@@ -17,9 +17,11 @@ Sort-Key: META
   「META，設計選擇」，只有 `TUTORIAL_STEP` 已明確是 `REFERENCES#<Feature PK>`。
 - [00A 共用契約 §6.2](../plan/unfinish/00A-共用契約與名詞.md) 已把 `META` 的 canonical 簽名寫成
   `META: str`（值 `"META"`），owner 是 P05，P06 起全部消費。
-- 本紀錄由 Phase 05 實作者代為建檔，核定者為 repo 維護者（git `user.name`）。維護者若不同意，
-  改寫本檔的 `Status`／`Sort-Key` 並同步改 `src/training_kb/keys.py` 的 `META` 常數即可；
-  測試會強制兩者一致，不允許各實體各自猜值，也不允許空字串。
+- **核定層級：provisionally accepted（暫定接受）。** 2026-09-14 由 controller 依維護者
+  「本次全程自主決策」的授權暫定接受，**待 Timmy Lin 親自確認**；`Approver` 欄寫的是 controller，
+  不代表維護者本人已簽核。維護者不同意時，改寫本檔的 `Status`／`Sort-Key`，同步改
+  `src/training_kb/keys.py` 的 `META` 常數，再重跑 `uv run pytest tests/unit/test_keys.py -q`
+  即可；測試會強制常數與 `Sort-Key` 一致，不允許各實體各自猜值，也不允許空字串。
 
 ## 決策內容
 
@@ -56,7 +58,7 @@ Sort-Key: META
 
 ## 這份紀錄沒有宣稱什麼
 
-- accepted 只代表鍵**命名**定案。實表 CRUD（真實 DynamoDB 的 metadata 讀寫與 `_revision`
+- 目前是 **provisionally accepted**，而且只代表鍵**命名**暫定。實表 CRUD（真實 DynamoDB 的 metadata 讀寫與 `_revision`
   樂觀鎖）是 [Phase 06](../plan/unfinish/06-Phase06-Repository-Metadata與實體讀寫.md) 與
   [Phase 09](../plan/unfinish/09-Phase09-AWS資料資源與最小IAM.md) 各自留證，Phase 05 只跑本機契約測試。
 - 本決策不影響 O2、O3、O4、O5、O6、O7 任何一個 gate 的狀態。
