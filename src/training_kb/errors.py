@@ -28,3 +28,12 @@ class IngressError(PermanentError):
         super().__init__(message)
         self.message = message
         self.fields: tuple[str, ...] = tuple(sorted(set(fields)))
+
+
+class ObjectAlreadyExists(PermanentError):
+    """`put_object(..., if_none_match=True)` 撞到同一個 key（S3 412）。
+
+    另開一個類別而不是共用 `PermanentError`，是為了讓呼叫端用**型別**分辨
+    「同一次操作重送」（412，核對 bytes 後視為已完成）與真正的內容衝突；
+    訊息字串不是契約。409（併發刪除）另外轉 `TransientError` 交 ASL Retry。
+    """

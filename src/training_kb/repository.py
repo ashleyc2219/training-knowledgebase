@@ -20,7 +20,12 @@ from typing import Any, TypeVar
 
 from botocore.exceptions import ClientError
 
-from training_kb.errors import CoordinationError, PermanentError
+from training_kb.errors import (
+    CoordinationError,
+    ObjectAlreadyExists,
+    PermanentError,
+    TransientError,
+)
 from training_kb.keys import (
     META,
     feature_pk,
@@ -60,6 +65,10 @@ T = TypeVar("T", bound=StrictModel)
 RESERVED_ATTRS = frozenset({"PK", "SK", "target", "entity", "_revision"})
 """item 上唯一允許的非模型屬性（00A §3.6）；只能由 `Repository` 自己算，呼叫端不得傳、不得更新。
 `target` 只有 Phase 07 的關係邊會用到，一起列進來讓整套只有一份定義。"""
+
+MISSING_CODES = frozenset({"NoSuchKey", "404"})
+"""S3 的「這個 key 不存在」：`GetObject` 回 `NoSuchKey`，`HeadObject` 沒有 body 只回 `404`。
+只有這兩個碼會被吞成 `None`／`False`，其餘 `ClientError` 一律往外丟。"""
 
 
 # --- 2. 實體 -> PK 的分派 ----------------------------------------------------
@@ -137,8 +146,9 @@ class Repository:
     物件沒有穩定的靜態型別，用 `Any` 才能在 mypy strict 下呼叫 `put_item`／`get_item`。
     """
 
-    def __init__(self, table: object) -> None:
+    def __init__(self, table: object, bucket: object | None = None) -> None:
         self._table: Any = table
+        self._bucket: Any = bucket
 
     # --- metadata 寫入 ---
 
@@ -277,3 +287,52 @@ class Repository:
 
     def get_proc(self, signature: str) -> ProvenWorkflow | None:
         return self.get_meta(proc_pk(signature), ProvenWorkflow)
+
+    # --- S3 物件 ---
+
+    def put_object(self, key: str, body: bytes, content_type: str, *, if_none_match: bool) -> None:
+        """寫一個私有物件；`if_none_match=True` 時「同 key 是否已存在」交給 AWS 判斷。
+
+        固定順序是「先送出、再依回應分類」，不是「先查存在再寫」——先查再寫會在兩個請求
+        之間留下空窗，兩個 Lambda 可能同時判斷為不存在。412（已存在）轉
+        `ObjectAlreadyExists`，409（併發刪除造成的暫時衝突）轉 `TransientError` 交 ASL Retry；
+        這裡不自己迴圈重試，避免與 Phase 29 的單層 Task Retry 相乘。
+        送出的參數只有 `Key`／`Body`／`ContentType`（＋`IfNoneMatch`），沒有 `ACL`：
+        公開與否一律由 bucket policy 的 `site/*` 決定（00A §3.8）。
+        """
+        arguments: dict[str, object] = {"Key": key, "Body": body, "ContentType": content_type}
+        if if_none_match:
+            arguments["IfNoneMatch"] = "*"
+        try:
+            self._bucket.put_object(**arguments)
+        except ClientError as error:
+            code = error.response["Error"]["Code"]
+            if code == "PreconditionFailed":
+                raise ObjectAlreadyExists(f"object already exists: {key}") from error
+            if code == "ConditionalRequestConflict":
+                raise TransientError(f"conditional write conflicted: {key}") from error
+            raise
+
+    def get_object(self, key: str) -> bytes | None:
+        """讀回整個 body；key 不存在回 `None` 而不是丟例外。
+
+        真實 S3 要有 `s3:ListBucket` 才會對不存在的 key 回 404 而不是 403（00A §3.8），
+        否則這個「不存在回 `None`」的契約在雲端不成立。
+        """
+        try:
+            payload: bytes = self._bucket.Object(key).get()["Body"].read()
+        except ClientError as error:
+            if error.response["Error"]["Code"] in MISSING_CODES:
+                return None
+            raise
+        return payload
+
+    def object_exists(self, key: str) -> bool:
+        """只取 metadata（HeadObject），不下載 body。"""
+        try:
+            self._bucket.Object(key).load()
+        except ClientError as error:
+            if error.response["Error"]["Code"] in MISSING_CODES:
+                return False
+            raise
+        return True
