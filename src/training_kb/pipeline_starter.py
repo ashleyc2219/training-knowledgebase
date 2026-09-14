@@ -14,7 +14,14 @@
 import json
 from typing import Any, Protocol
 
-from training_kb.errors import CoordinationError
+from botocore.exceptions import (
+    ClientError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
+
+from training_kb.errors import CoordinationError, TransientError
 from training_kb.operations import OperationCoordinator
 from training_kb.pipelines.common import JSONValue, PipelineName
 
@@ -29,6 +36,39 @@ STATE_MACHINE_NAMES: dict[PipelineName, str] = {
 
 STATE_MACHINE_SEGMENT = ":stateMachine:"
 EXECUTION_SEGMENT = ":execution:"
+
+TRANSIENT_START_CODES = frozenset({
+    "ThrottlingException", "ThrottledException", "TooManyRequestsException",
+    "ServiceUnavailable", "ServiceUnavailableException",
+    "InternalServerError", "InternalError", "InternalFailure",
+    "RequestTimeout", "RequestTimeoutException",
+})
+"""Step Functions 這一側「重送有機會成功」的錯誤碼白名單。
+
+只翻**已知**的碼，其餘 `ClientError` 原樣往外冒（與 `repository.py` 同一條慣例）：
+把不認得的錯誤一律當暫時性，會讓 `ValidationException`、`StateMachineDoesNotExist`
+這種確定不會成功的失敗被無限重送。
+"""
+
+TIMEOUT_ERRORS = (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError)
+"""botocore 的連線／讀取逾時：沒有 HTTP 回應，所以沒有錯誤碼可以判斷，一律暫時性。"""
+
+SERVER_ERROR_STATUS = 500
+
+
+def _transient(error: ClientError) -> TransientError | None:
+    """已知的暫時性錯誤碼或 5xx → `TransientError`；其餘回 `None`（呼叫端原樣往外丟）。
+
+    訊息只留錯誤碼與 HTTP 狀態，**不回填 input**：ASL input 雖然只有三個鍵，
+    錯誤訊息還是會進 log，保持「log 不出現事件內容」這條界線（00A §3.8）。
+    """
+    response = error.response
+    code = str(response.get("Error", {}).get("Code", ""))
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    server_error = isinstance(status, int) and status >= SERVER_ERROR_STATUS
+    if code in TRANSIENT_START_CODES or server_error:
+        return TransientError(f"Step Functions 暫時失敗：{code or status}")
+    return None
 
 
 def state_machine_arns(*, region: str, account_id: str) -> dict[PipelineName, str]:
@@ -89,7 +129,15 @@ class BotoPipelineStarter:
                 input=json.dumps(input, sort_keys=True),
             )
         except self._client.exceptions.ExecutionAlreadyExists:
+            # 一定要排在 `ClientError` 之前：boto3 的這個例外就是 `ClientError` 的子類。
             return self._reuse(pipeline, execution_name, str(input["operation_id"]))
+        except TIMEOUT_ERRORS as error:
+            raise TransientError(f"Step Functions 連線逾時：{type(error).__name__}") from error
+        except ClientError as error:
+            transient = _transient(error)
+            if transient is not None:
+                raise transient from error
+            raise                      # 不認得的碼原樣往外冒，不猜它可不可以重送
         return str(response["executionArn"])
 
     def _reuse(self, pipeline: PipelineName, execution_name: str, operation_id: str) -> str:
@@ -107,7 +155,7 @@ class BotoPipelineStarter:
         if arn is None:
             arn = f"{self._arns[pipeline].replace(STATE_MACHINE_SEGMENT, EXECUTION_SEGMENT)}" \
                   f":{execution_name}"
-        status = self._client.describe_execution(executionArn=arn)["status"]
+        status = self._describe(arn)["status"]
         if status == "RUNNING":
             if record is not None and record.execution_arn is None:
                 self._operations.record_execution(operation_id, arn)
@@ -115,3 +163,21 @@ class BotoPipelineStarter:
         if record is not None and record.status == "done":
             return arn
         raise CoordinationError(f"{operation_id} 的同名執行已結束但 ledger 沒有原結果，需人工確認")
+
+    def _describe(self, execution_arn: str) -> dict[str, Any]:
+        """`describe_execution` 與 `start_execution` 共用同一套錯誤分類。
+
+        這一步被節流時如果原樣冒出 `ClientError`，`ingress._start_once` 會把一次純粹的
+        暫時性失敗記成 `retryable=False`——判斷「這次到底成功了沒」的那次查詢，
+        分類標準要跟啟動那一次一樣。
+        """
+        try:
+            described: dict[str, Any] = self._client.describe_execution(executionArn=execution_arn)
+        except TIMEOUT_ERRORS as error:
+            raise TransientError(f"Step Functions 連線逾時：{type(error).__name__}") from error
+        except ClientError as error:
+            transient = _transient(error)
+            if transient is not None:
+                raise transient from error
+            raise                      # 不認得的碼原樣往外冒，不猜它可不可以重送
+        return described

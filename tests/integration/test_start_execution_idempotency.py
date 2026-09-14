@@ -13,13 +13,17 @@ ledger 用 moto 表上的**真正** `OperationCoordinator`；Step Functions 用 
 """
 
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from botocore.exceptions import ClientError, ConnectTimeoutError
 
-from training_kb.errors import CoordinationError
-from training_kb.ingress import execution_name, operation_id_for
+from training_kb import ingress
+from training_kb.config import load_settings
+from training_kb.errors import CoordinationError, TransientError
+from training_kb.ingress import Wiring, accept_ticket, execution_name, operation_id_for
 from training_kb.keys import operation_ref
 from training_kb.operations import AcceptOperation, OperationCoordinator, OperationStatus
 from training_kb.pipeline_starter import (
@@ -41,6 +45,18 @@ ARN = f"arn:aws:states:{REGION}:{ACCOUNT}:execution:{STATE_MACHINE_NAMES[PIPELIN
 LIMITED_INPUT: dict[str, JSONValue] = {
     "operation_id": OP, "project_id": "demo", "input_ref": INPUT_REF,
 }
+TICKET = ingress.validate_ticket({
+    "id": "t_881", "source": "github_issue", "text": "找不到「開始會議」按鈕在哪裡",
+    "author": "u_gh-90210", "ts": "2026-09-01T08:12:30Z", "project_id": "demo",
+})
+
+
+def client_error(code: str, *, status: int = 400) -> ClientError:
+    """boto3 的錯誤形狀：`Error.Code` 與 `ResponseMetadata.HTTPStatusCode`。"""
+    return ClientError(
+        {"Error": {"Code": code, "Message": "x"}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "StartExecution",
+    )
 
 
 class ExecutionAlreadyExists(Exception):
@@ -186,3 +202,71 @@ def test_state_machine_arns_use_the_three_fixed_names() -> None:
         "feedback-review": f"arn:aws:states:{REGION}:{ACCOUNT}"
                            ":stateMachine:training-kb-feedback-review",
     }
+
+
+# --- 錯誤分類：只有已知的暫時性碼才可以重送 -----------------------------------
+
+
+@pytest.mark.parametrize("failure", [
+    client_error("ThrottlingException"),
+    client_error("ServiceUnavailableException", status=503),
+    client_error("InternalServerError", status=500),
+    client_error("RequestTimeout"),
+    client_error("SomethingNew", status=500),          # 不認得的碼，但 5xx
+    ConnectTimeoutError(endpoint_url="https://states.example"),
+])
+def test_known_transient_start_failures_become_transient_errors(
+    harness: Harness, failure: Exception,
+) -> None:
+    harness.sfn.start_execution.side_effect = failure
+    with pytest.raises(TransientError):
+        harness.starter.start(PIPELINE, execution_name(OP), LIMITED_INPUT)
+
+
+@pytest.mark.parametrize("code", ["ValidationException", "StateMachineDoesNotExist",
+                                  "AccessDeniedException"])
+def test_unknown_client_errors_are_raised_unchanged(harness: Harness, code: str) -> None:
+    """不認得的碼原樣往外冒，不猜它可不可以重送（與 `repository.py` 同一條慣例）。"""
+    harness.sfn.start_execution.side_effect = client_error(code)
+    with pytest.raises(ClientError) as raised:
+        harness.starter.start(PIPELINE, execution_name(OP), LIMITED_INPUT)
+    assert raised.value.response["Error"]["Code"] == code
+
+
+def test_a_throttled_describe_is_also_transient(harness: Harness) -> None:
+    """判斷「這次到底成功了沒」的那次查詢，分類標準要跟啟動那一次一樣。"""
+    harness.sfn.start_execution.side_effect = harness.already_exists
+    harness.sfn.describe_execution.side_effect = client_error("ThrottlingException")
+    harness.seed(status="started")
+    with pytest.raises(TransientError):
+        harness.starter.start(PIPELINE, execution_name(OP), LIMITED_INPUT)
+
+
+def test_a_throttled_start_lands_in_the_ledger_as_retryable(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """正式 adapter ＋真 ledger：節流的啟動要記成 `retryable=True`（§9 驗收表）。"""
+    harness.sfn.start_execution.side_effect = client_error("ThrottlingException")
+    monkeypatch.setattr(ingress, "_wiring", lambda: Wiring(
+        operations=harness.operations, starter=harness.starter,
+        repository=harness.repository, settings=load_settings({})))
+    with pytest.raises(TransientError):
+        accept_ticket(TICKET, deadline=monotonic() + 8.0)
+    record = harness.operations.load(OP)
+    assert record is not None
+    assert (record.status, record.retryable) == ("failed", True)
+    assert record.input_ref == INPUT_REF          # 輸入留著，重送沿用同一個 execution name
+
+
+def test_a_permanent_start_failure_is_not_marked_retryable(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness.sfn.start_execution.side_effect = client_error("ValidationException")
+    monkeypatch.setattr(ingress, "_wiring", lambda: Wiring(
+        operations=harness.operations, starter=harness.starter,
+        repository=harness.repository, settings=load_settings({})))
+    with pytest.raises(ClientError):
+        accept_ticket(TICKET, deadline=monotonic() + 8.0)
+    record = harness.operations.load(OP)
+    assert record is not None
+    assert (record.status, record.retryable) == ("failed", False)
