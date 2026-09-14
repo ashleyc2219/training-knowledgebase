@@ -294,6 +294,16 @@ class Repository:
 
     # --- S3 物件 ---
 
+    def _require_bucket(self) -> Any:
+        """把「建 `Repository` 時沒給 bucket」變成看得懂的 `PermanentError`。
+
+        不加這一層的話呼叫端只會看到 `AttributeError: 'NoneType' object has no attribute
+        'put_object'`，要回頭翻才知道是建構參數少了一個。
+        """
+        if self._bucket is None:
+            raise PermanentError("repository was created without an S3 bucket")
+        return self._bucket
+
     def put_object(self, key: str, body: bytes, content_type: str, *, if_none_match: bool) -> None:
         """寫一個私有物件；`if_none_match=True` 時「同 key 是否已存在」交給 AWS 判斷。
 
@@ -308,7 +318,7 @@ class Repository:
         if if_none_match:
             arguments["IfNoneMatch"] = "*"
         try:
-            self._bucket.put_object(**arguments)
+            self._require_bucket().put_object(**arguments)
         except ClientError as error:
             code = error.response["Error"]["Code"]
             if code == "PreconditionFailed":
@@ -324,7 +334,7 @@ class Repository:
         否則這個「不存在回 `None`」的契約在雲端不成立。
         """
         try:
-            payload: bytes = self._bucket.Object(key).get()["Body"].read()
+            payload: bytes = self._require_bucket().Object(key).get()["Body"].read()
         except ClientError as error:
             if error.response["Error"]["Code"] in MISSING_CODES:
                 return None
@@ -334,7 +344,7 @@ class Repository:
     def object_exists(self, key: str) -> bool:
         """只取 metadata（HeadObject），不下載 body。"""
         try:
-            self._bucket.Object(key).load()
+            self._require_bucket().Object(key).load()
         except ClientError as error:
             if error.response["Error"]["Code"] in MISSING_CODES:
                 return False
