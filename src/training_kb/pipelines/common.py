@@ -11,8 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, get_args
 
+from training_kb.config import Settings
 from training_kb.errors import PermanentError, TransientError
 from training_kb.operations import OperationCoordinator
+from training_kb.repository import Repository
+from training_kb.writing.client import Writer
 
 # --- 1. 型別 ---------------------------------------------------------------
 
@@ -33,14 +36,34 @@ PIPELINE_NAMES: tuple[str, ...] = get_args(PipelineName)
 class Deps:
     """一個 Task 需要的外部相依。
 
-    現在只有操作紀錄與時鐘；[Phase 38] 會以「修改本檔」的方式追加 `repository`、
-    `writer`、`settings` 三個**預設 `None`** 的欄位與 `need_repository()`／
-    `need_writer()`／`need_settings()`（00A D-36）。因為有預設值，現在寫的
-    `Deps(operations=..., now=...)` 在 Phase 38 之後仍然成立。
+    操作紀錄與時鐘是必填；`repository`／`writer`／`settings` 由 [Phase 38] 以「修改本檔」
+    的方式追加（00A D-36），三個都**預設 `None`**，所以 Phase 29 既有的
+    `Deps(operations=..., now=...)` 仍然成立。
+
+    要用這三個相依的 Task 一律走 `need_*()`：沒接線時當場丟 `PermanentError` 說出缺了哪一個，
+    而不是把 `None` 帶進業務函式，等到深處才爆出看不懂的 `AttributeError`。
     """
 
     operations: OperationCoordinator
     now: Callable[[], datetime]
+    repository: Repository | None = None
+    writer: Writer | None = None
+    settings: Settings | None = None
+
+    def need_repository(self) -> Repository:
+        if self.repository is None:
+            raise PermanentError("pipeline deps 缺少 repository")
+        return self.repository
+
+    def need_writer(self) -> Writer:
+        if self.writer is None:
+            raise PermanentError("pipeline deps 缺少 writer")
+        return self.writer
+
+    def need_settings(self) -> Settings:
+        if self.settings is None:
+            raise PermanentError("pipeline deps 缺少 settings")
+        return self.settings
 
 
 # --- 2. 序列執行 -------------------------------------------------------------
