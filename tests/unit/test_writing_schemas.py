@@ -5,7 +5,15 @@ from typing import Any
 import pytest
 from jsonschema.exceptions import ValidationError
 
-from training_kb.writing.schemas import SCHEMAS, TutorialDraft, WeakDiagnosis, validate_schema
+from training_kb.errors import PermanentError
+from training_kb.writing.client import BedrockWriter, CallTrace
+from training_kb.writing.schemas import (
+    SCHEMAS,
+    GapNaming,
+    TutorialDraft,
+    WeakDiagnosis,
+    validate_schema,
+)
 
 SCHEMA_NAMES = ("GapNaming", "TutorialDraft", "StepRewrite", "CommentClassification",
                 "RuleProposal", "ConflictJudgement", "StepConfirmation", "WeakDiagnosis")
@@ -110,3 +118,61 @@ def test_missing_required_property_is_rejected(name: str, field: str) -> None:
 def test_enum_type_and_bound_violations_are_rejected(name: str, payload: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
         validate_schema(SCHEMAS[name], payload)
+
+
+class FakeClaude:
+    """回應形狀與 Bedrock Converse 一致：文字在 content[0].text，截斷訊號在 stopReason。"""
+
+    def __init__(self) -> None:
+        self.text, self.stop_reason = "{}", "end_turn"
+
+    def converse(self, **kwargs: Any) -> dict[str, Any]:
+        return {"output": {"message": {"content": [{"text": self.text}]}},
+                "stopReason": self.stop_reason}
+
+
+@pytest.fixture
+def fake_claude() -> FakeClaude:
+    return FakeClaude()
+
+
+def make_writer(client: object) -> BedrockWriter:
+    return BedrockWriter(client, CallTrace(), generation_model_id="verified-model",
+                         embedding_model_id="amazon.titan-embed-text-v2:0")
+
+
+@pytest.mark.parametrize("raw", ["not json", '{"gap":"x"',
+                                 '{"gap":"x","feature_id":null,"admin":true}'])
+def test_generate_json_rejects_invalid_response(fake_claude: FakeClaude, raw: str) -> None:
+    fake_claude.text = raw
+    with pytest.raises(PermanentError):
+        make_writer(fake_claude).generate_json("s", "u", GapNaming,
+                                               operation_id="op-17", node="name_gap")
+
+
+def test_truncated_response_is_rejected(fake_claude: FakeClaude) -> None:
+    fake_claude.text = '{"gap":"找不到會前摘要入口","feature_id":"Prepare"}'
+    fake_claude.stop_reason = "max_tokens"
+    with pytest.raises(PermanentError) as error:
+        make_writer(fake_claude).generate_json("s", "u", GapNaming,
+                                               operation_id="op-17", node="name_gap")
+    assert "找不到會前摘要入口" not in str(error.value)
+
+
+def test_schema_valid_response_is_returned_as_a_dict(fake_claude: FakeClaude) -> None:
+    fake_claude.text = '{"gap":"找不到會前摘要入口","feature_id":null}'
+    writer = make_writer(fake_claude)
+    reply = writer.generate_json("s", "u", GapNaming, operation_id="op-17", node="name_gap")
+    assert reply == {"gap": "找不到會前摘要入口", "feature_id": None}
+    assert writer.trace.count(operation_id="op-17") == 1
+
+
+def test_rejected_response_still_leaves_one_attempt_without_leaking_text(
+        fake_claude: FakeClaude) -> None:
+    """request 本身成功，是解析失敗；Phase 15 的 attempt 照記，但 trace 不留回應內容。"""
+    fake_claude.text = '{"gap":"找不到會前摘要入口","feature_id":null,"admin":true}'
+    writer = make_writer(fake_claude)
+    with pytest.raises(PermanentError):
+        writer.generate_json("s", "u", GapNaming, operation_id="op-17", node="name_gap")
+    assert writer.trace.count(operation_id="op-17") == 1
+    assert "找不到會前摘要入口" not in writer.trace.to_json()

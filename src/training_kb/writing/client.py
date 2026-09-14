@@ -14,9 +14,11 @@ from typing import Any, Protocol
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError
+from jsonschema.exceptions import ValidationError
 
 from training_kb.clock import now_utc, to_iso
 from training_kb.errors import PermanentError, TransientError
+from training_kb.writing.schemas import validate_schema
 
 # 一筆 trace 的欄位 allowlist：多一個或少一個都是 PermanentError。
 TRACE_FIELDS = ("operation_id", "node", "model", "attempt", "kind", "started_at", "outcome")
@@ -108,6 +110,26 @@ def _validated_embedding(value: object) -> list[float]:
     return [float(item) for item in value]
 
 
+def _parse_schema_json(raw: str, schema: Mapping[str, Any], *, stop_reason: str) -> dict[str, Any]:
+    """Claude response 的唯一出口檢查：截斷與 schema 都只在這裡判一次。
+
+    `stopReason == "max_tokens"` 代表輸出被 token 上限切斷，內容不完整（設計 §14.3：
+    截斷即驗證失敗、不發布）；欄位缺席時當成沒有截斷。錯誤訊息只帶 schema 的 `$id`，
+    **不回印 response 內容**：那段文字可能整段回聲了不可信的來源資料（00A §3.8）。
+    """
+    name = str(schema.get("$id", "model"))
+    if stop_reason == "max_tokens":
+        raise PermanentError(f"{name} response truncated by maxTokens")
+    try:
+        value = json.loads(raw)
+        validate_schema(schema, value)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise PermanentError(f"invalid {name} response") from exc
+    if not isinstance(value, dict):
+        raise PermanentError(f"invalid {name} response: not a JSON object")
+    return value
+
+
 class BedrockWriter:
     """`Writer` 的正式實作：只封裝 Bedrock 請求與解析，不碰 DynamoDB、S3 或發布。"""
 
@@ -172,13 +194,8 @@ class BedrockWriter:
         response = self._converse(
             model=model, system=system, extra={}, operation_id=operation_id, node=node,
             messages=[{"role": "user", "content": [{"text": user}]}], kind="generation")
-        try:
-            value = json.loads(response["output"]["message"]["content"][0]["text"])
-        except json.JSONDecodeError as exc:
-            raise PermanentError("model response is not valid JSON") from exc
-        if not isinstance(value, dict):
-            raise PermanentError("model response is not a JSON object")
-        return value
+        raw = response["output"]["message"]["content"][0]["text"]
+        return _parse_schema_json(raw, schema, stop_reason=response.get("stopReason", ""))
 
     def converse_with_tools(self, system: str, messages: Sequence[Mapping[str, Any]],
                             tools: Sequence[Mapping[str, Any]], *,
