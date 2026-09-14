@@ -20,11 +20,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from training_kb.clock import to_iso
 from training_kb.errors import PermanentError
 from training_kb.models import ProcStatus, ProvenWorkflow
 from training_kb.operations import OperationCoordinator
 from training_kb.pipelines.common import JSONValue
-from training_kb.repository import Repository
+from training_kb.repository import DynamoValue, Repository
 
 # --- 1. 來源脈絡與白名單（Phase 33）-------------------------------------------
 
@@ -227,6 +228,18 @@ def on_replay_failure(proc: ProvenWorkflow, now: datetime) -> ProvenWorkflow:
     failures = proc.fail_count + 1
     status = ProcStatus.RETIRED if failures >= PROC_MAX_CONSECUTIVE_FAIL else proc.status
     return proc.model_copy(update={"fail_count": failures, "status": status})
+
+
+def proc_changes(proc: ProvenWorkflow) -> dict[str, DynamoValue]:
+    """只序列化四個會變的欄位；signature／domain／adapter／steps／keys 建立後不再改寫。
+
+    全系統只有這一份「哪幾個欄位會變」：Phase 37 的 `_persist` 直接呼叫它，不各自拼
+    `changes`（00A §6.8）。`status` 取 `.value`、`last_used` 走 `to_iso`，因為
+    `update_meta` 收的是 DynamoDB 屬性值而不是 Python 物件；`_revision` 由
+    `update_meta` 自己維護，**不得**出現在這個 dict 裡（00A §3.6 的保留屬性）。
+    """
+    return {"success_count": proc.success_count, "fail_count": proc.fail_count,
+            "status": proc.status.value, "last_used": to_iso(proc.last_used)}
 
 
 # --- 5. 記錄步驟的驗證與執行（Phase 36 追加）----------------------------------
