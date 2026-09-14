@@ -9,8 +9,9 @@ AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**
 檔案分成四段，Phase 07／08／10 直接接在後面，不必改動前面幾段：
 1. 型別別名與保留屬性
 2. 實體 → PK 的分派
-3. Decimal codec（DynamoDB 只收 `Decimal`，不收 `float`）
-4. `Repository`：metadata CRUD、`revision_of` 與四個具名 getter
+3. Decimal codec 與 `item_to_model`（DynamoDB 只收 `Decimal`，不收 `float`）
+4. `Repository`：metadata CRUD、`revision_of`、四個具名 getter，以及不走模型的
+   `put_meta_item`／`get_meta_item`（服務 `OPS#`／`CONFIG#`／`SEQ#`／`LEASE#`）
 """
 
 from collections.abc import Mapping
@@ -89,7 +90,7 @@ def _entity_pk(entity: Entity) -> str:
     raise PermanentError(f"unknown entity type: {type(entity).__name__}")
 
 
-# --- 3. Decimal codec --------------------------------------------------------
+# --- 3. Decimal codec 與 item_to_model ---------------------------------------
 
 
 def _encode(value: object) -> object:
