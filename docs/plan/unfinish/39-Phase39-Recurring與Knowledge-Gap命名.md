@@ -185,7 +185,7 @@ Ticket.ts = 2026-09-13T02:00:00Z        Ticket.ts = 2026-09-13T23:59:59Z
 
 ### Task 1：固定 UTC 日界線窗口
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_window_has_exactly_fourteen_dates():
@@ -203,11 +203,11 @@ def test_utc_day_boundary_is_the_cut_line():
     assert utc_date(parse_iso("2026-09-13T23:59:59Z")) in window
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_recurring.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_recurring.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `cannot import name 'recurring_window'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def recurring_window(anchor, days=RECURRING_DAYS):
@@ -216,15 +216,15 @@ def recurring_window(anchor, days=RECURRING_DAYS):
     return frozenset(anchor - timedelta(days=offset) for offset in range(days))
 ```
 
-- [ ] **Step 4：補邊界測試後跑綠並提交**
+- [x] **Step 4：補邊界測試後跑綠並提交**
 
 再加兩個案例：`days=0` 與 `days=-1` 都丟 `PermanentError`；同一 UTC 日的 `00:00:01Z` 與 `23:59:58Z` 換算後相等。執行 `uv run pytest tests/unit/pipelines/test_ticket_recurring.py -q` 後，用 `git add src/training_kb/pipelines/ticket.py tests/unit/pipelines/test_ticket_recurring.py` 加入新檔再 `git commit -m "feat(ticket): 固定 recurring 日期窗口"`。
 
 ### Task 2：四筆不算 recurring、五筆才算
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
-`fake_repo` 是測試檔自備的假 `Repository`：底層一個 dict 當表，提供 `list_tickets`／`scan_entity`／`get_object`／`put_object`／`save_feature`／`created_features`，`scan_entity` 必須連手寫進去的關係邊一起回傳——刻意模擬 `meta_only=False` 的情況，才驗得到本 Phase 自己那層 `SK == META` 過濾（真實 `Repository` 的預設 `meta_only=True` 已先擋掉一次）。`saved_ticket(repo, id, *, cluster, ts)` 寫一筆 `Ticket` 並回傳它（`ts` 用 Phase 02 `parse_iso` 轉成 datetime）；`seed_cluster(repo, cluster_id, *, count)` 一次寫 `count` 筆同群工單；`fake_writer` 記下每次 `generate_json` 的 `(system, user, schema, node)` 並回 `self.reply`；`fake_ops` 記下 `record_model_output` 並用 `model_output_refs(op)` 讀回。
+`fake_repo` 是測試檔自備的假 `Repository`：底層一個 list 當表、一個 dict 當私有 S3，提供 `scan_entity`／`get_object`／`put_object`／`put_meta`（建 Feature 才會記進 `created_features`）與種子鉤子 `save_ticket`／`save_feature`／`save_edge`。**不需要 `list_tickets`**：`name_gap` 只走 `scan_entity("TICKET")`（`is_recurring` 才用 `list_tickets`，那是 Task 2 的事，沿用 conftest 的 `fake_repo` 就夠），`scan_entity` 必須連手寫進去的關係邊一起回傳——刻意模擬 `meta_only=False` 的情況，才驗得到本 Phase 自己那層 `SK == META` 過濾（真實 `Repository` 的預設 `meta_only=True` 已先擋掉一次）。`saved_ticket(repo, id, *, cluster, ts)` 寫一筆 `Ticket` 並回傳它（`ts` 用 Phase 02 `parse_iso` 轉成 datetime）；`seed_cluster(repo, cluster_id, *, count)` 一次寫 `count` 筆同群工單；`fake_writer` **直接用 `tests/unit/conftest.py` 既有的 `RecordingWriter`**（它已經把每次 `generate_json` 的 `(system, user, schema, node)` 記進 `calls`，回應排在 `replies` 佇列裡），不另外寫一個只有單一 `reply` 的替身——排一個回應本身就代表「模型只該被呼叫一次」，第二次呼叫會因為佇列空掉而失敗，去重斷言因此更強；`fake_ops` 記下 `record_model_output` 並用 `model_output_refs(op)` 讀回。
 
 ```python
 THREE = ["09-10", "09-11", "09-12"]
@@ -248,11 +248,11 @@ def test_out_of_window_and_other_cluster_do_not_count(fake_repo):
     assert is_recurring(target, repository=fake_repo) is False
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_recurring.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_recurring.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `cannot import name 'is_recurring'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def is_recurring(ticket, *, repository):
@@ -268,13 +268,13 @@ def is_recurring(ticket, *, repository):
     return len(seen) >= RECURRING_MIN_TICKETS
 ```
 
-- [ ] **Step 4：補同日多筆與去重測試後跑綠並提交**
+- [x] **Step 4：補同日多筆與去重測試後跑綠並提交**
 
 同一天內的兩筆各算一筆；同一個 `Ticket.id` 出現兩次只算一筆；未分群的 Ticket 丟 `PermanentError`。執行 `uv run pytest tests/unit/pipelines/test_ticket_recurring.py -q` 後 `git add src/training_kb/pipelines/ticket.py tests/unit/pipelines/test_ticket_recurring.py` 並 `git commit -m "feat(ticket): 判斷同群 recurring"`。
 
 ### Task 3：只有 recurring 才命名 gap，且重試不重呼叫
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 KW = {"operation_id": "op-1"}
@@ -290,7 +290,7 @@ def test_name_gap_refuses_cluster_below_threshold(fake_repo, fake_writer, fake_o
 def test_name_gap_reuses_saved_output_on_retry(fake_repo, fake_writer, fake_ops):
     seed_cluster(fake_repo, "c12", count=5)
     fake_repo.save_feature("Prepare")
-    fake_writer.reply = {"gap": "找不到會前摘要入口", "feature_id": "Prepare"}
+    fake_writer.replies.append({"gap": "找不到會前摘要入口", "feature_id": "Prepare"})
     kw = {"repository": fake_repo, "writer": fake_writer, "operations": fake_ops, **KW}
     first, second = name_gap("c12", **kw), name_gap("c12", **kw)
     assert first["feature_id"] == second["feature_id"] == "Prepare"
@@ -300,17 +300,17 @@ def test_name_gap_reuses_saved_output_on_retry(fake_repo, fake_writer, fake_ops)
 
 def test_name_gap_rejects_unknown_feature(fake_repo, fake_writer, fake_ops):
     seed_cluster(fake_repo, "c12", count=5)
-    fake_writer.reply = {"gap": "找不到會前摘要入口", "feature_id": "NotThere"}
+    fake_writer.replies.append({"gap": "找不到會前摘要入口", "feature_id": "NotThere"})
     with pytest.raises(ContentError):
         name_gap("c12", repository=fake_repo, writer=fake_writer, operations=fake_ops, **KW)
     assert fake_repo.created_features == []   # 不存在就拒絕，絕不補建 Feature
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_name_gap.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_name_gap.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `cannot import name 'name_gap'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def _meta_rows(repository, entity):
@@ -336,8 +336,11 @@ def name_gap(cluster_id, *, repository, writer, operation_id, operations):
         known_feature_ids=frozenset(one.feature_id for one in features))
     saved = repository.get_object(ref)
     if saved is not None:                                  # 重送：物件本身就是證據，模型 0 次
-        return _validated_naming(json.loads(saved), validate)
-    tickets = [item_to_model(row, Ticket) for row in _meta_rows(repository, "TICKET")]
+        naming = _validated_naming(json.loads(saved), validate)
+        operations.record_model_output(operation_id, ref)  # §6 說的「ref 照補」就在這裡
+        return naming
+    tickets = sorted((item_to_model(row, Ticket) for row in _meta_rows(repository, "TICKET")),
+                     key=lambda ticket: ticket.id)         # prompt 不隨掃描順序漂移
     texts = [one.text for one in tickets if one.cluster_id == cluster_id]
     if len(texts) < RECURRING_MIN_TICKETS:
         raise PermanentError(f"群 {cluster_id} 未達 recurring 門檻，不呼叫模型")
@@ -352,7 +355,7 @@ def name_gap(cluster_id, *, repository, writer, operation_id, operations):
 
 `_validated_naming` 收一個 `dict`、回同一個 `dict`，只做兩件事：`payload["gap"]` 去頭尾後必須非空，然後把 `payload` 交給 Phase 18 的 `gap_naming_validator`（`feature_id` 是 `None` 或在 `known_feature_ids` 內，否則 `ContentError("feature_id_not_found: feature_id")`）。schema 形狀已由 Phase 17／18 擋過；「Feature 存不存在」這條規則全系統只有 Phase 18 那一份，本 Phase 不得改用 `get_feature` 再判一次。`operation_ref` 是 Phase 10 的 key 組字函式，不要在這裡自己拼字串。
 
-- [ ] **Step 4：補 prompt 隔離與 null feature 測試後跑綠並提交**
+- [x] **Step 4：補 prompt 隔離與 null feature 測試後跑綠並提交**
 
 `feature_id` 為 `null` 是合法結果，不丟例外也不建 Feature；傳給 FakeWriter 的 user prompt 只含 `c12` 的工單文字，不得出現 `c99` 的文字，`allowed_features` 只有裸 ID（`Prepare`）；`node == "name_gap"`。再補兩個案例：一是「物件已存在但 operation 紀錄還沒記 ref」——先手動寫好 `gap-naming.json` 再呼叫，模型仍是 0 次且不丟 `ObjectAlreadyExists`；二是「表裡有一筆 `TICKET#t_881` 的 `ASKS_ABOUT#FEATURE#Prepare` 邊 item」——`name_gap` 必須照常回傳，不得因為邊沒有 `Ticket` 欄位而 `ValidationError`。執行 `uv run pytest tests/unit/pipelines/test_ticket_name_gap.py -q` 後 `git add src/training_kb/pipelines/ticket.py src/training_kb/writing/prompts.py tests/unit/pipelines/test_ticket_name_gap.py` 並 `git commit -m "feat(ticket): 命名教學缺口"`。
 
@@ -396,10 +399,20 @@ def name_gap(cluster_id, *, repository, writer, operation_id, operations):
 
 ## 11. 完成清單
 
-- [ ] 五個產出名稱（`recurring_window`、`is_recurring`、`known_features`、`name_gap`、`prompt_name_gap`）的簽名與本文件一致，且任何路徑都沒有建立 Feature 或 Tutorial。
-- [ ] `name_gap` 回的是 `dict`，全檔沒有 `GapNaming.model_validate`／`model_dump_json` 這類把 schema 當模型用的寫法。
-- [ ] 窗口恰為 14 個 UTC 日期，端點兩側都有獨立斷言；四筆與五筆兩案例都有直接斷言，四筆時模型呼叫數為 0。
-- [ ] 不存在的 `feature_id` 被拒絕、`null` 是合法結果，且這條檢查是包裝 Phase 18 的 `gap_naming_validator`，沒有第二份存在性判斷。
-- [ ] `scan_entity` 的結果一律先濾 `SK == META` 再 `item_to_model`；表裡有關係邊時 `name_gap`／`known_features` 仍正常。
-- [ ] 同 `operation_id` 重送時重用 `gap-naming.json`，模型呼叫數不增加；`5` 只有 `Thresholds.recurring_tickets` 一份。
-- [ ] 未把 FakeWriter 綠燈描述成 Claude 或 AWS 已通過；O5 未過維持 BLOCKED。
+- [x] 五個產出名稱（`recurring_window`、`is_recurring`、`known_features`、`name_gap`、`prompt_name_gap`）的簽名與本文件一致，且任何路徑都沒有建立 Feature 或 Tutorial。
+- [x] `name_gap` 回的是 `dict`，全檔沒有 `GapNaming.model_validate`／`model_dump_json` 這類把 schema 當模型用的寫法。
+- [x] 窗口恰為 14 個 UTC 日期，端點兩側都有獨立斷言；四筆與五筆兩案例都有直接斷言，四筆時模型呼叫數為 0。
+- [x] 不存在的 `feature_id` 被拒絕、`null` 是合法結果，且這條檢查是包裝 Phase 18 的 `gap_naming_validator`，沒有第二份存在性判斷。
+- [x] `scan_entity` 的結果一律先濾 `SK == META` 再 `item_to_model`；表裡有關係邊時 `name_gap`／`known_features` 仍正常。
+- [x] 同 `operation_id` 重送時重用 `gap-naming.json`，模型呼叫數不增加；`5` 只有 `Thresholds.recurring_tickets` 一份。
+- [x] 未把 FakeWriter 綠燈描述成 Claude 或 AWS 已通過；O5 未過維持 BLOCKED。
+
+## 12. 實作裁決紀錄（2026-09-14 實作時補）
+
+| 疑點 | 來源衝突 | 採用 | 理由 |
+|---|---|---|---|
+| `name_gap` 要不要走 `generate_validated_json`？ | [00A](00A-共用契約與名詞.md) §6.5 的通用列寫「P39–P51 呼叫端一律只呼叫 `generate_validated_json` 一次」，但 00A §6.9 的 **P39 專屬列**寫「`generate_json` 在整個節點只呼叫一次」，本文件 §6／§8 也明文要求不存在的 `feature_id` 丟 `ContentError`、本 Phase 不做第二次呼叫。 | 直接 `writer.generate_json(...)` 一次，再用 `_validated_naming`（包裝 Phase 18 的 `gap_naming_validator`）丟 `ContentError`。 | Phase 專屬契約優先於通用列；`generate_validated_json` 會多送一次修正請求並把失敗改成 `PermanentError`，與本文件 §8 驗收矩陣的 `ContentError` 直接衝突。**副作用：`GapNaming` 實際上不走 correction**，與 `writing/validators.py` 模組註解的表格（`GapNaming` → correction「是」）不一致，留給主導者裁決。 |
+| 重送路徑要不要 `record_model_output`？ | §6 流程圖與 §9 表格說「`record_model_output` 照補」，但 Task 3 Step 3 的最小實作片段直接 `return`。 | 重送路徑也補記 ref（已同步修正 Step 3 片段）。 | 「物件已寫、ref 還沒記」正是要修掉的那個洞；不補記的話重送永遠留著缺 ref 的操作紀錄。 |
+| `name_gap` 的群成員順序 | 文件沒規定。 | 依 `Ticket.id` 升序後才組 prompt。 | `scan_entity` 是 Scan，順序不保證；排序讓同一批輸入的 prompt 可重現（與 `known_features` 依 `feature_id` 升序同理）。 |
+| 測試替身 | Task 3 Step 1 原本描述一個自帶 `self.reply` 的 writer 替身。 | 改用 `tests/unit/conftest.py` 既有的 `RecordingWriter`（`replies` 佇列 ＋ `calls`）。 | 不另造第二個 writer 替身；佇列只排一個回應，第二次呼叫會失敗，「只呼叫一次」的斷言更強。 |
+| `fake_repo` 兩種形狀 | 本文件把 `fake_repo` 描述成單一替身。 | `test_ticket_recurring.py` 沿用 `tests/unit/pipelines/conftest.py`（P38 明列給 P39 用）的 `fake_repo`；`test_ticket_name_gap.py` 在**模組層級**定義同名 fixture 刻意遮蔽它。 | 兩個 Task 需要的方法完全不同（`list_tickets` vs `scan_entity`／S3）；00A §3.2 只准 P39 動兩個測試檔，不能改 P38 的 conftest。模組層級 fixture 的遮蔽範圍只有該檔。 |
