@@ -14,6 +14,7 @@ import pytest
 
 from training_kb.content import (
     escape_markdown,
+    make_diff,
     parse_markdown,
     render_markdown,
     unescape_markdown,
@@ -130,3 +131,40 @@ def test_illegal_step_type_in_markdown_is_rejected() -> None:
     markdown = render_markdown(four_step_content()).replace("type=read,", "type=scroll,")
     with pytest.raises(ContentError, match="type 不合法"):
         parse_markdown(markdown)
+
+
+# --- unified diff -----------------------------------------------------------
+
+
+def test_first_version_has_empty_diff() -> None:
+    """F50 選 C：v1 的 diff 是空字串，Phase 23 仍寫出 0 位元組的 `v1.diff`。"""
+    assert make_diff(None, "# 準備會議\n", previous_name="", current_name="v1.md") == ""
+
+
+def test_diff_only_contains_changed_step() -> None:
+    previous = render_markdown(four_step_content())
+    current = render_markdown(four_step_content(step3_text="在會議頁面右上角選擇 Prepare。"))
+    diff = make_diff(previous, current, previous_name="v1.md", current_name="v2.md")
+    changed = [line for line in diff.splitlines()
+               if line[:1] in {"-", "+"} and line[:3] not in {"---", "+++"}]
+    assert len(changed) == 2
+    assert "開啟摘要" in changed[0] and "右上角" in changed[1]
+
+
+def test_identical_content_has_empty_diff() -> None:
+    """同一份全文比同一份全文也回 `""`；與 v1 的空 diff 意義不同——第一版靠
+    `supersedes is None` 判斷，不是靠 diff 檔是否為空（Phase 57）。"""
+    markdown = render_markdown(four_step_content())
+    assert make_diff(markdown, markdown, previous_name="v1.md", current_name="v2.md") == ""
+
+
+def test_diff_has_unified_headers_and_trailing_newline() -> None:
+    previous = render_markdown(four_step_content())
+    current = render_markdown(four_step_content(step3_text="在會議頁面右上角選擇 Prepare。"))
+    diff = make_diff(previous, current, previous_name="tutorials/prepare-meeting/v1.md",
+                     current_name="tutorials/prepare-meeting/v2.md")
+    lines = diff.splitlines()
+    assert lines[0] == "--- tutorials/prepare-meeting/v1.md"
+    assert lines[1] == "+++ tutorials/prepare-meeting/v2.md"
+    assert lines[2].startswith("@@ ")
+    assert diff.endswith("\n") and not diff.endswith("\n\n")

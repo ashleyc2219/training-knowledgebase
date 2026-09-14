@@ -41,6 +41,7 @@ operations.load(operation_id)
 `Tutorial`：十實體模型是 strict，沒有第三類屬性（00A §3.6）。
 """
 
+import difflib
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -429,3 +430,28 @@ def parse_markdown(markdown: str) -> TutorialContent:
     except ValidationError as exc:
         raise ContentError(
             f"Markdown 內容不符 TutorialContent 限制：{exc.error_count()} 個欄位") from exc
+
+
+# --- 6. 與前版的 unified diff ------------------------------------------------
+
+
+def make_diff(previous_md: str | None, current_md: str, *, previous_name: str,
+              current_name: str) -> str:
+    """回 unified diff 文字；沒有前版時回 `""`（F50 選 C）。
+
+    `previous_md is None` 是「第一版，沒有前一版可比較」，`""` 則同時涵蓋「兩版內容完全
+    相同」；兩者在檔案裡長得一樣，所以**畫面上「第一版」要靠 `supersedes is None` 判斷，
+    不是靠 diff 檔是否為空**（Phase 57）。Phase 23 兩種情況都照樣寫出 `v<n>.diff`，
+    只是 v1 那個是 0 位元組。
+
+    `splitlines()` 搭 `lineterm=""`：全文的每一行都已經沒有換行字元，讓 `difflib` 再補一次
+    會讓每個表頭後面多一個空行。輸出非空時補一個結尾換行，與 `render_markdown` 一致。
+    """
+    if previous_md is None:
+        return ""
+    lines = difflib.unified_diff(
+        previous_md.splitlines(), current_md.splitlines(),
+        fromfile=previous_name, tofile=current_name, lineterm="",
+    )
+    text = "\n".join(lines)
+    return f"{text}\n" if text else ""
