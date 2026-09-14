@@ -1,9 +1,12 @@
-"""共用領域模型：七個 StrEnum、嚴格模型基底、裸識別碼檢查與內容草稿模型。
+"""共用領域模型：七個 StrEnum、嚴格模型基底、裸識別碼檢查、內容草稿模型與十個邏輯實體。
 
-Phase 04 會在本檔案追加十個邏輯實體，因此這裡只放不依賴實體的 primitive。
+Phase 03 放不依賴實體的 primitive，Phase 04 在其後追加十個邏輯實體與 `Entity` union。
+領域模型不帶 DynamoDB 的 `PK`／`SK`／`entity`／`_revision`，只保存裸識別碼與原生型別。
 """
 
+from datetime import datetime
 from enum import StrEnum
+from math import isfinite
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -116,3 +119,280 @@ class TutorialContent(StrictModel):
         if not numbers or numbers != list(range(1, len(numbers) + 1)):
             raise ValueError("step numbers must be contiguous from 1 and must not be empty")
         return self
+
+
+def aware(value: datetime) -> datetime:
+    """確認時間帶時區。模型內不補 `now`，時間一律由呼叫端傳入（Phase 02 的規則）。"""
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise ValueError("datetime must be timezone aware")
+    return value
+
+
+class Tutorial(StrictModel):
+    slug: str
+    current_version: str | None = None
+    topic: str
+    feature_ids: list[str]
+    status: TutorialStatus
+    successor: str | None = None
+    cluster_id: str | None = None
+
+    @field_validator("slug")
+    @classmethod
+    def slug_is_bare(cls, value: str) -> str:
+        return bare_id(value)
+
+    @field_validator("topic")
+    @classmethod
+    def topic_is_filled(cls, value: str) -> str:
+        return filled(value)
+
+    @field_validator("current_version", "successor", "cluster_id")
+    @classmethod
+    def optional_ids_are_bare(cls, value: str | None) -> str | None:
+        return None if value is None else bare_id(value)
+
+    @field_validator("feature_ids")
+    @classmethod
+    def features_are_bare(cls, value: list[str]) -> list[str]:
+        return [bare_id(item) for item in value]
+
+
+class TutorialVersion(StrictModel):
+    version_id: str
+    slug: str
+    supersedes: str | None = None
+    reason: str
+    rules_applied: list[str]
+    s3_key: str
+    published_at: datetime | None = None
+
+    @field_validator("version_id", "slug")
+    @classmethod
+    def ids_are_bare(cls, value: str) -> str:
+        return bare_id(value)
+
+    @field_validator("supersedes")
+    @classmethod
+    def supersedes_is_bare(cls, value: str | None) -> str | None:
+        return None if value is None else bare_id(value)
+
+    @field_validator("rules_applied")
+    @classmethod
+    def rules_are_bare(cls, value: list[str]) -> list[str]:
+        return [bare_id(item) for item in value]
+
+    @field_validator("reason", "s3_key")
+    @classmethod
+    def text_is_filled(cls, value: str) -> str:
+        return filled(value)
+
+    @field_validator("published_at")
+    @classmethod
+    def published_at_is_aware(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else aware(value)
+
+
+class TutorialStep(StrictModel):
+    tutorial_version: str
+    number: int
+    type: StepType
+    text: str
+    feature_id: str
+
+    @field_validator("tutorial_version", "feature_id")
+    @classmethod
+    def ids_are_bare(cls, value: str) -> str:
+        return bare_id(value)
+
+    @field_validator("text")
+    @classmethod
+    def text_is_filled(cls, value: str) -> str:
+        return filled(value)
+
+
+class Feature(StrictModel):
+    feature_id: str
+    name: str
+    aliases: list[str]
+    first_seen: datetime
+
+    @field_validator("feature_id", "name")
+    @classmethod
+    def names_are_bare(cls, value: str) -> str:
+        return bare_id(value)
+
+    @field_validator("aliases")
+    @classmethod
+    def aliases_are_bare(cls, value: list[str]) -> list[str]:
+        return [bare_id(item) for item in value]
+
+    @field_validator("first_seen")
+    @classmethod
+    def first_seen_is_aware(cls, value: datetime) -> datetime:
+        return aware(value)
+
+
+class Ticket(StrictModel):
+    id: str
+    source: TicketSource
+    text: str
+    author: str
+    ts: datetime
+    project_id: str
+    cluster_id: str | None = None
+    feature_ids: list[str] = []
+    embedding: list[float] | None = None
+
+    @field_validator("id", "author", "project_id")
+    @classmethod
+    def ids_are_bare(cls, value: str) -> str:
+        return bare_id(value)
+
+    @field_validator("cluster_id")
+    @classmethod
+    def cluster_is_bare(cls, value: str | None) -> str | None:
+        return None if value is None else bare_id(value)
+
+    @field_validator("text")
+    @classmethod
+    def text_is_filled(cls, value: str) -> str:
+        return filled(value)
+
+    @field_validator("ts")
+    @classmethod
+    def ts_is_aware(cls, value: datetime) -> datetime:
+        return aware(value)
+
+    @field_validator("feature_ids")
+    @classmethod
+    def one_feature_at_most(cls, value: list[str]) -> list[str]:
+        if len(value) > 1:
+            raise ValueError("Ticket feature_ids length must be 0..1")
+        return [bare_id(item) for item in value]
+
+    @field_validator("embedding")
+    @classmethod
+    def valid_embedding(cls, value: list[float] | None) -> list[float] | None:
+        if value is not None and (len(value) != 1024 or not all(isfinite(x) for x in value)):
+            raise ValueError("embedding must contain 1024 finite numbers")
+        return value
+
+
+class Release(StrictModel):
+    id: str
+    source_event_id: str | None = None
+    source: ReleaseSource
+    feature: str
+    kind: ReleaseKind
+    old_name: str | None = None
+    new_name: str | None = None
+    evidence: str
+    ts: datetime
+
+    @field_validator("id", "feature")
+    @classmethod
+    def ids_are_bare(cls, value: str) -> str:
+        return bare_id(value)
+
+    @field_validator("source_event_id")
+    @classmethod
+    def source_event_is_bare(cls, value: str | None) -> str | None:
+        return None if value is None else bare_id(value)
+
+    @field_validator("evidence")
+    @classmethod
+    def evidence_is_filled(cls, value: str) -> str:
+        return filled(value)
+
+    @field_validator("ts")
+    @classmethod
+    def ts_is_aware(cls, value: datetime) -> datetime:
+        return aware(value)
+
+
+class Feedback(StrictModel):
+    id: str
+    tutorial_version: str
+    rating: int | None = None
+    category: str | None = None
+    comment: str | None = None
+    user: str
+    ts: datetime | None = None
+
+    @field_validator("id", "tutorial_version", "user")
+    @classmethod
+    def ids_are_bare(cls, value: str) -> str:
+        return bare_id(value)
+
+    @field_validator("ts")
+    @classmethod
+    def ts_is_aware(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else aware(value)
+
+
+class TutorialView(StrictModel):
+    tutorial_version: str
+    user: str
+    ts: datetime
+
+    @field_validator("tutorial_version", "user")
+    @classmethod
+    def ids_are_bare(cls, value: str) -> str:
+        return bare_id(value)
+
+    @field_validator("ts")
+    @classmethod
+    def ts_is_aware(cls, value: datetime) -> datetime:
+        return aware(value)
+
+
+class AuthoringRule(StrictModel):
+    rule_id: str
+    rule: str
+    applies_when: StepType
+    evidence: list[str]
+    status: RuleStatus
+    applied_to: list[str]
+    derived_from: str
+
+    @field_validator("rule_id", "derived_from")
+    @classmethod
+    def ids_are_bare(cls, value: str) -> str:
+        return bare_id(value)
+
+    @field_validator("rule")
+    @classmethod
+    def rule_is_filled(cls, value: str) -> str:
+        return filled(value)
+
+    @field_validator("evidence", "applied_to")
+    @classmethod
+    def lists_are_bare(cls, value: list[str]) -> list[str]:
+        return [bare_id(item) for item in value]
+
+
+class ProvenWorkflow(StrictModel):
+    signature: str
+    domain: str
+    adapter: str
+    steps: list[ProcStep]
+    keys: list[str]
+    success_count: int
+    fail_count: int
+    status: ProcStatus
+    last_used: datetime
+
+    @field_validator("domain", "adapter")
+    @classmethod
+    def scope_is_filled(cls, value: str) -> str:
+        return filled(value)
+
+    @field_validator("last_used")
+    @classmethod
+    def last_used_is_aware(cls, value: datetime) -> datetime:
+        return aware(value)
+
+
+Entity = (Tutorial | TutorialVersion | TutorialStep | Feature | Ticket
+          | Release | Feedback | TutorialView | AuthoringRule | ProvenWorkflow)
