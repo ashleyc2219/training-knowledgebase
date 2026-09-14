@@ -15,6 +15,7 @@
 - 下一階段是 [Phase 23：未發布版本與關係完整寫入](./23-Phase23-未發布版本與關係完整寫入.md)。
 - 本階段不寫 DynamoDB、不切 `current_version`、不產生 HTML、不呼叫模型、不刪除任何既有物件；也只能寫 `tutorials/` 前綴，任何往 `site/` 的寫入都是錯誤，不是「還沒放連結所以等於私有」。
 - 與本 Phase 有關的 gate：O3 仍待 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 驗證。即使本階段全綠，也不得宣稱發布故障切點已驗收。以下程式檔均是實作時預計建立或修改。
+- **實作紀錄（Phase 22 完成，2026-09-14）：** 依 controller 2026-09-14 裁決「離線開發優先，真實 AWS 接線延後到 P41 起」，本階段在 moto＋純字串上完成；O3 仍維持未通過，本階段的綠燈不代表發布切點已驗收。
 
 ---
 
@@ -141,7 +142,7 @@ def put_private_artifact(repository: Repository, key: str, text: str,
 
 ### Task 1：固定格式、轉義與精確 round-trip
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_render_uses_fixed_headings_and_step_prefix():
@@ -161,7 +162,7 @@ def test_round_trip_restores_content(title):
 
 另外加兩個：`test_broken_markdown_is_rejected` 把 `## Expected Outcome` 改成 `## Outcome` 後，`parse_markdown` 必須丟 `ContentError` 且訊息含「缺少區塊」；`test_model_limit_becomes_content_error` 把步驟行的編號從 `1.` 改成 `2.`（違反 Phase 03 的連號限制），必須丟 `ContentError` 而不是 pydantic 的 `ValidationError`。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_markdown.py -q
@@ -169,7 +170,7 @@ uv run pytest tests/unit/test_markdown.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'render_markdown'`。
 
-- [ ] **Step 3：建立轉義與反轉義**
+- [x] **Step 3：建立轉義與反轉義**
 
 ```python
 _MD_SPECIALS = frozenset("\\`*_[]<>#|()")
@@ -189,7 +190,7 @@ def unescape_markdown(text: str) -> str:
     return re.sub(r"\\(.)", r"\1", text)
 ```
 
-- [ ] **Step 4：建立 render 與 parse 並跑完整檔案**
+- [x] **Step 4：建立 render 與 parse 並跑完整檔案**
 
 ```python
 _SECTIONS = ("Title", "Problem", "Prerequisites", "Steps", "Expected Outcome")
@@ -241,7 +242,7 @@ def parse_markdown(markdown: str) -> TutorialContent:
             match = _STEP_LINE.match(line)
             if match is None:
                 raise ContentError(f"步驟格式不符：{line}")
-            steps.append(StepDraft(number=int(match[1]), type=match[2],
+            steps.append(StepDraft(number=int(match[1]), type=_step_type(match[2]),
                                    text=unescape_markdown(match[4]),
                                    feature_id=unescape_markdown(match[3])))
         return TutorialContent(
@@ -256,9 +257,16 @@ def parse_markdown(markdown: str) -> TutorialContent:
         raise ContentError(f"Markdown 內容不符 TutorialContent 限制：{exc.error_count()} 個欄位") from exc
 ```
 
-先判斷 `## ` 再判斷 `# `，否則 `## Problem` 會被誤認成標題行；空行一律丟掉，所以 render 的空行數量不影響解析。`StepDraft`／`TutorialContent` 是 Phase 03 的嚴格模型，遇到不合法內容丟的是 pydantic 的 `ValidationError`；**呼叫端（Phase 23）只認得 Phase 02 的錯誤契約**，所以這裡一律轉成 `ContentError`（`PermanentError` 子類），不讓第三方例外型別外洩（`from pydantic import ValidationError`）。執行 `uv run pytest tests/unit/test_markdown.py -q`，預期五個測試 PASS。
+先判斷 `## ` 再判斷 `# `，否則 `## Problem` 會被誤認成標題行；空行一律丟掉，所以 render 的空行數量不影響解析。
 
-- [ ] **Step 5：提交**
+**實作修正（`_step_type`）：** 本文件原本寫 `type=match[2]`，但 `StepDraft.type` 宣告成
+`StepType`，mypy strict 不接受 `str`（本專案不用 `# type: ignore`）。實際實作多一個
+`_step_type(value) -> StepType`：`value not in LEGAL_STEP_TYPES` 時丟 `ContentError("步驟 type
+不合法：…")`，否則回 `StepType(value)`。這同時補掉一個漏洞——`StepType("scroll")` 丟的是**裸
+`ValueError`**（不是 `ValidationError`），照原本的 `except ValidationError` 會直接外洩給呼叫端，
+違反「只讓呼叫端接 Phase 02 錯誤契約」這條。`StepDraft`／`TutorialContent` 是 Phase 03 的嚴格模型，遇到不合法內容丟的是 pydantic 的 `ValidationError`；**呼叫端（Phase 23）只認得 Phase 02 的錯誤契約**，所以這裡一律轉成 `ContentError`（`PermanentError` 子類），不讓第三方例外型別外洩（`from pydantic import ValidationError`）。執行 `uv run pytest tests/unit/test_markdown.py -q`，預期五個測試 PASS。
+
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/unit/test_markdown.py
@@ -267,7 +275,7 @@ git commit -m "feat(content): 固定格式全文與可反解的轉義"
 
 ### Task 2：unified diff 與 v1 空 diff
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_first_version_has_empty_diff():
@@ -283,7 +291,7 @@ def test_diff_only_contains_changed_step():
     assert "開啟摘要" in changed[0] and "右上角" in changed[1]
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_markdown.py -q
@@ -291,7 +299,7 @@ uv run pytest tests/unit/test_markdown.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'make_diff'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def make_diff(previous_md, current_md, *, previous_name, current_name) -> str:
@@ -305,11 +313,11 @@ def make_diff(previous_md, current_md, *, previous_name, current_name) -> str:
     return f"{text}\n" if text else ""
 ```
 
-- [ ] **Step 4：補上「內容完全相同」案例並跑綠燈**
+- [x] **Step 4：補上「內容完全相同」案例並跑綠燈**
 
 同一份全文比同一份全文也回 `""`；這與 v1 的空 diff 意義不同，所以 Phase 57 用 `supersedes is None` 判斷第一版。執行 `uv run pytest tests/unit/test_markdown.py -q`，預期整檔 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/unit/test_markdown.py
@@ -318,7 +326,7 @@ git commit -m "feat(content): 產生與前版的 unified diff"
 
 ### Task 3：私有 key 與條件寫入
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 `test_keys_are_private` 是純字串比對，放 `tests/unit/test_markdown.py`；另外兩個要真的寫 S3，放 `tests/integration/test_private_artifacts.py`。
 
@@ -342,7 +350,7 @@ def test_same_key_same_content_is_idempotent(repository):
         put_private_artifact(repository, key, "# 別的\n", kind)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_markdown.py tests/integration/test_private_artifacts.py -q
@@ -350,7 +358,7 @@ uv run pytest tests/unit/test_markdown.py tests/integration/test_private_artifac
 
 預期：FAIL，訊號包含 `cannot import name 'put_private_artifact'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 PRIVATE_TUTORIAL_PREFIX = "tutorials/"
@@ -373,7 +381,7 @@ def put_private_artifact(repository, key: str, text: str, content_type: str) -> 
 
 `markdown_key`／`diff_key` 各自委派 `_artifact_key`，副檔名分別是 `.md` 與 `.diff`。第一行的 `make_version_id(slug, number)` 只當守門員：`slug` 含 `@`／`#` 或 `number < 1` 時它丟 `ValueError`，避免產出 `tutorials/a@v1/v0.md` 這種對不上版本的 key；回傳值刻意不用，因為 key 的形狀是 `<slug>/v<n>`。只攔 `ObjectAlreadyExists`（S3 412）也是重點：`PermanentError` 的其他子類別（例如沒設定 bucket）要原樣往上拋，不能被誤判成「同操作重送」。
 
-- [ ] **Step 4：以 moto 驗證條件寫入語意，並確認器材真的會擋**
+- [x] **Step 4：以 moto 驗證條件寫入語意，並確認器材真的會擋**
 
 斷言：第一次寫成功；同 key 同內容第二次不丟例外也不改內容；同 key 不同內容丟 `ContentError`；`site/` 前綴永遠被拒。
 
@@ -381,7 +389,9 @@ def put_private_artifact(repository, key: str, text: str, content_type: str) -> 
 
 執行 `uv run pytest tests/unit/test_markdown.py tests/integration/test_private_artifacts.py -q`，預期全部 PASS；moto PASS 只代表本機模擬，O3 仍維持未通過。
 
-- [ ] **Step 5：提交**
+**實作紀錄：** 本機 **moto 5.2.3** 已實作 `IfNoneMatch`，Phase 07 的能力探針 `tests/integration/test_repository_objects.py` 6 個測試全綠（第二次 `put_object(..., if_none_match=True)` 確實丟 `ObjectAlreadyExists`），本 Task 不需要 BLOCKED。
+
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/unit/test_markdown.py tests/integration/test_private_artifacts.py
@@ -422,10 +432,10 @@ git commit -m "feat(content): 以條件寫入保存私有版本產物"
 
 ## 11. 完成清單
 
-- [ ] 八個公開函式與兩個前綴常數的名稱、簽名符合本文件；全文格式與固定樣板逐字一致。
-- [ ] 轉義與反轉義互為反函式，含落單反斜線的錯誤案例。
-- [ ] `parse_markdown(render_markdown(x)) == x` 有多組參數化測試；缺區塊與壞步驟行被拒絕。
-- [ ] v1 回空 diff 且仍寫出 `v1.diff`；只改一步時 diff 只有兩行變動；`site/` 前綴被拒。
-- [ ] 同 key 相同內容冪等、不同內容失敗；`put_private_artifact` 只攔 `ObjectAlreadyExists`，不攔整個 `PermanentError`。
-- [ ] Phase 07 的 moto `IfNoneMatch` 能力探針已通過並記錄版本，條件寫入不是假綠燈。
-- [ ] 單元與整合測試已實際執行並保存輸出，且沒有把綠燈說成 O3 發布 gate 已通過。
+- [x] 八個公開函式與兩個前綴常數的名稱、簽名符合本文件；全文格式與固定樣板逐字一致。
+- [x] 轉義與反轉義互為反函式，含落單反斜線的錯誤案例。
+- [x] `parse_markdown(render_markdown(x)) == x` 有多組參數化測試；缺區塊與壞步驟行被拒絕。
+- [x] v1 回空 diff 且仍寫出 `v1.diff`；只改一步時 diff 只有兩行變動；`site/` 前綴被拒。
+- [x] 同 key 相同內容冪等、不同內容失敗；`put_private_artifact` 只攔 `ObjectAlreadyExists`，不攔整個 `PermanentError`。
+- [x] Phase 07 的 moto `IfNoneMatch` 能力探針已通過並記錄版本，條件寫入不是假綠燈。
+- [x] 單元與整合測試已實際執行並保存輸出，且沒有把綠燈說成 O3 發布 gate 已通過。
