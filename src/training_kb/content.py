@@ -54,6 +54,7 @@ from training_kb.clock import to_iso
 from training_kb.errors import (
     ContentError,
     CoordinationError,
+    IngressError,
     ObjectAlreadyExists,
     PermanentError,
     TransientError,
@@ -948,3 +949,18 @@ def retire_tutorial(
     if retired is None:
         raise PermanentError(f"{slug} 在退役寫入後讀不到，停止")
     return retired
+
+
+def assert_accepts_feedback(tutorial: Tutorial) -> None:
+    """已退役的教學不接受新回饋（F39、設計 §14.1）；還在維護時什麼都不做。
+
+    只丟 `IngressError` 而且 `fields=("tutorial_version",)`：Phase 42 的
+    `validate_feedback` 直接把它轉成 `ImportResult(status="rejected",
+    invalid_fields=("tutorial_version",))`，**不必比對訊息字串**（00A §4.1）。
+    欄位指 `tutorial_version` 而不是 `tutorial`，因為匯入端手上只有版本 ID。
+
+    **擋的只有 Feedback。** `TutorialView` 照收：瀏覽數是「重開票率」的分母，
+    退役後一起擋掉會讓指標失真（設計 §8.4）。既有回饋也完全保留，仍查得到。
+    """
+    if tutorial.status == TutorialStatus.RETIRED:
+        raise IngressError("已退役教學不接受新回饋", fields=("tutorial_version",))

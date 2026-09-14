@@ -25,7 +25,7 @@ render_site_index     站台索引    只列 current_version 非空的 Tutorial
 
 from html import escape
 
-from training_kb.content import parse_version_id
+from training_kb.content import RETIRED_NOTICE, parse_version_id
 from training_kb.errors import PublishError
 from training_kb.models import (
     Tutorial,
@@ -35,9 +35,15 @@ from training_kb.models import (
     TutorialVersion,
 )
 
-RETIRED_PLACEHOLDER = "此教學已退役，內容僅供歷史查閱。"
-"""退役提示的固定佔位；正式文字由 Phase 26 的 `RETIRED_NOTICE` 與 Phase 57 定案。
-這裡刻意不顯示退役原因（十實體模型沒有 `retired_reason` 欄位，00A §6.7）。"""
+RETIRED_PLACEHOLDER = RETIRED_NOTICE
+"""Phase 24 用過的舊名，現在只是 Phase 26 `RETIRED_NOTICE` 的別名（00A §6.6 的 owner 是
+`content`）。**字面值只存在 `content.py` 一處**，兩支檔各抄一份的話改字就會漏掉一邊。
+退役提示刻意不顯示退役原因：`reason` 是 `release:<id>` 這種上游識別碼，設計 §13 列為私有。"""
+
+SUCCESSOR_PREFIX = "改看："
+"""後繼連結的固定前綴。連結文字用**後繼的 slug** 而不是它的 topic：renderer 的簽名到
+Phase 57 都不變（00A §6.7），手上只有被退役的那一篇 `Tutorial`，要拿到後繼的 topic 就得
+多讀一次 DynamoDB——renderer 不碰儲存層，所以這裡誠實地印 slug，連結本身仍然可點。"""
 
 _SECTIONS = ("Problem", "Prerequisites", "Steps", "Expected Outcome")
 """版本頁固定的四個 `<h2>`；標題自己是 `<h1>`，所以五段裡只有四段有 `<h2>`。"""
@@ -45,6 +51,26 @@ _SECTIONS = ("Problem", "Prerequisites", "Steps", "Expected Outcome")
 
 def _items(values: list[str]) -> str:
     return "".join(f"<li>{escape(value)}</li>" for value in values)
+
+
+def _successor_line(successor: str | None) -> str:
+    """退役教學的後繼連結；`successor` 為空時回空字串（F19：無後繼仍完成退役，但不導向）。
+
+    連結是**明確可點的提示**，不做自動跳轉：連續跳轉會把循環藏起來，讀者也看不出自己
+    被推到了哪一篇。`successor` 進到這裡時已經通過 Phase 26 `resolve_successor` 的四項
+    檢查（存在、非自身、已發布的 active、不成環），所以這裡只負責輸出，不再判一次。
+
+    href 是**瀏覽器層的相對路徑**，不是 S3 key：版本頁公開在
+    `site/tutorials/<slug>/v<n>.html`，後繼的版本紀錄頁在
+    `site/tutorials/<successor>/index.html`，兩者只差一層目錄。組 key 的三個 helper 在
+    `training_kb.publishing`（D-54），而 `site` 一律不 import `publishing`（否則兩支檔
+    互相 import），所以這裡不呼叫它們，也沒有用 `PUBLIC_SITE_PREFIX` 拼出任何 key。
+    """
+    if successor is None:
+        return ""
+    slug = escape(successor)
+    return (f'<p class="successor"><a href="../{slug}/index.html">'
+            f"{escape(SUCCESSOR_PREFIX)}{slug}</a></p>")
 
 
 def _version_number(version_id: str) -> str:
@@ -94,7 +120,8 @@ class SiteRenderer:
             f"<h2>{_SECTIONS[3]}</h2><p>{escape(content.expected_outcome)}</p>"
         )
         if tutorial.status == TutorialStatus.RETIRED:
-            page += f'<p class="retired">{escape(RETIRED_PLACEHOLDER)}</p>'
+            page += f'<p class="retired">{escape(RETIRED_NOTICE)}</p>'
+            page += _successor_line(tutorial.successor)
         return page + "</article>"
 
     def render_tutorial_index(self, tutorial: Tutorial,
