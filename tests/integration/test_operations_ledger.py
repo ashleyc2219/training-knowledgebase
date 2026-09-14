@@ -67,3 +67,33 @@ def test_a_write_conflict_without_a_readable_record_fails_loudly(
     operations.accept(REQUEST)
     with pytest.raises(CoordinationError):
         operations.accept(REQUEST)
+
+
+def test_progress_fields_and_single_proc_sample(repository: Repository) -> None:
+    """ref 只記路徑、同 ref 不重複附加、第二次樣本回 `False`，而且都不動 `updated_at`。"""
+    operations = OperationCoordinator(repository)
+    operations.accept(REQUEST)
+    output = operation_ref("op-ticket-t_881", "model-gap")
+    operations.record_normalized("op-ticket-t_881", operation_ref("op-ticket-t_881", "input"))
+    operations.record_model_output("op-ticket-t_881", output)
+    operations.record_model_output("op-ticket-t_881", output)
+    assert operations.record_proc_sample("op-ticket-t_881", "abc123") is True
+    assert operations.record_proc_sample("op-ticket-t_881", "abc123") is False
+    record = operations.load("op-ticket-t_881")
+    assert record is not None
+    assert record.input_ref == "operations/op-ticket-t_881/input.json"
+    assert (record.model_output_refs, record.updated_at) == ((output,), NOW)
+
+
+def test_the_raw_item_carries_no_target_and_no_progress_payload(repository: Repository) -> None:
+    """人工驗收自動化：操作紀錄是執行資訊，不進 `by_target` GSI，也不存大內容。"""
+    operations = OperationCoordinator(repository)
+    operations.accept(REQUEST)
+    operations.record_execution("op-ticket-t_881", "arn:aws:states:us-east-1:1:execution:x:y")
+    operations.record_version("op-ticket-t_881", "prepare-meeting@v2")
+    item = repository.get_meta_item(ops_pk("op-ticket-t_881"))
+    assert item is not None
+    assert "target" not in item
+    assert (item["entity"], item["SK"]) == ("OPS", META)
+    assert repository.query_by_target(ops_pk("op-ticket-t_881")) == []
+    assert item["version_id"] == "prepare-meeting@v2"
