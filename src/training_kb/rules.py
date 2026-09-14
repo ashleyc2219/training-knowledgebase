@@ -34,4 +34,8 @@ def select_active_rules(
                      if item.rule_id not in validated_at_by_rule)
     if missing:
         raise PermanentError(f"缺少最近驗證時間：{'、'.join(missing)}")
+    # 兩次穩定排序：先讓 rule_id 升序，再依驗證時間降序重排，時間相同時就保留 rule_id 升序。
+    # 寫成 `key=lambda item: (時間, rule_id)` 再 `reverse=True` 會把 rule_id 一起反轉成降序。
+    matching.sort(key=lambda item: item.rule_id)
+    matching.sort(key=lambda item: validated_at_by_rule[item.rule_id], reverse=True)
     return matching[:1]

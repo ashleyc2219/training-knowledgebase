@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from training_kb.errors import PermanentError
 from training_kb.models import AuthoringRule, RuleStatus, StepType
 from training_kb.rules import select_active_rules
 
@@ -54,3 +55,23 @@ def test_each_step_type_gets_its_own_rules(step_type, expected) -> None:
     rules = [rule("R-007", "active", StepType.CLICK_UI), rule("R-009", "active", StepType.INPUT)]
     validated = {"R-007": dt(2), "R-009": dt(3)}
     assert [item.rule_id for item in select_active_rules(rules, step_type, validated)] == expected
+
+
+CLICK = StepType.CLICK_UI
+
+
+def test_latest_validated_rule_wins_same_scope() -> None:
+    rules = [rule("R-006", "active", CLICK), rule("R-007", "active", CLICK)]
+    selected = select_active_rules(rules, CLICK, {"R-006": dt(1), "R-007": dt(2)})
+    assert [item.rule_id for item in selected] == ["R-007"]
+
+
+def test_same_timestamp_falls_back_to_smallest_rule_id() -> None:
+    rules = [rule("R-007", "active", CLICK), rule("R-006", "active", CLICK)]
+    selected = select_active_rules(rules, CLICK, {"R-006": dt(2), "R-007": dt(2)})
+    assert [item.rule_id for item in selected] == ["R-006"]
+
+
+def test_missing_validated_at_raises_permanent_error() -> None:
+    with pytest.raises(PermanentError):
+        select_active_rules([rule("R-007", "active", CLICK)], CLICK, {})
