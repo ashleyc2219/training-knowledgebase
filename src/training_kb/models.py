@@ -7,6 +7,7 @@ Phase 03 放不依賴實體的 primitive，Phase 04 在其後追加十個邏輯�
 from datetime import datetime
 from enum import StrEnum
 from math import isfinite
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -200,6 +201,13 @@ class TutorialStep(StrictModel):
     text: str
     feature_id: str
 
+    @field_validator("number")
+    @classmethod
+    def number_starts_at_one(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("number must be 1 or greater")
+        return value
+
     @field_validator("tutorial_version", "feature_id")
     @classmethod
     def ids_are_bare(cls, value: str) -> str:
@@ -231,6 +239,12 @@ class Feature(StrictModel):
     @classmethod
     def first_seen_is_aware(cls, value: datetime) -> datetime:
         return aware(value)
+
+    @model_validator(mode="after")
+    def aliases_are_distinct(self) -> "Feature":
+        if len(set(self.aliases)) != len(self.aliases) or self.name in self.aliases:
+            raise ValueError("aliases must not repeat themselves or the current name")
+        return self
 
 
 class Ticket(StrictModel):
@@ -310,6 +324,14 @@ class Release(StrictModel):
     def ts_is_aware(cls, value: datetime) -> datetime:
         return aware(value)
 
+    @model_validator(mode="after")
+    def renamed_carries_both_names(self) -> "Release":
+        if self.kind is ReleaseKind.RENAMED and not (
+            (self.old_name or "").strip() and (self.new_name or "").strip()
+        ):
+            raise ValueError("renamed release requires old_name and new_name")
+        return self
+
 
 class Feedback(StrictModel):
     id: str
@@ -325,10 +347,24 @@ class Feedback(StrictModel):
     def ids_are_bare(cls, value: str) -> str:
         return bare_id(value)
 
+    @field_validator("rating", mode="before")
+    @classmethod
+    def rating_is_strict_int(cls, value: Any) -> Any:
+        """`mode="before"` 才看得到轉型前的原值，否則 `True` 會先被轉成 `1`。"""
+        if value is not None and (type(value) is not int or not 1 <= value <= 5):
+            raise ValueError("rating must be an integer from 1 to 5")
+        return value
+
     @field_validator("ts")
     @classmethod
     def ts_is_aware(cls, value: datetime | None) -> datetime | None:
         return None if value is None else aware(value)
+
+    @model_validator(mode="after")
+    def carries_signal(self) -> "Feedback":
+        if self.rating is None and self.category is None and not (self.comment or "").strip():
+            raise ValueError("feedback must carry a rating, a category or a comment")
+        return self
 
 
 class TutorialView(StrictModel):
@@ -366,10 +402,18 @@ class AuthoringRule(StrictModel):
     def rule_is_filled(cls, value: str) -> str:
         return filled(value)
 
-    @field_validator("evidence", "applied_to")
+    @field_validator("applied_to")
     @classmethod
-    def lists_are_bare(cls, value: list[str]) -> list[str]:
+    def applied_to_is_bare(cls, value: list[str]) -> list[str]:
         return [bare_id(item) for item in value]
+
+    @field_validator("evidence")
+    @classmethod
+    def evidence_has_five_distinct_ids(cls, value: list[str]) -> list[str]:
+        ids = [bare_id(item) for item in value]
+        if len(set(ids)) < 5:
+            raise ValueError("evidence must contain at least 5 distinct feedback ids")
+        return ids
 
 
 class ProvenWorkflow(StrictModel):
@@ -383,10 +427,24 @@ class ProvenWorkflow(StrictModel):
     status: ProcStatus
     last_used: datetime
 
+    @field_validator("signature")
+    @classmethod
+    def signature_is_hex16(cls, value: str) -> str:
+        if len(value) != 16 or not set(value) <= set("0123456789abcdef"):
+            raise ValueError("signature must be 16 lowercase hex characters")
+        return value
+
     @field_validator("domain", "adapter")
     @classmethod
     def scope_is_filled(cls, value: str) -> str:
         return filled(value)
+
+    @field_validator("success_count", "fail_count")
+    @classmethod
+    def counts_are_not_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("count must not be negative")
+        return value
 
     @field_validator("last_used")
     @classmethod
