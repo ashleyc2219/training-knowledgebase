@@ -71,7 +71,7 @@ def test_two_reference_edges_on_one_step_are_rejected(ready_v2: ReadyVersion) ->
     """§8 Boundary：一步兩條引用邊也是不完整，訊息要說得出「應恰好一條」。"""
     ready_v2.add_second_step_edge()
     assert verify_version_complete(V2, ready_v2.repository) is False
-    with pytest.raises(Exception, match="應恰好一條"):
+    with pytest.raises(ContentError, match="應恰好一條"):
         create_version(version_plan(V2, number=2, supersedes=V1, reason="release:r_42",
                                     rules_applied=("R-007",)),
                        four_step_content(), ready_v2.repository)

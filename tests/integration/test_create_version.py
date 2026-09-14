@@ -294,6 +294,10 @@ def test_supersedes_and_applied_to_edges_exist(published_v1: Repository) -> None
     version = repository.get_version(V2)
     assert version is not None
     assert version.rules_applied == ["R-007"]
+    # 建立不是發布：v2 寫完之後，教學指的仍然是已發布的 v1（D25、F37）。
+    tutorial = repository.get_tutorial(SLUG)
+    assert tutorial is not None
+    assert tutorial.current_version == V1
 
 
 def test_first_version_has_no_supersedes_edge(seeded_feature: Repository) -> None:
