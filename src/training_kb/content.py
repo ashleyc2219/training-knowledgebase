@@ -534,6 +534,46 @@ def _previous_markdown(plan: VersionPlan, repository: Repository) -> tuple[str |
     return body.decode("utf-8"), previous.s3_key
 
 
+_VERSION_FIELDS = ("version_id", "slug", "supersedes", "reason", "rules_applied", "s3_key")
+"""重送時要逐欄比對的 `TutorialVersion` 欄位；`published_at` 不在內（本模組永遠不寫它）。"""
+
+
+def _planned_version(plan: VersionPlan) -> TutorialVersion:
+    """plan 應該寫出來的 VERSION item（`published_at` 永遠是 `None`）。
+
+    先確認 plan 自洽：`s3_key` 由 `slug`／`number` 組，VERSION item 的鍵由 `version_id` 組，
+    三者對不起來時會寫出「item 說自己是 v1、全文卻放在 v2.md」的版本。`make_version_id`
+    對不合法的 `slug`／`number` 丟的是 `ValueError`，這裡一律轉成呼叫端唯一要接的
+    `ContentError`（00A §4.1）。
+    """
+    try:
+        consistent = make_version_id(plan.slug, plan.number) == plan.version_id
+    except ValueError:
+        consistent = False
+    if not consistent:
+        raise ContentError(
+            f"plan 不自洽：version_id={plan.version_id}，slug={plan.slug}、number={plan.number}")
+    return TutorialVersion(version_id=plan.version_id, slug=plan.slug,
+                           supersedes=plan.supersedes, reason=plan.reason,
+                           rules_applied=list(plan.rules_applied),
+                           s3_key=markdown_key(plan.slug, plan.number), published_at=None)
+
+
+def _reject_changed_version(existing: TutorialVersion, planned: TutorialVersion) -> None:
+    """重送必須帶同一份內容；欄位對不上就拒絕，**不靜默沿用既有 item**。
+
+    與 `put_private_artifact` 比對 bytes 是同一個作法：同一個版號只能有一種內容。沿用舊
+    item 卻照新 plan 寫邊，會寫出「`VERSION.rules_applied` 是空的，卻有一條
+    `RULE#R-007 APPLIED_TO` 指向它」這種權威欄位與邊互相矛盾的版本（D17），而且核對還會
+    通過。`published_at` 不比：本模組永遠不寫它，而「已發布不可覆寫」在更前面就擋掉了。
+    """
+    changed = [name for name in _VERSION_FIELDS
+               if getattr(existing, name) != getattr(planned, name)]
+    if changed:
+        raise ContentError(
+            f"版本 {existing.version_id} 已存在且內容不同，不覆寫：{'、'.join(changed)}")
+
+
 def _verified(version_id: str, repository: Repository) -> TutorialVersion:
     """自我核對後回傳 VERSION item；有缺漏就丟 `ContentError`，**不刪任何已寫入的產物**。
 
@@ -560,22 +600,27 @@ def create_version(plan: VersionPlan, content: TutorialContent,
     **`published_at` 一律不寫、`Tutorial.current_version` 一律不碰**（D25、F37）：建立與發布
     是兩件事，只有 Phase 24 的 publish 成功才會填值與切換。
 
-    **重送要冪等。** 先讀 `get_version`：已發布就丟 `ContentError`（不可覆寫）；已存在但
-    未發布代表上一次寫到一半，跳過 `put_meta`（Phase 06 的 `create_only=True` 會拒絕重複
-    建立）只補寫產物與邊。S3 那一段的冪等由 `put_private_artifact` 的條件寫入保證；邊的
-    內容完全由 `plan` 與 `content` 決定，所以重寫同一筆邊是安全的，不需要條件寫入。
+    **重送要冪等，但只對同一份 plan 冪等。** 先讀 `get_version`：已發布就丟 `ContentError`
+    （不可覆寫）；已存在但未發布代表上一次寫到一半，此時先把 plan 組出來的 VERSION item
+    與既有那筆**逐欄比對**（`_reject_changed_version`），一致才跳過 `put_meta`（Phase 06 的
+    `create_only=True` 會拒絕重複建立）只補寫產物與邊，不一致一律拒絕——這一步在任何寫入
+    之前，所以被拒的重送不會留下半筆產物或邊。S3 那一段的冪等由 `put_private_artifact` 的
+    條件寫入保證；邊的內容完全由 `plan` 與 `content` 決定，所以重寫同一筆邊是安全的。
 
     既有 Feature 由 `scan_entity("FEATURE")` 取得，每一筆都經 `item_to_model`（00A §3.6）：
     strict 模型不接受 `PK`／`SK`／`entity`／`_revision`，直接 `Feature.model_validate(item)`
     會整筆 `ValidationError`。
     """
+    planned = _planned_version(plan)
     existing = repository.get_version(plan.version_id)
-    if existing is not None and existing.published_at is not None:
-        raise ContentError(f"版本 {plan.version_id} 已發布，不可覆寫")
+    if existing is not None:
+        if existing.published_at is not None:
+            raise ContentError(f"版本 {plan.version_id} 已發布，不可覆寫")
+        _reject_changed_version(existing, planned)
     known = frozenset(item_to_model(item, Feature).feature_id
                       for item in repository.scan_entity("FEATURE"))
     validate_content(content, known)
-    md_key = markdown_key(plan.slug, plan.number)
+    md_key = planned.s3_key
     current_md = render_markdown(content)
     previous_md, previous_name = _previous_markdown(plan, repository)
     put_private_artifact(repository, md_key, current_md, MARKDOWN_CONTENT_TYPE)
@@ -585,10 +630,7 @@ def create_version(plan: VersionPlan, content: TutorialContent,
         DIFF_CONTENT_TYPE,
     )
     if existing is None:
-        repository.put_meta(TutorialVersion(
-            version_id=plan.version_id, slug=plan.slug, supersedes=plan.supersedes,
-            reason=plan.reason, rules_applied=list(plan.rules_applied),
-            s3_key=md_key, published_at=None))
+        repository.put_meta(planned)
     _write_edges(plan, content, repository)
     return _verified(plan.version_id, repository)
 

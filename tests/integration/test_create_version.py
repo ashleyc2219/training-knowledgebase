@@ -26,6 +26,7 @@ from training_kb.content import (
     parse_version_id,
     put_private_artifact,
     render_markdown,
+    verify_version_complete,
 )
 from training_kb.errors import ContentError, TransientError
 from training_kb.keys import feature_pk, rule_pk, step_pk, tutorial_pk, version_pk
@@ -291,6 +292,37 @@ def test_first_version_has_no_supersedes_edge(seeded_feature: Repository) -> Non
                    four_step_content(), repository)
     assert [str(item["SK"]) for item in repository.query_pk(version_pk(V1))] == ["META"]
     assert repository.get_object(diff_key(SLUG, 1)) == b""
+
+
+def test_resending_a_different_plan_is_rejected(seeded_feature: Repository) -> None:
+    """同一個版號只能有一種內容：換了 `reason`／`rules_applied` 重送一律拒絕，而且不寫任何邊。
+
+    沿用既有 item 卻照新 plan 寫邊，會讓權威的 `VERSION.rules_applied` 與 `APPLIED_TO` 邊
+    互相矛盾（D17），核對卻仍然通過。這與 `put_private_artifact` 比對 bytes 是同一個作法。
+    """
+    repository = seeded_feature
+    create_version(version_plan(V1, number=1, supersedes=None, reason="gap:c12"),
+                   four_step_content(), repository)
+    changed = version_plan(V1, number=1, supersedes=None, reason="release:r_42",
+                           rules_applied=("R-007",))
+    with pytest.raises(ContentError, match="內容不同"):
+        create_version(changed, four_step_content(), repository)
+    version = repository.get_version(V1)
+    assert version is not None
+    assert (version.reason, version.rules_applied) == ("gap:c12", [])
+    assert repository.list_edges(rule_pk("R-007")) == []
+    assert verify_version_complete(V1, repository) is True
+
+
+def test_a_plan_that_disagrees_with_its_version_id_is_rejected(
+        seeded_feature: Repository) -> None:
+    """`version_id` 與 `slug`／`number` 不自洽時立刻拒絕：S3 key 會指向別的版本。"""
+    plan = VersionPlan(version_id=V1, slug=SLUG, number=2, supersedes=None,
+                       reason="gap:c12", rules_applied=(), operation_id="op-test-broken")
+    with pytest.raises(ContentError, match="不自洽"):
+        create_version(plan, four_step_content(), seeded_feature)
+    assert seeded_feature.get_version(V1) is None
+    assert not seeded_feature.object_exists(markdown_key(SLUG, 2))
 
 
 def test_the_same_plan_twice_does_not_add_a_version(published_v1: Repository) -> None:
