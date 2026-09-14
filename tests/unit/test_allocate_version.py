@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from training_kb.content import allocate_version, make_version_id, parse_version_id
+from training_kb.errors import ContentError, CoordinationError
 from training_kb.models import Tutorial, TutorialStatus, TutorialVersion
 
 
@@ -101,3 +102,36 @@ def test_next_version_follows_current_published(fake_repo: FakeRepository,
                             repository=fake_repo, reason="release:r_42", rules_applied=["R-007"])
     assert (plan.version_id, plan.number) == ("prepare-meeting@v3", 3)
     assert (plan.supersedes, plan.rules_applied) == ("prepare-meeting@v2", ("R-007",))
+
+
+def test_permanently_failed_number_is_skipped(fake_repo: FakeRepository,
+                                              fake_ops: FakeOperations) -> None:
+    """v2 是上一次永久失敗留下的未發布版本：新操作拿 v3，基底仍是已發布的 v1（D26）。"""
+    fake_repo.put_tutorial("prepare-meeting", current_version="prepare-meeting@v1")
+    fake_repo.put_unpublished_version("prepare-meeting@v2")
+    fake_ops.accepted("op-release-r_42")
+    plan = allocate_version("prepare-meeting", "op-release-r_42", fake_ops,
+                            repository=fake_repo, reason="release:r_42", rules_applied=["R-007"])
+    assert (plan.version_id, plan.supersedes) == ("prepare-meeting@v3", "prepare-meeting@v1")
+
+
+@pytest.mark.parametrize("current, recorded, operation_id, reason, error", [
+    (None, None, "op-gap-c99", "gap:c99", CoordinationError),               # 沒有被 O2 接受
+    (None, None, "op-gap-c12", "   ", ContentError),                        # reason 空白
+    ("share-summary@v1", None, "op-gap-c12", "gap:c12", ContentError),      # current_version 是別篇
+    (None, "share-summary@v9", "op-gap-c12", "gap:c12", CoordinationError), # 紀錄版號是別篇
+])
+def test_allocate_version_rejects_bad_input(fake_repo: FakeRepository, fake_ops: FakeOperations,
+                                            current: str | None, recorded: str | None,
+                                            operation_id: str, reason: str,
+                                            error: type[Exception]) -> None:
+    """四種失敗都在 `record_version` 之前就丟出來，不留半筆版號紀錄。"""
+    fake_repo.put_tutorial("prepare-meeting", current_version=current)
+    fake_ops.accepted("op-gap-c12")
+    if recorded:
+        fake_ops.record_version("op-gap-c12", recorded)
+        fake_ops.writes.clear()
+    with pytest.raises(error):
+        allocate_version("prepare-meeting", operation_id, fake_ops,
+                         repository=fake_repo, reason=reason, rules_applied=[])
+    assert fake_ops.writes == []

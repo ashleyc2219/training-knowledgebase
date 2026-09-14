@@ -119,6 +119,33 @@ def _base_version(repository: Repository, slug: str) -> tuple[str | None, int]:
     return tutorial.current_version, number
 
 
+def _replay_plan(version_id: str, tutorial_id: str, operation_id: str, repository: Repository,
+                 reason: str, rules_applied: Sequence[str]) -> VersionPlan:
+    """同一個 operation 重送：直接沿用紀錄裡的版號，**不重新配號**。
+
+    紀錄的版號屬於別篇教學代表呼叫端把兩次邏輯操作混成同一個 `operation_id`
+    （`OperationRecord.version_id` 是單值，一個 operation 只對應一篇教學的一個版本，
+    D-59），這是協調錯誤，不是內容錯誤，所以丟 `CoordinationError` 並在訊息帶兩個 slug。
+    """
+    slug, _ = parse_version_id(version_id)
+    if slug != tutorial_id:
+        raise CoordinationError(f"操作 {operation_id} 已配給 {slug}，不能改用 {tutorial_id}")
+    supersedes = _base_version(repository, tutorial_id)[0]
+    return _plan(version_id, supersedes, reason, rules_applied, operation_id)
+
+
+def _next_free_number(repository: Repository, slug: str, base_number: int) -> int:
+    """從基底號碼往上找第一個還沒有 VERSION item 的號碼。
+
+    只做 `base_number + 1` 會覆寫上一次永久失敗留下的未發布版本；D26 允許號碼缺口，
+    **不允許覆寫**，所以被占用的號碼一律跳過，不回頭補洞。
+    """
+    number = base_number + 1
+    while repository.get_version(make_version_id(slug, number)) is not None:
+        number += 1
+    return number
+
+
 def allocate_version(
     tutorial_id: str,
     operation_id: str,
@@ -138,7 +165,11 @@ def allocate_version(
     record = operations.load(operation_id)
     if record is None:
         raise CoordinationError(f"操作尚未被接受：{operation_id}")
+    if record.version_id is not None:
+        return _replay_plan(record.version_id, tutorial_id, operation_id,
+                            repository, reason, rules_applied)
     supersedes, base_number = _base_version(repository, tutorial_id)
-    version_id = make_version_id(tutorial_id, base_number + 1)
+    version_id = make_version_id(tutorial_id, _next_free_number(repository, tutorial_id,
+                                                                base_number))
     operations.record_version(operation_id, version_id)
     return _plan(version_id, supersedes, reason, rules_applied, operation_id)
