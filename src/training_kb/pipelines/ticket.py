@@ -13,6 +13,7 @@ Phase 41（Task 包裝與 handler）會繼續在同一支檔案上追加。
 from collections.abc import Iterable
 from datetime import date, timedelta
 
+from training_kb.clock import utc_date
 from training_kb.config import Thresholds
 from training_kb.errors import PermanentError
 from training_kb.keys import ticket_pk
@@ -138,3 +139,29 @@ def recurring_window(anchor: date, days: int = RECURRING_DAYS) -> frozenset[date
     if days < 1:
         raise PermanentError(f"recurring 窗口天數至少為 1，收到 {days}")
     return frozenset(anchor - timedelta(days=offset) for offset in range(days))
+
+
+def is_recurring(ticket: Ticket, *, repository: Repository) -> bool:
+    """同群工單在 anchor 的十四天窗口內是否累積到 `RECURRING_MIN_TICKETS` 筆（設計 §7.3）。
+
+    anchor 固定是**觸發本輪的那筆工單的 `ts`**，不是執行當下的時間：同一批輸入
+    什麼時候重跑都得到一樣的答案（設計 §14.2）。`Ticket.ts` 在 Phase 04 已經是
+    `datetime`，所以直接 `utc_date(...)`，不再套一層 `parse_iso`（那是給字串用的）。
+
+    固定順序：沒有 `cluster_id` -> `PermanentError`（Phase 38 還沒跑完，這是流程順序
+    錯，不是「不算 recurring」）；否則同專案的 Ticket 只留同群、且日期落在窗口內的，
+    依 `Ticket.id` 去重。同一天內的多筆各算一筆——日期只拿來過濾，不拿來去重。
+
+    anchor 自己一定算一筆：它的日期必然在窗口內，而 Phase 41 的 Task 順序容許
+    `cluster_id` 還沒寫回表（`assign_cluster` 只判斷不寫入），掃描不一定看得到它。
+    """
+    if not ticket.cluster_id:
+        raise PermanentError(f"工單 {ticket.id} 尚未分群，不能判斷 recurring")
+    window = recurring_window(utc_date(ticket.ts))
+    seen = {
+        other.id
+        for other in repository.list_tickets(ticket.project_id)
+        if other.cluster_id == ticket.cluster_id and utc_date(other.ts) in window
+    }
+    seen.add(ticket.id)
+    return len(seen) >= RECURRING_MIN_TICKETS
