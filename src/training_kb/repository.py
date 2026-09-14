@@ -103,7 +103,8 @@ def _encode(value: object) -> object:
     return value
 
 
-def _decode(value: object) -> object:
+def _decode(value: object) -> Any:
+    """`Decimal` -> `int`／`float`；回 `Any` 是因為反序列化出來的形狀本來就由 item 決定。"""
     if isinstance(value, Decimal):
         return int(value) if value == value.to_integral_value() else float(value)
     if isinstance(value, list):
@@ -111,6 +112,18 @@ def _decode(value: object) -> object:
     if isinstance(value, dict):
         return {key: _decode(item) for key, item in value.items()}
     return value
+
+
+def item_to_model[T: StrictModel](item: DynamoItem, model: type[T]) -> T:
+    """raw item -> 模型：去掉 `RESERVED_ATTRS` 再 `model_validate`（00A §3.6）。
+
+    模組函式不是方法，因為 Phase 08 的 `query_pk`／`scan_entity` 與 Phase 27、28、39、44、50
+    都會直接 import 它。模型是 `extra="forbid"`，直接餵 raw item 一定 `ValidationError`。
+    型別參數寫成 PEP 695 的 `[T: StrictModel]`（ruff UP047 要求），公開簽名與 00A §6.3 的
+    `(item: DynamoItem, model: type[T]) -> T` 完全相同，只是綁定寫在函式自己身上。
+    """
+    payload = {key: _decode(value) for key, value in item.items() if key not in RESERVED_ATTRS}
+    return model.model_validate(payload)
 
 
 # --- 4. Repository -----------------------------------------------------------
@@ -137,26 +150,51 @@ class Repository:
         """
         pk = _entity_pk(entity)
         payload = {k: _encode(v) for k, v in entity.model_dump(mode="json").items()}
+        if not self._put_item(pk, payload, create_only=create_only):
+            raise CoordinationError(f"metadata already exists or changed since read: {pk}")
+
+    def put_meta_item(self, pk: str, attributes: Mapping[str, DynamoValue], *,
+                      create_only: bool = True) -> bool:
+        """不走模型的 `OPS#`／`CONFIG#`／`SEQ#`／`LEASE#` 原語；回「本次是否由我建立」。
+
+        與 `put_meta` 共用同一條條件寫入路徑，所以 `PK`／`SK`／`entity`／`_revision`
+        的來源只有一個。差別只在撞鍵時回 `False` 而不是丟 `CoordinationError`——
+        呼叫端要的正是「別人先建立了」這個事實（永久去重的判斷點）。
+        """
+        reserved = sorted(RESERVED_ATTRS.intersection(attributes))
+        if reserved:
+            raise PermanentError(f"reserved attributes are not writable: {reserved}")
+        payload = {key: _encode(value) for key, value in attributes.items()}
+        return self._put_item(pk, payload, create_only=create_only)
+
+    def _put_item(self, pk: str, payload: Mapping[str, object], *, create_only: bool) -> bool:
+        """條件寫入的唯一實作。回 `True` 表示這次是新建，`False` 表示 `create_only` 撞鍵。
+
+        `create_only=False` 仍然帶條件（`#revision = :current`），而且把 `_revision` 往上加，
+        不會重設成 1 讓舊的持有者誤以為自己是最新；期間被改過就丟 `CoordinationError`。
+        """
         revision = 1
         arguments: dict[str, object] = {"ConditionExpression": "attribute_not_exists(PK)"}
-        if not create_only:
-            current = self._revision_or_none(pk)
-            if current is not None:
-                revision = current + 1
-                arguments = {
-                    "ConditionExpression": "#revision = :current",
-                    "ExpressionAttributeNames": {"#revision": "_revision"},
-                    "ExpressionAttributeValues": {":current": current},
-                }
+        current = None if create_only else self._revision_or_none(pk)
+        if current is not None:
+            revision = current + 1
+            arguments = {
+                "ConditionExpression": "#revision = :current",
+                "ExpressionAttributeNames": {"#revision": "_revision"},
+                "ExpressionAttributeValues": {":current": current},
+            }
         arguments["Item"] = {**payload, "PK": pk, "SK": META,
                              "entity": parse_pk(pk)[0], "_revision": revision}
         try:
             self._table.put_item(**arguments)
         except ClientError as error:
-            if error.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            if error.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            if current is not None:
                 raise CoordinationError(
-                    f"metadata already exists or changed since read: {pk}") from error
-            raise
+                    f"metadata changed since read: {pk}") from error
+            return False
+        return True
 
     def _revision_or_none(self, pk: str) -> int | None:
         """讀目前的 `_revision`；item 不存在回 `None`。`revision_of` 與受控覆寫共用它。"""
@@ -212,10 +250,20 @@ class Repository:
     def get_meta(self, pk: str, model: type[T], *, consistent: bool = True) -> T | None:
         response = self._table.get_item(Key={"PK": pk, "SK": META}, ConsistentRead=consistent)
         item = response.get("Item")
+        return None if item is None else item_to_model(item, model)
+
+    def get_meta_item(self, pk: str) -> DynamoItem | None:
+        """`put_meta_item` 的反向原語：回整筆 raw item（含保留屬性），不存在回 `None`。
+
+        `Decimal` 已解碼成 `int`／`float`，所以同一次讀到的 `_revision` 可以直接當
+        `update_meta` 的 `expected_revision`（00A §3.6 的唯一例外），不必再讀一次。
+        """
+        response = self._table.get_item(Key={"PK": pk, "SK": META}, ConsistentRead=True)
+        item = response.get("Item")
         if item is None:
             return None
-        payload = {k: _decode(v) for k, v in item.items() if k not in RESERVED_ATTRS}
-        return model.model_validate(payload)
+        decoded: DynamoItem = {key: _decode(value) for key, value in item.items()}
+        return decoded
 
     def get_tutorial(self, slug: str) -> Tutorial | None:
         return self.get_meta(tutorial_pk(slug), Tutorial)

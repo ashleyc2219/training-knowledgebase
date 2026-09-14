@@ -8,10 +8,35 @@
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from training_kb.errors import CoordinationError, PermanentError
-from training_kb.models import Feature, Ticket, TutorialStep
-from training_kb.repository import RESERVED_ATTRS
+from training_kb.keys import (
+    feature_pk,
+    feedback_pk,
+    proc_pk,
+    release_pk,
+    rule_pk,
+    ticket_pk,
+    tutorial_pk,
+    version_pk,
+    view_pk,
+)
+from training_kb.models import (
+    AuthoringRule,
+    Entity,
+    Feature,
+    Feedback,
+    ProcStep,
+    ProvenWorkflow,
+    Release,
+    Ticket,
+    Tutorial,
+    TutorialStep,
+    TutorialVersion,
+    TutorialView,
+)
+from training_kb.repository import RESERVED_ATTRS, item_to_model
 
 
 def feature(name: str = "Prepare") -> Feature:
@@ -82,3 +107,90 @@ def test_controlled_overwrite_keeps_revision_monotonic(repository) -> None:
     repository.put_meta(feature("Meeting Summary"), create_only=False)
     assert repository.revision_of("FEATURE#Prepare") == 2
     assert repository.get_feature("Prepare").name == "Meeting Summary"
+
+
+def test_raw_item_needs_item_to_model(repository, table) -> None:
+    repository.put_meta(feature())
+    item = table.get_item(Key={"PK": "FEATURE#Prepare", "SK": "META"},
+                          ConsistentRead=True)["Item"]
+    with pytest.raises(ValidationError):
+        Feature.model_validate(item)
+    assert item_to_model(item, Feature) == feature()
+
+
+def test_meta_item_primitives_serve_non_model_prefixes(repository) -> None:
+    assert repository.get_meta_item("OPS#op-1") is None
+    assert repository.put_meta_item("OPS#op-1", {"status": "accepted", "counter": 0}) is True
+    assert repository.put_meta_item("OPS#op-1", {"status": "done", "counter": 9}) is False
+    item = repository.get_meta_item("OPS#op-1")
+    assert item["PK"] == "OPS#op-1" and item["SK"] == "META"
+    assert item["entity"] == "OPS" and item["_revision"] == 1
+    assert item["status"] == "accepted" and item["counter"] == 0
+    assert repository.update_meta("OPS#op-1", {"counter": 1},
+                                  expected_revision=item["_revision"]) == 2
+    assert repository.get_meta_item("OPS#op-1")["counter"] == 1
+    with pytest.raises(PermanentError, match="reserved"):
+        repository.put_meta_item("OPS#op-2", {"_revision": 7})
+
+
+TS = datetime(2026, 8, 3, 10, tzinfo=UTC)
+VIEW = TutorialView(tutorial_version="prepare-meeting@v2", user="u_01", ts=TS)
+
+NINE_METADATA_ENTITIES: list[tuple[str, Entity]] = [
+    (tutorial_pk("prepare-meeting"),
+     Tutorial(slug="prepare-meeting", topic="會前準備", feature_ids=["Prepare"],
+              status="active")),
+    (version_pk("prepare-meeting@v2"),
+     TutorialVersion(version_id="prepare-meeting@v2", slug="prepare-meeting",
+                     supersedes="prepare-meeting@v1", reason="gap:c12",
+                     rules_applied=["R-001"], s3_key="tutorials/prepare-meeting/v2.md",
+                     published_at=TS)),
+    (feature_pk("Prepare"), feature()),
+    (ticket_pk("t_881"),
+     Ticket(id="t_881", source="github_issue", text="找不到按鈕", author="u_01", ts=TS,
+            project_id="demo", feature_ids=["Prepare"], embedding=[0.5] * 1024)),
+    (release_pk("R-007"),
+     Release(id="R-007", source="changelog", feature="Prepare", kind="renamed",
+             old_name="Prepare", new_name="Meeting Summary", evidence="改名公告", ts=TS)),
+    (feedback_pk("f_12"),
+     Feedback(id="f_12", tutorial_version="prepare-meeting@v2", rating=2,
+              category="步驟不清楚", comment="第三步找不到", user="u_01", ts=TS)),
+    (view_pk("prepare-meeting@v2", "u_01", TS), VIEW),
+    (rule_pk("R-001"),
+     AuthoringRule(rule_id="R-001", rule="每步只提一個功能", applies_when="click_ui",
+                   evidence=["f_1", "f_2", "f_3", "f_4", "f_5"], status="active",
+                   applied_to=["prepare-meeting@v2"], derived_from="feedback-review")),
+    (proc_pk("0123456789abcdef"),
+     ProvenWorkflow(signature="0123456789abcdef", domain="github.com", adapter="issues",
+                    steps=[ProcStep(tool="http_get", args={"path": "/issues"})],
+                    keys=["action", "issue"], success_count=3, fail_count=0,
+                    status="active", last_used=TS)),
+]
+
+
+def test_all_nine_metadata_entities_round_trip(repository, table) -> None:
+    for pk, entity in NINE_METADATA_ENTITIES:
+        repository.put_meta(entity)
+        assert repository.get_meta(pk, type(entity)) == entity, pk
+        item = table.get_item(Key={"PK": pk, "SK": "META"}, ConsistentRead=True)["Item"]
+        assert item["entity"] == pk.split("#", 1)[0]
+        assert set(item) - RESERVED_ATTRS == set(entity.model_dump())
+
+
+def test_native_list_and_map_are_not_json_strings(repository, table) -> None:
+    pk, proc = NINE_METADATA_ENTITIES[-1]
+    repository.put_meta(proc)
+    item = table.get_item(Key={"PK": pk, "SK": "META"}, ConsistentRead=True)["Item"]
+    assert item["keys"] == ["action", "issue"]
+    assert item["steps"] == [{"tool": "http_get", "args": {"path": "/issues"}}]
+    assert item["last_used"] == "2026-08-03T10:00:00Z"
+
+
+def test_named_getters_use_their_own_key_builder(repository) -> None:
+    for _, entity in NINE_METADATA_ENTITIES:
+        repository.put_meta(entity)
+    assert repository.get_tutorial("prepare-meeting").topic == "會前準備"
+    assert repository.get_version("prepare-meeting@v2").s3_key.endswith("v2.md")
+    assert repository.get_feature("Prepare") == feature()
+    assert repository.get_proc("0123456789abcdef").domain == "github.com"
+    assert repository.get_tutorial("missing") is None
