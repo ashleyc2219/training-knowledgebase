@@ -13,8 +13,9 @@
 - 唯一主來源是 [Training KB 設計 §8.2、§8.3、§9.3、§13、§18 O3](../../design/training-kb.md)。
 - 前置為 [Phase 23：未發布版本與關係完整寫入](./23-Phase23-未發布版本與關係完整寫入.md)，未通過時停止；下一階段是 [Phase 25：多篇教學整批發布](./25-Phase25-多篇教學整批發布.md)。
 - 本階段不做：不做 feedback widget 與下載流程（Phase 57）、不做版本選擇與 diff 檢視畫面（Phase 57）、不做多篇整批提交（Phase 25）、不做退役頁的後繼導向（Phase 26）、不建立任何新版本內容。
-- O1–O7 gate 狀態：O3 由 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 判定，**目前不得宣稱已通過**；本 Phase 的測試只能證明程式邏輯，不能宣稱「publish 的故障驗收已通過」。O2 未 PASS 時不得宣稱重送必得同版號。O1 的 `META` 直接進交易 Key，O1 未明確接受前它仍是待確認值。
-- O3 未 PASS 時 `commit` 只能對隔離環境（moto 或專用 Demo bucket）執行；不得對真實公開 bucket 提交，也不得用「沒有連結的 URL」充當未發布。
+- O1–O7 gate 狀態：O3 由 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 判定為 **FAIL**（報告 `docs/plan/report/o3-20260914t181109z.md`），**目前不得宣稱已通過**；本 Phase 的測試只能證明程式邏輯，不能宣稱「publish 的故障驗收已通過」。O2 未 PASS 時不得宣稱重送必得同版號。O1 的 `META` 直接進交易 Key，O1 未明確接受前它仍是待確認值。
+- **O3 未 PASS 不是停止條件（controller 2026-09-14 裁決）：離線開發照常，真實切點驗證延後到 P41／P59。** 本 Phase 照協定 A（私有 staging → `TransactWriteItems` → 逐篇寫 `site/`）在 moto 上完整實作並記錄三個切點，**不得宣稱 O3 已過、不得放寬 F49**。
+- `commit` 只能對隔離環境（moto 或專用 Demo bucket）執行；不得對真實公開 bucket 提交，也不得用「沒有連結的 URL」充當未發布。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -142,7 +143,7 @@ class Repository:     # Phase 06 既有類別，本 Phase 追加兩個成員
 
 `transact_write` 全部成功回 `None`；任一 `ConditionalCheckFailed` 回它在 `items` 的 index；其他取消原因轉成 `TransientError`。`table_name` 就是 `self._table.name`。`SiteRenderer` 三個 render 簽名到 Phase 57 都不改，Phase 57 只換實作；`__init__` 的四個 keyword 參數**全部有預設值**，所以本 Phase 與 Phase 25／41／48／52 的 `SiteRenderer()` 無參數建構永遠成立（Phase 57 加畫面選項時也不得拿掉預設值）。
 
-**注意 API 層級不同：** [Phase 06](./06-Phase06-Repository-Metadata與實體讀寫.md) 的 `Repository` 拿的是 boto3 **resource** Table，`put_item`／`get_item` 用的是原生 Python 值；`transact_write_items` 只存在於 **client**，必須經 `self._table.meta.client` 取得，而且值要用 `{"S": ...}` 這種低階 AttributeValue 形式。兩種寫法同時存在是預期的，不要把交易改寫成 resource API。
+**注意 API 層級不同，但值的形狀相同（2026-09-14 實作更正）：** [Phase 06](./06-Phase06-Repository-Metadata與實體讀寫.md) 的 `Repository` 拿的是 boto3 **resource** Table，`put_item`／`get_item` 用的是原生 Python 值；`transact_write_items` 只存在於 **client**，必須經 `self._table.meta.client` 取得。**但 `items` 的值一律是原生 Python 值，不是 `{"S": ...}` 低階 AttributeValue**：`boto3.resource("dynamodb")` 會在它自己的 client 上註冊 `dynamodb-attr-value-input`（`boto3/dynamodb/transform.py`），把所有 `AttributeValue` 形狀的參數再序列化一次，所以傳 `{"S": "TUTORIAL#x"}` 會變成 `{"M": {"S": {"S": "TUTORIAL#x"}}}`，moto 與真實 DynamoDB 都會拒絕（實測訊號：`TransactionCanceledException` + `CancellationReasons=[{'Code': 'TypeError', 'Message': "unhashable type: 'dict'"}]`）。本段原文與 00A §6.7 的「值用低階 `{"S": ...}` 形式」都與 boto3 實際行為不符，已依實測更正；**00A §6.7 尚待同步**。
 
 ## 6. 設計細節
 
@@ -175,15 +176,19 @@ commit:   自己先跑一次 inspect；ok? -- 否 --> PublishError，不進交�
 
 公開順序固定「先 DynamoDB 再 S3」。反過來會讓尚未發布的內容先曝光，直接違反設計 §8.3 與 §13；先 DynamoDB 的殘留風險是「已標記發布但公開站仍是舊頁」，讀者看到的是**舊的已發布版**而非未發布內容。兩者都不完美，這正是 O3 尚未解的部分；本 Phase 只固定較安全的一邊並把切點寫出來，不宣稱已解。版本頁的 S3 寫入採條件核對：同 key 已存在時先 `get_object` 比對 bytes，完全相同就不重寫，不同就丟 `PublishError`；教學索引與站台索引是可重建投影，允許重寫。
 
-**留給 Phase 57 的一個約束。** 本 Phase 的最小 renderer 不輸出 `data-published` 標記，所以 `commit` 可以直接把 staging bytes 複製到 `site/`。[Phase 57](./57-Phase57-S3靜態教學站與回饋下載.md) 會依 `published_at` 加上 `data-published="true"／"false"`，而 `prepare` 渲染時 `published_at` 必然還是 `None`；屆時 `commit` 必須在交易成功後、寫 `site/` 之前，用已切換的 `published_at` 重新渲染並覆寫**同一個 staging key**，promote 才仍然是「複製 staging 的同一份 bytes」，也才不會把 `data-published="false"` 帶進公開站。這一點在 Phase 57 有實作前不得視為已處理。
+**`data-published` 與重新渲染在本 Phase 就做（依 00A §3.8、§6.7 更正）。** 原文把標記與重新渲染都推給 [Phase 57](./57-Phase57-S3靜態教學站與回饋下載.md)，但 00A §3.8 要求「`published_at is None` 的頁面渲染時帶 `data-published="false"`，只能存在於私有 staging」，00A §6.7 也把「重新渲染的責任」明確歸給 **P24 的 `commit`**（P57 只負責頁面上其他標記）。所以本 Phase 的最小 renderer **就輸出** `data-published`，而 `prepare` 渲染時 `published_at` 必然還是 `None`；`commit` 在交易成功後、寫 `site/` 之前，用已切換的 `published_at`／`current_version` 重新渲染並覆寫**同一個 staging key**，promote 才仍然是「複製 staging 的同一份 bytes」（Phase 25 的 `promote_site_objects` 因此只要搬 bytes），也才不會把 `data-published="false"` 帶進公開站。
+
+**教學索引額外帶 `data-site-version`。** 值是 `tutorial.current_version` 的 `v<n>`（沒有已發布版本時是空字串）。[Phase 12](./12-Phase12-O3發布切換整合驗證.md) 的 O3 觀察腳本就是讀這個標記判斷「公開站此刻是哪一個世代」，本 Phase 的切點測試沿用同一個觀察方法，P41／P59 之後才能在真實 AWS 重跑同一組切點。Phase 57 換實作時不得拿掉它。
+
+**交易成功之後的 S3 階段失敗一律轉成 `PublishError`。** 此時兩個欄位已經切換，整個 `commit` 重跑會被 `inspect` 擋下（版本已發布），所以它不是可交給 ASL Retry 的暫時故障；補償重送 `resume_publish` 歸 [Phase 59](./59-Phase59-失敗復原與重送驗收.md)，私有 staging 一律保留不刪。
 
 ## 7. TDD Tasks
 
-共用 fixture 寫在對應的 `conftest.py`：`renderer` 是 `SiteRenderer()`（無參數）；`fixtures.active_v1(...)` 回一組 `(Tutorial, TutorialVersion, list[TutorialStep], TutorialContent)`；`repo` 是接上 moto 表與 bucket 的 `Repository`，`repo.objects` 是它 bucket 內所有 key 的唯讀檢視；`publisher` 是 `Publisher(repo, SiteRenderer(), operations)`，其中的 `prepare-meeting@v2` 已由 [Phase 23](./23-Phase23-未發布版本與關係完整寫入.md) 的 `create_version` 寫成完整未發布版本。`NOW` 是固定且不含微秒的 aware UTC 時間，`to_iso` 與 pydantic 的往返才會相等。測試字串 `"op-pub-2"` 只是 fixture，正式路徑的 `operation_id` 一律由 Phase 32 的 `operation_id_for` 產生。
+共用器材寫在**使用它的測試檔裡**（原文寫「對應的 `conftest.py`」，但 `tests/unit/conftest.py` 的 owner 是 P15、`tests/integration/conftest.py` 的 owner 是 P06，P24 都不是它們的修改者，見 00A §3.2；做法與 Phase 23 相同）。整合測試的 moto fixture 名一律是 `repository`（00A §3.2），只有單元測試的 `Repository` 子類別叫 `repo`。`renderer` 是 `SiteRenderer()`（無參數）；`fixtures.active_v1(...)` 回一組 `(Tutorial, TutorialVersion, list[TutorialStep], TutorialContent)`；`repo` 是接上 moto 表與 bucket 的 `Repository`，`repo.objects` 是它 bucket 內所有 key 的唯讀檢視；`publisher` 是 `Publisher(repo, SiteRenderer(), operations)`，其中的 `prepare-meeting@v2` 已由 [Phase 23](./23-Phase23-未發布版本與關係完整寫入.md) 的 `create_version` 寫成完整未發布版本。`NOW` 是固定且不含微秒的 aware UTC 時間，`to_iso` 與 pydantic 的往返才會相等。測試字串 `"op-pub-2"` 只是 fixture，正式路徑的 `operation_id` 一律由 Phase 32 的 `operation_id_for` 產生。
 
 ### Task 1：最小 SiteRenderer 與逃脫
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_render_version_page_escapes_text_and_shows_version(renderer, fixtures):
@@ -197,7 +202,7 @@ def test_render_version_page_escapes_text_and_shows_version(renderer, fixtures):
         assert f"<h2>{section}</h2>" in page
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_site_renderer.py -q
@@ -205,7 +210,7 @@ uv run pytest tests/unit/test_site_renderer.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'SiteRenderer'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def render_version_page(self, tutorial, version, steps, content) -> str:
@@ -224,7 +229,7 @@ def render_version_page(self, tutorial, version, steps, content) -> str:
     return page
 ```
 
-- [ ] **Step 4：補上兩個索引方法並跑綠燈**
+- [x] **Step 4：補上兩個索引方法並跑綠燈**
 
 `render_tutorial_index` 只列 `published_at` 非空的版本並標出 `current_version`；`render_site_index` 只列 `current_version` 非空的 Tutorial；所有文字一律先 `html.escape`。`__init__` 的四個 keyword 參數在本 Phase 只是存起來備用，Phase 57 才會真的用到，但現在就要有預設值。退役提示文字由 [Phase 26](./26-Phase26-教學退役與後繼導向.md)／Phase 57 定案，本 Phase 只放一句固定佔位，不顯示退役原因。
 
@@ -234,7 +239,7 @@ uv run pytest tests/unit/test_site_renderer.py -q
 
 預期：三個 render 測試全部 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/site.py tests/unit/test_site_renderer.py
@@ -243,7 +248,7 @@ git commit -m "feat(content): 建立最小公開頁 renderer"
 
 ### Task 2：prepare 與 inspect 只碰私有前綴
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_prepare_stages_privately_and_never_touches_site(publisher, repo):
@@ -260,7 +265,7 @@ def test_prepare_stages_privately_and_never_touches_site(publisher, repo):
 
 再加兩個案例：`verify_version_complete` 回 `False` 時 `prepare` 丟 `PublishError` 且零 staging；`prepare` 之後把 `current_version` 改掉時 `inspect` 必須回 `ok=False`，`problems` 指出 `current_version`。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_publisher_single.py -q
@@ -268,7 +273,7 @@ uv run pytest tests/unit/test_publisher_single.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'Publisher'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def _diff_copy_key(version_id: str) -> str:
@@ -304,7 +309,7 @@ def _stage(self, operation_id: str, relative: str, body: bytes, content_type: st
 
 `prepare` 只是對 `request.version_ids` 逐一呼叫 `_stage_one`，把每篇回傳的兩個 key 收齊，再回傳 `PreparedPublish(request, tuple(request.version_ids), tuple(sorted(keys)), now)`。staging 用 `if_none_match=False`：同 operation 重送時渲染結果是決定性的，覆寫同一份 bytes 是安全的；公開 `site/` 的寫入才需要第 6 節說的 bytes 比對。
 
-- [ ] **Step 4：跑綠燈**
+- [x] **Step 4：跑綠燈**
 
 ```bash
 uv run pytest tests/unit/test_publisher_single.py -q
@@ -312,7 +317,7 @@ uv run pytest tests/unit/test_publisher_single.py -q
 
 預期：三個 `prepare`／`inspect` 測試 PASS，且 `repo.objects` 中沒有任何 `site/` 開頭的 key。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/publishing.py tests/unit/test_publisher_single.py
@@ -321,7 +326,7 @@ git commit -m "feat(content): 以私有 staging 準備單篇發布"
 
 ### Task 3：一筆交易同時切 published_at 與 current_version
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_commit_switches_both_fields_then_writes_site(publisher, repo):
@@ -347,44 +352,50 @@ def test_commit_refuses_when_base_version_moved(publisher, repo):
     assert [key for key in repo.objects if key.startswith("site/")] == []
 ```
 
-`repo.transact_calls` 是假 `Repository` 記下的 `transact_write` 呼叫次數。**位移發生在交易當下**（`inspect` 時還沒改、送出交易才不符）是另一條路徑：那時 DynamoDB 的條件失敗，`commit` 回 `PublishResult(published=(), failed=..., reasons=(...))` 而不丟例外，由 [Phase 25](./25-Phase25-多篇教學整批發布.md) 的整批測試涵蓋。
+`repo.transact_calls` 是 `Repository` 子類別記下的 `transact_write` 呼叫次數（子類別只加觀察點，`transact_write` 先記一筆再原樣呼叫父類別）。**位移發生在交易當下**（`inspect` 時還沒改、送出交易才不符）是另一條路徑：那時 DynamoDB 的條件失敗，`commit` 回 `PublishResult(published=(), failed=..., reasons=(...))` 而不丟例外，由 [Phase 25](./25-Phase25-多篇教學整批發布.md) 的整批測試涵蓋。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_publisher_single.py -q -k commit
 ```
 
-預期：FAIL，訊號包含 `'Repository' object has no attribute 'transact_write'`。
+預期：FAIL，訊號包含 `'Repository' object has no attribute 'transact_write'`。（**實作時的實際紅燈訊號不同**：`transact_write` 先補上了，所以 8 個 `commit` 測試一起紅在 `TransientError: transaction cancelled: [{'Code': 'TypeError', 'Message': "unhashable type: 'dict'"}, ...]`——那是第 5 節更正的「低階 AttributeValue 被 resource client 再序列化一次」造成的，換成原生 Python 值就全綠。）
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def _update(table, pk, expression, condition, values):
-    return {"Update": {"TableName": table, "Key": {"PK": {"S": pk}, "SK": {"S": META}},
-                       "UpdateExpression": expression, "ConditionExpression": condition,
-                       "ExpressionAttributeValues": values}}
+    # 值是原生 Python 值，不是 {"S": ...}：resource 的 client 會自己序列化一次。
+    # "#rev = #rev + :one" 與業務欄位同一個 SET，交易切換才會推進 _revision，
+    # update_meta 的 compare-and-swap 不會在發布之後仍以為舊 revision 是最新的
+    # （與 Phase 12 的 O3 spike publish_transaction 同一套算式）。
+    return {"Update": {"TableName": table, "Key": {"PK": pk, "SK": META},
+                       "UpdateExpression": f"{expression}, #rev = #rev + :one",
+                       "ConditionExpression": condition,
+                       "ExpressionAttributeNames": {"#rev": "_revision"},
+                       "ExpressionAttributeValues": {**values, ":one": 1}}}
 
 
-def _transact_items(self, version, tutorial, *, now: datetime) -> list[dict[str, object]]:
-    table, null = self._repository.table_name, {":null": {"S": "NULL"}}
-    values = {":version": {"S": version.version_id}}
+def _transact_items(self, version, tutorial, *, now: datetime) -> list[Mapping[str, object]]:
+    table, null = self._repository.table_name, {":null": "NULL"}
+    values = {":version": version.version_id}
     if version.supersedes is None:
         clause = "attribute_not_exists(current_version) OR attribute_type(current_version, :null)"
         values |= null
     else:
-        clause, values = "current_version = :base", values | {":base": {"S": version.supersedes}}
+        clause, values = "current_version = :base", values | {":base": version.supersedes}
     return [
         _update(table, version_pk(version.version_id), "SET published_at = :now",
                 "attribute_not_exists(published_at) OR attribute_type(published_at, :null)",
-                {":now": {"S": to_iso(now)}, **null}),
+                {":now": to_iso(now), **null}),
         _update(table, tutorial_pk(tutorial.slug), "SET current_version = :version", clause, values),
     ]
 ```
 
-- [ ] **Step 4：補上 `commit` 並跑綠燈**
+- [x] **Step 4：補上 `commit` 並跑綠燈**
 
-`commit` 先呼叫 `inspect`，不通過就丟 `PublishError`（`problems` 一併放進訊息）；再把 `_transact_items` 的兩個 action 一次送進 `transact_write`。回非 `None` 時換算成 `version_ids[index // 2]`（每篇固定兩個 action，順序是 VERSION、TUTORIAL）與對應原因字串，回 `PublishResult(published=(), failed=..., reasons=(...))` 而**不丟例外**；回 `None` 才把 staging bytes 複製到 `site/`——每篇兩個物件（版本頁 `v<n>.html` 與公開 diff 副本 `v<n>.diff.txt`），同 key 已存在先比對 bytes，不同就丟 `PublishError`——再用 `tutorial_index_key(slug)` 與 `site_index_key()` 重寫教學索引與站台索引，最後呼叫 `operations.record_version(operation_id, version_id)`。
+`commit` 先呼叫 `inspect`，不通過就丟 `PublishError`（`problems` 一併放進訊息）；再把 `_transact_items` 的兩個 action 一次送進 `transact_write`。回非 `None` 時換算成 `version_ids[index // 2]`（每篇固定兩個 action，順序是 VERSION、TUTORIAL）與對應原因字串，回 `PublishResult(published=(), failed=..., reasons=(...))` 而**不丟例外**；回 `None` 才進 S3 階段：先用已切換的 `published_at`／`current_version` **重新渲染並覆寫同一個 staging key**（第 6 節），再把 staging bytes 複製到 `site/`——每篇兩個物件（版本頁 `v<n>.html` 與公開 diff 副本 `v<n>.diff.txt`），同 key 已存在先比對 bytes，不同就丟 `PublishError`——再用 `tutorial_index_key(slug)` 與 `site_index_key()` 重寫教學索引與站台索引（可重建投影，允許重寫），最後呼叫 `operations.record_version(operation_id, version_id)`。這整個 S3 階段的任何失敗都轉成 `PublishError`。
 
 ```bash
 uv run pytest tests/unit/test_publisher_single.py -q
@@ -392,7 +403,7 @@ uv run pytest tests/unit/test_publisher_single.py -q
 
 預期：`commit` 的成功與「基底位移被 `inspect` 擋下」兩個測試都 PASS。
 
-- [ ] **Step 5：依第 8 節切點表逐一注入失敗，存成證據檔後提交**
+- [x] **Step 5：依第 8 節切點表逐一注入失敗，存成證據檔後提交**
 
 三個切點用 `monkeypatch` 在 `Publisher` 內部注入例外（本 Phase 還沒有 [Phase 59](./59-Phase59-失敗復原與重送驗收.md) 的 `TKB_FAULT` 模組，不要提前建立），每次注入後把 DynamoDB 兩個欄位與公開讀取結果寫進測試輸出當證據。
 
@@ -425,7 +436,7 @@ git commit -m "feat(content): 以單筆交易提交單篇發布"
 
 另外三個代號不屬於本 Phase：`b1_after_site_before_transact`（先 site 後交易）是被本 Phase 明文禁止的順序，程式不會走到；`a3_after_first_site_before_second` 只出現在 [Phase 25](./25-Phase25-多篇教學整批發布.md) 的多篇路徑；`c1_after_delete_site`（事後刪除公開頁）由 Phase 12 負責證明「刪除不消除已發生的曝光」，本 Phase 不得拿刪檔當回滾。
 
-人工驗收：用公開 website endpoint 實際讀一次頁面，同時 `get_item` 讀 `VERSION` 與 `TUTORIAL`，兩邊必須指向同一版本；不能只看測試顯示 PASS。S3 website endpoint 只有 HTTP，本 Phase 不把它描述成 HTTPS。
+人工驗收（**延後至 P41／P59**，controller 2026-09-14 裁決：離線開發照常，真實切點驗證延後）：用公開 website endpoint 實際讀一次頁面，同時 `get_item` 讀 `VERSION` 與 `TUTORIAL`，兩邊必須指向同一版本；不能只看測試顯示 PASS。S3 website endpoint 只有 HTTP，本 Phase 不把它描述成 HTTPS。
 
 ## 9. 常見錯誤與停止條件
 
@@ -456,12 +467,15 @@ Rule 原文逐字取自 feature 檔；primary 歸屬依 [00B 需求覆蓋對照]
 
 ## 11. 完成清單
 
-- [ ] `PublishRequest`、`PreparedPublish`、`PublishInspection`、`PublishResult`、`Publisher`、`SiteRenderer` 簽名逐字符合本文件；`SiteRenderer` 在 `src/training_kb/site.py`，且 `SiteRenderer()` 可以無參數建構。
-- [ ] `site_key("prepare-meeting@v2")` 回 `tutorials/prepare-meeting/v2.html`、`tutorial_index_key("prepare-meeting")` 回 `tutorials/prepare-meeting/index.html`、`site_index_key()` 回 `index.html`（D-54），公開物件都是它們前面加 `site/`。
-- [ ] `prepare` 每篇 staging 兩個物件（版本頁與 `v<n>.diff.txt` 公開副本），只寫 `operations/` 私有前綴，任何失敗都不留公開產物。
-- [ ] `commit` 用一次 `transact_write_items` 同時切 `published_at` 與 `current_version`，條件是 `supersedes` 非空時 `current_version = :base`、v1 時 `attribute_not_exists(current_version) OR attribute_type(current_version, :null)`。
-- [ ] 交易成功之後才寫 `site/`；順序反過來即視為缺陷。`commit` 內的 `inspect` 不通過時丟 `PublishError` 且 `transact_write` 0 次。
-- [ ] 公開文字全部經 `html.escape`，索引頁不列未發布版本。
-- [ ] `a1_before_transact`、交易被取消、`a2_after_transact_before_site` 三個切點各有一筆實際注入證據與可觀察結果紀錄。
-- [ ] 發布教學版本 Rule 1、4、5 各有直接 assertion；Rule 2、3 只標為相關（primary 在 Phase 57）。
-- [ ] 未把單元測試或 moto PASS 說成 O3 已通過、AWS 已驗收或站台已上線。
+- [x] `PublishRequest`、`PreparedPublish`、`PublishInspection`、`PublishResult`、`Publisher`、`SiteRenderer` 簽名逐字符合本文件；`SiteRenderer` 在 `src/training_kb/site.py`，且 `SiteRenderer()` 可以無參數建構。
+- [x] `site_key("prepare-meeting@v2")` 回 `tutorials/prepare-meeting/v2.html`、`tutorial_index_key("prepare-meeting")` 回 `tutorials/prepare-meeting/index.html`、`site_index_key()` 回 `index.html`（D-54），公開物件都是它們前面加 `site/`。
+- [x] `prepare` 每篇 staging 兩個物件（版本頁與 `v<n>.diff.txt` 公開副本），只寫 `operations/` 私有前綴，任何失敗都不留公開產物。
+- [x] `commit` 用一次 `transact_write_items` 同時切 `published_at` 與 `current_version`，條件是 `supersedes` 非空時 `current_version = :base`、v1 時 `attribute_not_exists(current_version) OR attribute_type(current_version, :null)`。
+- [x] 交易成功之後才寫 `site/`；順序反過來即視為缺陷。`commit` 內的 `inspect` 不通過時丟 `PublishError` 且 `transact_write` 0 次。
+- [x] 公開文字全部經 `html.escape`，索引頁不列未發布版本。
+- [x] `a1_before_transact`、交易被取消、`a2_after_transact_before_site` 三個切點各有一筆實際注入證據與可觀察結果紀錄。
+- [x] 發布教學版本 Rule 1、4、5 各有直接 assertion；Rule 2、3 只標為相關（primary 在 Phase 57）。
+- [x] 未把單元測試或 moto PASS 說成 O3 已通過、AWS 已驗收或站台已上線。
+- [x] 最小 renderer 輸出 `data-published`，`commit` 在交易成功後重新渲染同一個 staging key，`site/` 掃描不得出現 `data-published="false"`（00A §3.8、§6.7）。
+- [x] `transact_write` 的 `items` 用原生 Python 值（resource client 自己序列化），交易同時推進 `_revision`。
+- [ ] 真實 AWS 上重跑三個切點與 website endpoint 人工驗收 —— **延後至 P41／P59**（O3 仍是 FAIL）。
