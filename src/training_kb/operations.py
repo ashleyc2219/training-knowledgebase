@@ -264,8 +264,20 @@ class OperationCoordinator:
         既有紀錄與它原本的 `accept_seq`，被燒掉的號碼不會出現在任何 `OPS#` item。接受順序
         只要求單調遞增、可比較，不要求連號（同 D26 對版號缺口的取捨）。不要為了補洞改成
         「先查再寫」，那會把三個分支變成有競態的四個分支。
+
+        **取號失敗時先確認是否已被接受。** `SEQ#PROJECT#<project_id>` 是專案唯一的熱鍵，
+        搶輸 `SEQUENCE_ATTEMPTS` 次就丟 `CoordinationError`；已經接受過的 operation 在
+        高競爭下重送，去重依據仍是「這筆紀錄存在」，不是「這次取得到號碼」，所以先讀一次
+        既有紀錄再決定：讀得到就回 `duplicate`（號碼沿用它原本的），讀不到才把例外往外丟。
+        這一次讀取只發生在取號已經失敗的路徑上，正常路徑仍然是條件寫入的三個分支。
         """
-        seq = self.next_sequence(f"PROJECT#{request.project_id}")
+        try:
+            seq = self.next_sequence(f"PROJECT#{request.project_id}")
+        except CoordinationError:
+            existing = self.load(request.operation_id)
+            if existing is None:
+                raise
+            return Acceptance("duplicate", request.operation_id, existing)
         record = _initial_record(request, accept_seq=seq)
         pk = ops_pk(request.operation_id)
         if self._repository.put_meta_item(pk, _to_item(record), create_only=True):

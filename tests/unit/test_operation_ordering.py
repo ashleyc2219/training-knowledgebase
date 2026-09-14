@@ -211,3 +211,40 @@ def test_the_two_sentences_stay_in_the_module(coordinator: OperationCoordinator)
     text = (operations.__doc__ or "") + (OperationCoordinator.acquire_lease.__doc__ or "")
     assert "鎖不等於接受順序" in text
     assert "TTL 不是準時解鎖" in text
+
+
+def test_a_resend_is_still_duplicate_when_the_counter_is_too_hot(
+    coordinator: OperationCoordinator, repository: _MemoryRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`SEQ#PROJECT#<id>` 是專案唯一熱鍵，搶輸 `SEQUENCE_ATTEMPTS` 次就丟 `CoordinationError`。
+
+    已經接受過的 operation 重送時，這個例外不該把 `duplicate` 蓋掉：呼叫端的去重依據是
+    「這筆紀錄存在」，不是「這次取得到號碼」。
+    """
+    request = AcceptOperation("op-release-r_42", "release", "r_42", "demo", BASE)
+    first = coordinator.accept(request)
+    before = dict(repository.items["OPS#op-release-r_42"])
+
+    def _too_hot(scope: str) -> int:
+        raise CoordinationError(f"sequence contention over {SEQUENCE_ATTEMPTS} attempts: {scope}")
+
+    monkeypatch.setattr(coordinator, "next_sequence", _too_hot)
+    second = coordinator.accept(request)
+    assert (second.status, second.record.accept_seq) == ("duplicate", first.record.accept_seq)
+    assert repository.items["OPS#op-release-r_42"] == before
+
+
+def test_a_first_time_accept_still_fails_when_the_counter_is_too_hot(
+    coordinator: OperationCoordinator, repository: _MemoryRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """沒被接受過就沒有 `duplicate` 可回：例外照丟，而且一個 `OPS#` item 都不寫。"""
+
+    def _too_hot(scope: str) -> int:
+        raise CoordinationError(f"sequence contention over {SEQUENCE_ATTEMPTS} attempts: {scope}")
+
+    monkeypatch.setattr(coordinator, "next_sequence", _too_hot)
+    with pytest.raises(CoordinationError, match=str(SEQUENCE_ATTEMPTS)):
+        coordinator.accept(AcceptOperation("op-release-r_99", "release", "r_99", "demo", BASE))
+    assert "OPS#op-release-r_99" not in repository.items
