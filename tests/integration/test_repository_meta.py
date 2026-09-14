@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from training_kb.errors import CoordinationError, PermanentError
 from training_kb.keys import (
+    META,
     feature_pk,
     feedback_pk,
     proc_pk,
@@ -219,6 +220,28 @@ def test_tuple_values_survive_the_decimal_codec(repository) -> None:
     item = repository.get_meta_item("OPS#op-10")
     assert item["refs"] == ["a", "b"]
     assert item["scores"] == [0.5, 1]
+
+
+def test_transact_write_values_survive_the_decimal_codec(repository) -> None:
+    """交易 item 的值與 `put_meta`／`update_meta` 走**同一套** Decimal codec。
+
+    boto3 的 resource client 不收 Python `float`（`Float types are not supported`），
+    所以沒有 codec 的話帶 float 欄位的交易會在寫入端直接炸掉——呼叫端得各自先轉一次
+    Decimal，遲早有人漏掉（Phase 24 review 便宜修正 A-minor 2）。
+    """
+    repository.put_meta_item("OPS#op-11", {"status": "accepted"})
+    action = {"Update": {
+        "TableName": repository.table_name,
+        "Key": {"PK": "OPS#op-11", "SK": META},
+        "UpdateExpression": "SET #score = :score, #tags = :tags",
+        "ConditionExpression": "attribute_exists(PK)",
+        "ExpressionAttributeNames": {"#score": "score", "#tags": "tags"},
+        "ExpressionAttributeValues": {":score": 0.5, ":tags": [0.25, 1]},
+    }}
+    assert repository.transact_write([action]) is None
+    item = repository.get_meta_item("OPS#op-11")
+    assert item["score"] == 0.5
+    assert item["tags"] == [0.25, 1]
 
 
 def test_malformed_primary_key_is_a_permanent_error(repository) -> None:

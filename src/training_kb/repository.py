@@ -650,6 +650,11 @@ class Repository:
         永遠是 resource Table，它的 `meta.client` 永遠帶著這個轉換，所以整個 `Repository`
         只有一種寫法：原生 Python 值。
 
+        每個 item 整份過一次 `_encode`（`float` -> `Decimal(str(...))`，遞迴進 list／dict），
+        與 `put_meta`／`update_meta`／`put_meta_item` 同一套 codec：boto3 的 resource client
+        不收 Python `float`，少了這一道，帶 float 欄位（例如向量或分數）的交易會在寫入端
+        直接丟 `TypeError`，而呼叫端得各自先轉一次 Decimal——遲早有人漏掉。
+
         回傳值是「**哪一個 action 的條件不符**」：
         - 全部成功 -> `None`
         - 任一 `ConditionalCheckFailed` -> 它在 `items` 裡的 index（`CancellationReasons`
@@ -661,7 +666,8 @@ class Repository:
         以外的 `ClientError` 一律原樣往外丟。
         """
         try:
-            self._table.meta.client.transact_write_items(TransactItems=list(items))
+            self._table.meta.client.transact_write_items(
+                TransactItems=[_encode(dict(item)) for item in items])
         except ClientError as error:
             if error.response["Error"]["Code"] != "TransactionCanceledException":
                 raise
