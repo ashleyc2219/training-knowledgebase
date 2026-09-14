@@ -6,13 +6,15 @@ owner 是 Phase 30；P31（正規化）、P32（接受／啟動）、P37（Rote 
 1. 驗簽（P30）—— 解析 JSON 之前先用原始 request bytes 比對 HMAC-SHA256。
 2. 整體期限（P30）—— webhook 的八秒 deadline，下游每一步開始前呼叫 `assert_time_left`。
 3. 正規化（P31）—— 候選欄位轉成 canonical `Ticket`／`Release`，是唯一的 model 邊界。
-4. 接線點（P30 stub → P32 接受端 → P37 完整三層）。
+4. 接受與啟動（P32）—— canonical 事件的永久去重、私有輸入與 pipeline 啟動。
+5. 接線點（P30 stub → P32 接受端 → P37 完整三層）。
 
 log 不得出現原始 body、簽名或 secret（00A §3.8）。
 """
 
 import hashlib
 import hmac
+import re
 import string
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -23,7 +25,7 @@ from pydantic import ValidationError
 from training_kb.clock import parse_iso
 from training_kb.errors import IngressError, PermanentError
 from training_kb.models import Release, ReleaseKind, ReleaseSource, Ticket, TicketSource
-from training_kb.operations import Acceptance
+from training_kb.operations import Acceptance, OperationKind
 from training_kb.pipelines.common import JSONValue
 
 # --- 1. 驗簽（Phase 30）-------------------------------------------------------
@@ -187,7 +189,39 @@ def validate_release(payload: Mapping[str, object]) -> Release:
         raise IngressError("Release 欄位值不合法", _invalid_fields(error)) from error
 
 
-# --- 4. 接線點（Phase 30 stub → Phase 32 接受端 → Phase 37 完整三層）----------
+# --- 4. 接受與啟動（Phase 32）-------------------------------------------------
+
+SAFE_EXECUTION_NAME = re.compile(r"[A-Za-z0-9_-]{1,80}\Z")
+_ALLOWED = frozenset(string.ascii_letters + string.digits + "_-")
+_NAME_HEAD = 15
+"""`15 + 1 + 64 = 80`：截取後的前綴、連字號與整段 SHA-256 剛好填滿長度上限。"""
+
+
+def operation_id_for(kind: OperationKind, canonical_id: str) -> str:
+    """`op-<kind>-<canonical_id>`（00A §3.3）。canonical ID 已經是裸 ID，這裡不再加工。
+
+    `kind` 用 Phase 10 的 `OperationKind`，所以 P42 的 `feedback`／`view` 直接沿用同一個
+    函式，行為不變。名稱只由 kind 與已核定的 canonical ID 組成，**不含 user、留言或標題**。
+    """
+    return f"op-{kind}-{canonical_id}"
+
+
+def execution_name(operation_id: str) -> str:
+    """Step Functions 的執行名稱：必須符合 `[A-Za-z0-9_-]{1,80}`，而且同輸入永遠同輸出。
+
+    冪等只對「同名、同 input、仍在執行」成立，所以名稱一定要由 `operation_id` 決定：
+    **不得追加時間戳、隨機字尾或新的 operation ID**（設計 §14.2）。不合規時取固定的
+    UTF-8 SHA-256 全長 64 個十六進位字元，前面保留可讀的 `op-<kind>-` 前綴；雜湊不截短到
+    沒有測試根據的長度。
+    """
+    if SAFE_EXECUTION_NAME.match(operation_id):
+        return operation_id
+    digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+    head = "".join(ch for ch in operation_id if ch in _ALLOWED)[:_NAME_HEAD]
+    return f"{head}-{digest}"
+
+
+# --- 5. 接線點（Phase 30 stub → Phase 32 接受端 → Phase 37 完整三層）----------
 
 
 def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
