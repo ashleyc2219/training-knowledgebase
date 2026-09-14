@@ -9,6 +9,7 @@ moto 的綠燈只證明資料形狀與呼叫次序，**不是** O2 或真實 Ste
 """
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ import pytest
 from training_kb import ingress
 from training_kb.errors import PermanentError
 from training_kb.models import ProcStatus
+from training_kb.operations import AcceptOperation, OperationCoordinator
 from training_kb.repository import Repository
 from training_kb.rote import Rote, structure_signature
 from training_kb.source_ids import load_source_approvals
@@ -131,6 +133,38 @@ def test_normalize_then_accept_runs_the_whole_fixed_order(
         domain=event.domain, adapter=event.adapter, event_type=event.event_type,
         headers=event.headers, payload=event.payload, deadline=deps.deadline)
     assert resent[0].status == "duplicate" and deps.commit_calls == 1   # 重送不再 commit
+    assert repository.get_proc(structure_signature(event)).success_count == 1
+
+
+def test_resumed_acceptance_still_commits_the_proc_success(
+        repository: Repository, rote_deps: Any, raw_issue: Any) -> None:
+    """續跑（ledger 已 accepted、`execution_arn` 仍是空的）本次補啟動成功 -> PROC 要學起來。
+
+    這**不是**純重送：本次真的啟動了一條執行。用 start **之後**的狀態判斷的話，它會被誤判
+    成重送而跳過 `commit_success`，PROC 永遠學不起來（Phase 37 review 必修 B3）。
+    去重的權威仍然是 `record_proc_sample`，所以第二次真正的重送不會再加一次。
+    """
+    deps = rote_deps(repository=repository)
+    event = raw_issue()
+    operation_id = "op-ticket-t_gh-acme-copilot-128"
+    OperationCoordinator(repository).accept(AcceptOperation(
+        operation_id=operation_id, kind="ticket", canonical_id="t_gh-acme-copilot-128",
+        project_id="demo", now=datetime(2026, 9, 14, tzinfo=UTC)))
+    record = repository.get_meta_item(f"OPS#{operation_id}")
+    assert record is not None and record.get("execution_arn") is None
+
+    accepted = ingress.normalize_then_accept(
+        domain=event.domain, adapter=event.adapter, event_type=event.event_type,
+        headers=event.headers, payload=event.payload, deadline=deps.deadline)
+    assert accepted[0].status == "duplicate" and accepted[0].record.execution_arn
+    assert deps.started == [("ticket-analysis", operation_id)]
+    stored = repository.get_proc(structure_signature(event))
+    assert stored is not None and stored.success_count == 1
+
+    ingress.normalize_then_accept(
+        domain=event.domain, adapter=event.adapter, event_type=event.event_type,
+        headers=event.headers, payload=event.payload, deadline=deps.deadline)
+    assert deps.commit_calls == 1                                       # 純重送不再提交
     assert repository.get_proc(structure_signature(event)).success_count == 1
 
 

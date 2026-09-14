@@ -338,8 +338,7 @@ def _build_wiring(settings: Settings) -> Wiring:
 
 def accept_ticket(ticket: Ticket, *, deadline: float) -> Acceptance:
     """canonical `Ticket` → 永久去重的 operation ＋ 一次 `ticket-analysis` 啟動。"""
-    return _accept("ticket", ticket.id, ticket.project_id,
-                   ticket.model_dump(mode="json"), deadline)
+    return _accept_detailed(ticket, deadline=deadline)[0]
 
 
 def accept_release(release: Release, *, deadline: float) -> Acceptance:
@@ -348,20 +347,37 @@ def accept_release(release: Release, *, deadline: float) -> Acceptance:
     `Release` 模型沒有 `project_id`（MVP 只有一個專案），所以由 `Settings.project_id` 取得
     後寫進 operation 紀錄與 ASL input（00A §6.8）。
     """
-    return _accept("release", release.id, _wiring().settings.project_id,
-                   release.model_dump(mode="json"), deadline)
+    return _accept_detailed(release, deadline=deadline)[0]
 
 
 def accept_normalized(obj: Ticket | Release, *, deadline: float) -> Acceptance:
     """接受端總入口：依型別分派，呼叫端（P30／P37／P42）不必自己判斷是哪一種。"""
+    return _accept_detailed(obj, deadline=deadline)[0]
+
+
+def _accept_detailed(obj: Ticket | Release, *,
+                     deadline: float) -> tuple[Acceptance, bool]:
+    """`accept_normalized` 的完整版：多回一個**事實**——「進來之前就已經完整啟動過」。
+
+    這個 bool 只能由 `_accept` 在**啟動之前**判斷，事後從 `Acceptance` 反推不出來：續跑
+    （ledger 已 accepted／duplicate，但 `execution_arn` 還是空的）補完啟動之後，狀態同樣是
+    `duplicate`、`execution_arn` 也同樣有值，與純重送長得一模一樣。`normalize_then_accept`
+    靠它分辨「本次真的啟動了一條執行」與「什麼都沒做」（Phase 37 review 必修 B3）。
+
+    三個公開 `accept_*` 的簽名因此完全不變，只是各自取 `[0]`。
+    """
     if isinstance(obj, Ticket):
-        return accept_ticket(obj, deadline=deadline)
-    return accept_release(obj, deadline=deadline)
+        return _accept("ticket", obj.id, obj.project_id, obj.model_dump(mode="json"), deadline)
+    return _accept("release", obj.id, _wiring().settings.project_id,
+                   obj.model_dump(mode="json"), deadline)
 
 
 def _accept(kind: OperationKind, canonical_id: str, project_id: str,
-            payload: dict[str, JSONValue], deadline: float) -> Acceptance:
+            payload: dict[str, JSONValue], deadline: float) -> tuple[Acceptance, bool]:
     """固定次序：先永久接受 → 再保存私有輸入 → 最後啟動執行。
+
+    回 `(Acceptance, 進來之前就已完整啟動)`。第二個值是**本函式開頭**的觀察，不是結束時的
+    狀態：續跑補完啟動之後，`status` 與 `execution_arn` 與純重送完全一樣，分不出來。
 
     次序不能換。`accept` 先寫 `OPS#<operation_id>` 才有永久去重的依據；輸入物件與
     execution 都可以事後補，但「已接受」這件事一旦漏寫，同一個事件就會長出第二條版本鏈。
@@ -378,7 +394,7 @@ def _accept(kind: OperationKind, canonical_id: str, project_id: str,
         project_id=project_id, now=now_utc(),
     ))
     if accepted.status == "duplicate" and accepted.record.execution_arn:
-        return accepted                      # 已完整啟動過，回既有紀錄，不重跑
+        return accepted, True                # 已完整啟動過，回既有紀錄，不重跑
     assert_time_left(deadline, step="put-input")
     input_ref = _put_canonical_input_once(wiring.repository, operation_id, payload)
     if accepted.record.input_ref != input_ref:
@@ -394,7 +410,7 @@ def _accept(kind: OperationKind, canonical_id: str, project_id: str,
     record = operations.load(operation_id)
     if record is None:
         raise CoordinationError(f"{operation_id} 接受後讀不回紀錄")
-    return Acceptance(status=accepted.status, operation_id=operation_id, record=record)
+    return Acceptance(status=accepted.status, operation_id=operation_id, record=record), False
 
 
 def _put_canonical_input_once(repository: Repository, operation_id: str,
@@ -521,9 +537,13 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
     （`op-release-…-1`、`…-2`），但共用同一個 `source_event_id`。Ticket 與只改一個功能的
     PR 都只回長度 1 的 list，所以呼叫端取 `[0]` 就是原本的行為。
 
-    `duplicate` 且已經有 `execution_arn` 代表這筆事件先前就完整跑過：回原 operation 與原
-    結果，**不進 `commit_success`**，不會替同一次事件多記一個 PROC 成功樣本。任何一筆丟
-    例外都原樣往上拋，已成功的那幾筆靠自己的 operation 紀錄留存，不回頭刪除。
+    **「先前就完整跑過」的判斷取自接受端進來時的狀態**（`_accept_detailed` 回的第二個值），
+    不是啟動之後的 `status`／`execution_arn`：續跑（ledger 已 accepted／duplicate、
+    `execution_arn` 還是空的，本次補完啟動）結束時與純重送長得一模一樣，用事後狀態判斷會
+    把它誤判成重送而跳過 `commit_success`，這條 PROC 就永遠學不起來。只有真正的純重送才
+    跳過，不會替同一次事件多記一個成功樣本；去重的權威仍然是 `record_proc_sample`。
+
+    任何一筆丟例外都原樣往上拋，已成功的那幾筆靠自己的 operation 紀錄留存，不回頭刪除。
     """
     assert_time_left(deadline, step="normalize")
     # 函式內 import：`rote.py` 在模組層 import 本模組，這裡反向 import 才不會變成循環。
@@ -536,9 +556,9 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
     accepted: list[Acceptance] = []
     for result in rote.normalize_all(event, operation_id=trace_operation_id(headers),
                                      deadline=deadline):
-        acceptance = accept_normalized(result.entity, deadline=deadline)
+        acceptance, already_started = _accept_detailed(result.entity, deadline=deadline)
         arn = acceptance.record.execution_arn or ""
-        if not (acceptance.status == "duplicate" and arn):   # 重送不重複提交 PROC 成功
+        if not already_started:              # 純重送才跳過；續跑補啟動仍要提交 PROC 成功
             rote.commit_success(result, operation_id=acceptance.operation_id,
                                 execution_arn=arn, now=deps.now())
         accepted.append(acceptance)
