@@ -66,6 +66,29 @@ def test_missing_catch_inside_map_is_rejected() -> None:
     assert "AssignCluster.ItemProcessor.InnerTask" in str(error.value)
 
 
+def test_choice_without_default_is_rejected() -> None:
+    """Choice 沒有 Retry／Catch 是正確的，但一定要有 Default 分支。"""
+    definition = sample_definition()
+    definition["States"]["AssignCluster"] = {
+        "Type": "Choice",
+        "Choices": [{"Variable": "$.is_recurring", "BooleanEquals": True, "Next": "Done"}],
+    }
+    with pytest.raises(PermanentError) as error:
+        assert_safe_asl(definition)
+    assert "Choice 缺少 Default 分支：AssignCluster" in str(error.value)
+
+
+def test_retry_covering_states_all_is_rejected() -> None:
+    """多加一條 States.ALL 的 retrier 等於連 PermanentError 也重試，白等三次。"""
+    definition = sample_definition()
+    definition["States"]["AssignCluster"]["Retry"].append(
+        {"ErrorEquals": ["States.ALL"], "IntervalSeconds": 1, "MaxAttempts": 2, "BackoffRate": 2}
+    )
+    with pytest.raises(PermanentError) as error:
+        assert_safe_asl(definition)
+    assert "Retry 不得涵蓋 States.ALL：AssignCluster" in str(error.value)
+
+
 def test_task_with_only_the_first_retrier_is_rejected() -> None:
     definition = sample_definition()
     definition["States"]["AssignCluster"]["Retry"] = [
