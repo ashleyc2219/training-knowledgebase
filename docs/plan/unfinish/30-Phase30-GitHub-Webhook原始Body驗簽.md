@@ -95,6 +95,11 @@ def parse_json(raw: bytes) -> dict: ...
 def handler(event: dict, context: object) -> dict[str, object]: ...
 ```
 
+- **實作補記（P30 完成時）：** `mypy --strict` 的 `disallow_any_generics` 不接受沒有參數的
+  `dict`，所以三個吃／回 `dict` 的函式在程式裡逐字寫成 `dict[str, Any]`（`event: dict[str, Any]`、
+  `decode_body(event: dict[str, Any]) -> bytes`、`parse_json(raw: bytes) -> dict[str, Any]`）。
+  執行期形狀與 00A 第 6.8 節完全相同，只是補上型別參數；`handler` 的回傳仍是 `dict[str, object]`。
+
 - `verify_github_signature` 合法時回 `None`，不合法時丟 `IngressError`，`fields` 固定是 `("X-Hub-Signature-256",)`。secret 沒設定是**環境設定錯誤**，丟 `PermanentError`，不能報成使用者輸入錯誤；secret 由環境變數 `TKB_GITHUB_WEBHOOK_SECRET` 提供（00A 第 3.5 節的執行期開關：有 `TKB_` 前綴，但不是 `Settings` 欄位，`load_settings` 不讀它；Phase 60 的 `check_secrets` 核對表也列它）。
 - **八秒是整個 handler 的 deadline**，驗簽本身不擁有新的八秒。`handler` 進入時算出 `deadline`，之後一路往下傳；Phase 31、32 每一步開始前用 `assert_time_left(deadline, step=...)` 檢查剩餘時間，不各自重新計八秒。
 - `normalize_then_accept` 是本 Phase 先固定下來的**接線點**（呼叫位置與參數），實際內容由 Phase 31（`validate_ticket`／`validate_release`）與 Phase 32（`accept_ticket`／`accept_release`）填上。簽名依 00A 第 8 節 D-60 固定為**六個 keyword-only 參數**：`domain`、`adapter`、`event_type`、全部小寫化的 `headers`、已解析的 `payload`、`deadline`；`payload` 的型別逐字是 `Mapping[str, JSONValue]`（`JSONValue` 就是「任何合法的 JSON 值」這個型別別名，由 [Phase 29](29-Phase29-共用Pipeline執行器與ASL失敗語意.md) 的 `pipelines/common.py` 定義，全套只有那一份，裁決 D-31），不要退化成 `Mapping[str, object]`；handler 把 `domain="github.com"`、由 `X-GitHub-Event` 對應出的 `adapter`、原樣的 `event_type` 一起傳下去，讓 [Phase 37](37-Phase37-Rote-Agent回退與成功提交.md) 組得出 `RawEvent`，不必從 payload 反推來源。本 Phase 只放一個明確丟 `PermanentError("Phase 31／32 尚未接線")` 的版本，整合測試用 monkeypatch 換成 spy；**不得**用「先回成功、之後再處理」代替。
@@ -128,7 +133,7 @@ Function URL（auth=NONE，仍需 resource policy；NONE 不等於可信來源�
 
 ## 8. Task 1：原始 bytes 驗簽
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/test_github_signature.py
@@ -156,7 +161,7 @@ def test_missing_secret_is_a_configuration_error() -> None:
         verify_github_signature(b"{}", sign(b"{}"), b"")
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_github_signature.py -q
@@ -164,7 +169,7 @@ uv run pytest tests/unit/test_github_signature.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'verify_github_signature'`。不要先建立空殼函式讓測試假綠。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/ingress.py
@@ -192,11 +197,11 @@ def verify_github_signature(raw_body: bytes, signature_header: str | None, secre
 
 先擋掉格式明顯不對的值，可以避免把任意長度字串丟進比較；真正的比對一定用 `hmac.compare_digest`，不可寫成 `expected == supplied`。錯誤訊息只說「不符」，不回報期望值。
 
-- [ ] **Step 4：補邊界測試並跑 `uv run pytest tests/unit/test_github_signature.py -q` 確認綠燈**
+- [x] **Step 4：補邊界測試並跑 `uv run pytest tests/unit/test_github_signature.py -q` 確認綠燈**
 
-補六個案例：缺 header（`None`）、prefix 寫成 `sha1=`、非 hex 字元、長度 63 與 65、大寫十六進位的合法簽名（應通過）、以及同 body 同 secret 重算兩次結果一致。預期全部 PASS，且每個失敗案例的 `fields` 都是 `("X-Hub-Signature-256",)`。
+補六個案例：缺 header（`None`）、prefix 寫成 `sha1=`、非 hex 字元、長度 63 與 65、大寫十六進位的合法簽名（應通過；**大寫的是 digest，prefix 仍是 GitHub 實際送的小寫 `sha256=`**，`SHA256=` 不在契約內）、以及同 body 同 secret 重算兩次結果一致。預期全部 PASS，且每個失敗案例的 `fields` 都是 `("X-Hub-Signature-256",)`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/unit/test_github_signature.py
@@ -205,7 +210,7 @@ git commit -m "feat(ingress): 驗證GitHub原始Body簽名"
 
 ## 9. Task 2：確認驗簽發生在 JSON parse 之前
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/integration/test_github_webhook_handler.py
@@ -264,7 +269,7 @@ def test_valid_signature_passes_exact_bytes_to_parser(spies) -> None:
 
 真正的回傳型別是 Phase 10 的 `Acceptance(status, operation_id, record)`；Phase 30 還沒有它的實作，所以測試用 `SimpleNamespace` 代替，只約定 handler 讀得到 `operation_id`。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_github_webhook_handler.py -q
@@ -272,7 +277,7 @@ uv run pytest tests/integration/test_github_webhook_handler.py -q
 
 預期：FAIL，訊號包含 `No module named 'training_kb.handlers'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/handlers/github_webhook.py
@@ -354,11 +359,11 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
     raise PermanentError("Phase 31／32 尚未接線；本 Phase 不得先回成功再背景處理")
 ```
 
-- [ ] **Step 4：補邊界測試並跑 `uv run pytest tests/integration/test_github_webhook_handler.py -q` 確認綠燈**
+- [x] **Step 4：補邊界測試並跑 `uv run pytest tests/integration/test_github_webhook_handler.py -q` 確認綠燈**
 
 補五個案例：`isBase64Encoded=true` 的合法 body（decode 後與原檔 bytes 相同）、不合法 base64（`IngressError(fields=["body"])`，且 parser 0 次）、header 名稱寫成 `X-Hub-Signature-256` 與 `x-hub-signature-256` 都找得到、簽名合法但 body 不是合法 JSON（驗簽通過後 parser 明確回 `IngressError(fields=["body"])`，接受路徑 0 次）、`make_event(..., event_type="star")` 這種沒有對應 adapter 的事件（`IngressError(fields=["X-GitHub-Event"])`，接受路徑 0 次）。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/handlers tests/integration/test_github_webhook_handler.py
@@ -367,7 +372,7 @@ git commit -m "feat(ingress): 驗簽先於JSON解析"
 
 ## 10. Task 3：鎖定八秒整體期限
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # 續寫 tests/integration/test_github_webhook_handler.py
@@ -398,7 +403,7 @@ def test_timeout_never_returns_success(spies, monkeypatch) -> None:
     assert "success" not in str(result)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_github_webhook_handler.py -q -k deadline
@@ -406,7 +411,7 @@ uv run pytest tests/integration/test_github_webhook_handler.py -q -k deadline
 
 預期：FAIL，訊號包含 `cannot import name 'assert_time_left'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # 續寫 src/training_kb/ingress.py
@@ -421,11 +426,11 @@ def assert_time_left(deadline: float, *, step: str) -> None:
         raise TimeoutError(f"{step} 時已超過 webhook 的八秒整體期限")
 ```
 
-- [ ] **Step 4：串好剩餘要求並跑 `uv run pytest tests/integration/test_github_webhook_handler.py -q` 確認綠燈**
+- [x] **Step 4：串好剩餘要求並跑 `uv run pytest tests/integration/test_github_webhook_handler.py -q` 確認綠燈**
 
 同一個 `deadline` 一路傳給 Phase 31、32，兩邊在每一步開始前呼叫 `assert_time_left`，不得各自重新計時。到期時不寫成功回執；若 operation 已經被 Phase 32 接受，重送同一事件會靠 O2 永久去重回到同一個 `operation_id`，**不會建立第二個 operation**（O2 尚未 PASS 前這句話只是設計意圖，不得當成已驗證）。log 只記 `X-GitHub-Delivery`、`operation_id` 與結果類型，不得記原始 body、簽名或 secret。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/integration/test_github_webhook_handler.py
@@ -471,12 +476,33 @@ git commit -m "test(ingress): 鎖定Webhook整體期限"
 
 ## 14. 完成清單
 
-- [ ] 使用原始 bytes 與 HMAC-SHA256，且比對一律走 `hmac.compare_digest`。
-- [ ] 驗簽一定早於 JSON parse，錯簽名時 parser、Repository 與 StartExecution spy 都是 0 次。
-- [ ] `IngressError.fields` 是 `tuple[str, ...]`，簽名錯誤固定回 `("X-Hub-Signature-256",)`。
-- [ ] secret 未設定時丟 `PermanentError`，不是 `IngressError`，也不會放行。
-- [ ] 八秒是整體 deadline，往下傳給 Phase 31／32，沒有分段重置。
-- [ ] `normalize_then_accept` 是 00A D-60 的六個 keyword 參數，handler 傳的是 `domain="github.com"`、由 `X-GitHub-Event` 對應的 `adapter`、`event_type`、小寫化 `headers` 與已解析 `payload`。
-- [ ] 成功回執只在正規化與接受完成後產生；逾時回應的 `ok` 為 `False`。
-- [ ] 非 GitHub 來源仍沒有公開 URL；log 不含 body、簽名或 secret；fixture 全部來自 Phase 13 的核對紀錄，未核定來源維持 blocked。
-- [ ] 尚未把本機測試稱為 GitHub／AWS 整合通過。
+- [x] 使用原始 bytes 與 HMAC-SHA256，且比對一律走 `hmac.compare_digest`。
+- [x] 驗簽一定早於 JSON parse，錯簽名時 parser、Repository 與 StartExecution spy 都是 0 次。
+- [x] `IngressError.fields` 是 `tuple[str, ...]`，簽名錯誤固定回 `("X-Hub-Signature-256",)`。
+- [x] secret 未設定時丟 `PermanentError`，不是 `IngressError`，也不會放行。
+- [x] 八秒是整體 deadline，往下傳給 Phase 31／32，沒有分段重置。
+- [x] `normalize_then_accept` 是 00A D-60 的六個 keyword 參數，handler 傳的是 `domain="github.com"`、由 `X-GitHub-Event` 對應的 `adapter`、`event_type`、小寫化 `headers` 與已解析 `payload`。
+- [x] 成功回執只在正規化與接受完成後產生；逾時回應的 `ok` 為 `False`。
+- [x] 非 GitHub 來源仍沒有公開 URL；log 不含 body、簽名或 secret；fixture 全部來自 Phase 13 的核對紀錄，未核定來源維持 blocked。
+- [x] 尚未把本機測試稱為 GitHub／AWS 整合通過。
+
+## 15. 實作差異紀錄（2026-09-14 完成時補記）
+
+計畫寫的形狀一律保留，以下是實作時為了通過 `uv run mypy src infra`（strict、無 `# type: ignore`）
+與「公開入口不得因為畸形輸入直接崩掉」而補的差異，行為與第 6、7 節的契約一致：
+
+| 差異 | 原因 |
+|---|---|
+| `event: dict[str, Any]`、`parse_json(raw) -> dict[str, Any]` | mypy strict 的 `disallow_any_generics` 不收沒有參數的 `dict`（詳見第 6 節補記）。 |
+| `parse_json` 在 `json.JSONDecodeError` 之外，另外擋掉「合法 JSON 但不是物件」（例如 `[1,2]`） | strict 的 `warn_return_any` 不准把 `json.loads` 的 `Any` 直接當 `dict` 回傳；順帶讓 `Mapping[str, JSONValue]` 這個宣告是真的。回的仍是 `IngressError(fields=("body",))`。 |
+| 新增私有 `_raw_headers(event)`，`lower_headers` 與 `header` 都走它 | 原本兩處各寫一次 `(event.get("headers") or {})`；`headers` 不是對照表時（公開入口可能收到任何形狀）`.items()` 會直接 `AttributeError`，改成當作沒有 header，於是走「缺簽名」的正常拒絕路徑。 |
+| `decode_body` 先擋 `body` 不是字串 | 同上理由，回 `IngressError(fields=("body",))` 而不是 `AttributeError`。 |
+| 新增 `SECRET_ENV`、`DELIVERY_HEADER` 兩個常數與 `_log`／`_record` | 第 10 節 Task 3 Step 4 要求「log 只記 `X-GitHub-Delivery`、`operation_id` 與結果類型」，原本的最小實作完全沒有 log。`_record` 只印這三樣，結果類型固定 `accepted`／`rejected`／`timeout`。 |
+| 兩個同名（大小寫不同）的簽名 header 視為沒有有效簽名 | 第 9 節 Step 3 的 `header()` 已經這樣寫，這裡只是補了對應測試 `test_duplicate_signature_headers_count_as_no_signature`。 |
+
+另外兩點與計畫一致、但值得記下來：
+
+- `ingress.py` 依「1 驗簽 → 2 整體期限 → 3 接線點」分節並在模組 docstring 寫明追加位置，
+  P31 的正規化請加在「3 接線點」之前，P32／P37 直接換掉 `normalize_then_accept` 的內容。
+- `tests/integration/test_github_webhook_handler.py` 不需要真實 AWS（純函式＋monkeypatch spy），
+  依 00A 第 3.2 節的慣例**不標** `aws` marker，所以它在一般 `uv run pytest tests` 就會跑。
