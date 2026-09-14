@@ -14,8 +14,11 @@ log 不得出現原始 body、簽名或 secret（00A §3.8）。
 import hashlib
 import hmac
 import string
+from collections.abc import Mapping
 
 from training_kb.errors import IngressError, PermanentError
+from training_kb.operations import Acceptance
+from training_kb.pipelines.common import JSONValue
 
 # --- 1. 驗簽（Phase 30）-------------------------------------------------------
 
@@ -43,3 +46,21 @@ def verify_github_signature(raw_body: bytes, signature_header: str | None, secre
     # 一律固定時間比較，不可寫成 `expected == supplied`。訊息只說不符，不回報期望值。
     if not hmac.compare_digest(expected, supplied):
         raise IngressError("GitHub 簽名不符", (SIGNATURE_HEADER,))
+
+
+# --- 3. 接線點（Phase 30 stub → Phase 32 接受端 → Phase 37 完整三層）----------
+
+
+def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
+                          headers: Mapping[str, str], payload: Mapping[str, JSONValue],
+                          deadline: float) -> Acceptance:
+    """Phase 31 正規化 + Phase 32 接受的接線點。
+
+    本 Phase 只固定呼叫位置與六個 keyword 參數（00A D-60）：`domain`／`adapter` 由可信
+    入口設定提供，**不得從 payload 反推**；`headers` 一律小寫鍵；`deadline` 是 handler
+    進入時算好的絕對時刻，往下傳而不重新計時。
+
+    這裡刻意丟 `PermanentError` 而不是回一個假的成功：設計 §14.1 要求驗簽以外的任何一步
+    失敗都回操作失敗，不能「先回成功、之後再背景處理」。
+    """
+    raise PermanentError("Phase 31／32 尚未接線；本 Phase 不得先回成功再背景處理")
