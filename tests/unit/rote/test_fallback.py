@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from training_kb.adapters import SUB_RELEASE_INDEX, ToolRegistry
-from training_kb.errors import PermanentError
+from training_kb.errors import CoordinationError, PermanentError, TransientError
 from training_kb.models import ProcStatus, ProcStep, ProvenWorkflow
 from training_kb.rote import (
     AGENT_MAX_TOOL_CALLS,
@@ -64,6 +64,47 @@ def test_replay_failure_is_persisted_before_the_agent_runs(rote_deps: Any, activ
     stored = deps.repository.get_proc(active_proc().signature)
     assert (stored.fail_count, stored.success_count) == (1, 3)
     assert stored.status == ProcStatus.ACTIVE
+
+
+def test_failed_replay_record_write_still_falls_back_to_the_agent(
+        rote_deps: Any, active_proc: Any, raw_issue: Any,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """記錄重放失敗時撞上 revision CAS：那只是「這次沒記到」，不能取代原例外擋住回退。
+
+    `CoordinationError` 往外飛的話，本次事件直接失敗，ING Rule 17 的「當次回退 Agent」
+    一次都跑不到（Phase 37 review 便宜修正 B-minor 1）。
+    """
+    event = raw_issue()
+    deps = rote_deps(replay_error="缺少 author 欄位", agent_result=agent_ticket_for(event))
+    deps.repository.put_meta(active_proc())
+    rote = Rote(deps)
+    monkeypatch.setattr(rote, "_persist", _raising_persist)
+    result = rote.normalize(event, operation_id=deps.trace_id, deadline=deps.deadline)
+    assert result.route == "agent_after_replay_failure"
+    assert result.validated is True
+    assert deps.agent_calls == 1
+
+
+def _raising_persist(*_args: Any, **_kwargs: Any) -> None:
+    raise CoordinationError("PROC 在寫入前有人同時改過")
+
+
+def test_other_persist_failures_are_not_swallowed(
+        rote_deps: Any, active_proc: Any, raw_issue: Any,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """只吞 `CoordinationError`；連不上表之類的故障照樣往外拋，不被回退路徑蓋掉。"""
+    event = raw_issue()
+    deps = rote_deps(replay_error="缺少 author 欄位", agent_result=agent_ticket_for(event))
+    deps.repository.put_meta(active_proc())
+    rote = Rote(deps)
+
+    def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise TransientError("DynamoDB 暫時不可用")
+
+    monkeypatch.setattr(rote, "_persist", broken)
+    with pytest.raises(TransientError, match="暫時不可用"):
+        rote.normalize(event, operation_id=deps.trace_id, deadline=deps.deadline)
+    assert deps.agent_calls == 0
 
 
 @pytest.mark.parametrize("signature", ["exact", NEIGHBOUR])

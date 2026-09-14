@@ -16,6 +16,7 @@ GitHub 路徑必須先通過 Phase 30 的 HMAC 驗簽。簽名只是結構索引
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -336,6 +337,9 @@ AGENT_MAX_TOOL_CALLS = 6
 （不問模型），所以不算進這個額度。
 """
 
+_log = logging.getLogger(__name__)
+"""吞掉的 `CoordinationError` 唯一的去處；只寫簽名，不寫事件內容（00A §3.8）。"""
+
 AGENT_NODE = "rote_agent"
 """寫進 `CallTrace.node` 的節點名（00A §6.5）；trace 只記欄位，不記 prompt 或 payload。"""
 
@@ -578,7 +582,7 @@ class Rote:
         try:
             return self._replay(event, signature, selected)
         except PermanentError:
-            self._persist(on_replay_failure(selected, self.deps.now()))
+            self._record_replay_failure(selected)
             return self._run_agent(event, signature, operation_id, deadline,
                                    route="agent_after_replay_failure",
                                    replayed=selected.signature)
@@ -622,6 +626,23 @@ class Rote:
         return updated
 
     # --- 私有：命中、重放、Agent 與持久化 ---
+
+    def _record_replay_failure(self, proc: ProvenWorkflow) -> None:
+        """記一次重放失敗；**寫不進去也不能擋住當次回退 Agent**（ING Rule 17）。
+
+        `_persist` 的 `CoordinationError` 代表有人同時改過這筆 PROC（revision CAS 輸了），
+        它只是「這一次的 `fail_count` 沒記到」——PROC 的計數本來就允許併發下少記一次，
+        下一次重放失敗會再記。但讓它取代原本的 `PermanentError` 往外飛的話，本次事件會
+        直接失敗，Agent 那條回退路徑一次都跑不到（Phase 37 review 便宜修正 B-minor 1）。
+
+        **只吞 `CoordinationError`**：連不上 DynamoDB 之類的故障仍然往外拋，那不是
+        「沒記到」而是整條路徑不可用。吞掉的那次只寫進 log，訊息只有簽名（一個雜湊值），
+        不含事件內容（00A §3.8）。
+        """
+        try:
+            self._persist(on_replay_failure(proc, self.deps.now()))
+        except CoordinationError:
+            _log.warning("replay failure not recorded, proc=%s", proc.signature)
 
     def _persist(self, proc: ProvenWorkflow, *, is_new: bool = False) -> None:
         """PROC 的唯一寫入形狀：讀 -> 純函式算 -> 條件寫（00A §6.8、Phase 35 Task 3）。
