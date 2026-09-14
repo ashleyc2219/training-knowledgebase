@@ -14,19 +14,31 @@ log 不得出現原始 body、簽名或 secret（00A §3.8）。
 
 import hashlib
 import hmac
+import json
 import re
 import string
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
 
 from pydantic import ValidationError
 
-from training_kb.clock import parse_iso
-from training_kb.errors import IngressError, PermanentError
+from training_kb.clock import now_utc, parse_iso
+from training_kb.config import Settings, load_settings
+from training_kb.errors import (
+    CoordinationError,
+    IngressError,
+    ObjectAlreadyExists,
+    PermanentError,
+    TransientError,
+)
+from training_kb.keys import operation_ref
 from training_kb.models import Release, ReleaseKind, ReleaseSource, Ticket, TicketSource
-from training_kb.operations import Acceptance, OperationKind
-from training_kb.pipelines.common import JSONValue
+from training_kb.operations import Acceptance, AcceptOperation, OperationCoordinator, OperationKind
+from training_kb.pipeline_starter import PipelineStarter
+from training_kb.pipelines.common import JSONValue, PipelineName
+from training_kb.repository import Repository
 
 # --- 1. 驗簽（Phase 30）-------------------------------------------------------
 
@@ -221,6 +233,143 @@ def execution_name(operation_id: str) -> str:
     return f"{head}-{digest}"
 
 
+PIPELINE_FOR_KIND: dict[OperationKind, PipelineName] = {
+    "ticket": "ticket-analysis",
+    "release": "release-update",
+}
+"""哪一種 canonical 事件觸發哪一條 pipeline（00B ING Rule 26／27）。
+
+只有這兩種：Feedback／View 走 P42 的固定匯入（不啟動任何 pipeline），
+feedback-review 由排程觸發、不經 `PipelineStarter`（00A D-61）。
+"""
+
+INPUT_NAME = "input"
+"""私有 canonical 輸入的檔名；`operation_ref(operation_id, "input")` 會補上 `.json`。"""
+
+
+@dataclass(frozen=True)
+class Wiring:
+    """接受路徑要用的四個相依。測試直接覆寫 `_wiring` 注入 fake。"""
+
+    operations: OperationCoordinator
+    starter: PipelineStarter
+    repository: Repository
+    settings: Settings
+
+
+_WIRING: Wiring | None = None
+
+
+def _wiring() -> Wiring:
+    """取得四個相依（模組層工廠，快取一次）。
+
+    **本計畫選擇**（00A §6.8）：讓 `accept_ticket(x, *, deadline)` 維持 00A 的兩個參數，
+    又能取得 operations／starter／repository／settings。前面的底線代表模組內部用，
+    其他 Phase 不得 import；測試 `monkeypatch.setattr(ingress, "_wiring", ...)` 即可注入。
+    """
+    global _WIRING
+    if _WIRING is None:
+        _WIRING = _build_wiring(load_settings())
+    return _WIRING
+
+
+def _build_wiring(settings: Settings) -> Wiring:
+    """（Task 3 接上 boto3 adapter 之前的暫用實作）"""
+    raise PermanentError(f"接受路徑尚未接線：{settings.table_name}")
+
+
+def accept_ticket(ticket: Ticket, *, deadline: float) -> Acceptance:
+    """canonical `Ticket` → 永久去重的 operation ＋ 一次 `ticket-analysis` 啟動。"""
+    return _accept("ticket", ticket.id, ticket.project_id,
+                   ticket.model_dump(mode="json"), deadline)
+
+
+def accept_release(release: Release, *, deadline: float) -> Acceptance:
+    """canonical `Release` → 永久去重的 operation ＋ 一次 `release-update` 啟動。
+
+    `Release` 模型沒有 `project_id`（MVP 只有一個專案），所以由 `Settings.project_id` 取得
+    後寫進 operation 紀錄與 ASL input（00A §6.8）。
+    """
+    return _accept("release", release.id, _wiring().settings.project_id,
+                   release.model_dump(mode="json"), deadline)
+
+
+def accept_normalized(obj: Ticket | Release, *, deadline: float) -> Acceptance:
+    """接受端總入口：依型別分派，呼叫端（P30／P37／P42）不必自己判斷是哪一種。"""
+    if isinstance(obj, Ticket):
+        return accept_ticket(obj, deadline=deadline)
+    return accept_release(obj, deadline=deadline)
+
+
+def _accept(kind: OperationKind, canonical_id: str, project_id: str,
+            payload: dict[str, JSONValue], deadline: float) -> Acceptance:
+    """固定次序：先永久接受 → 再保存私有輸入 → 最後啟動執行。
+
+    次序不能換。`accept` 先寫 `OPS#<operation_id>` 才有永久去重的依據；輸入物件與
+    execution 都可以事後補，但「已接受」這件事一旦漏寫，同一個事件就會長出第二條版本鏈。
+
+    **duplicate 但尚未啟動是合法的續跑**（00A D-45）：`accept` 已寫 `OPS#`、但 input 物件
+    或 execution 還沒建立時，本次補完即可，不建立第二筆 operation、也不換名字重跑。
+    判斷依據是 `input_ref`／`execution_arn` 這兩個**事實**欄位，不是 `status`。
+    """
+    wiring = _wiring()
+    operations = wiring.operations
+    operation_id = operation_id_for(kind, canonical_id)
+    accepted = operations.accept(AcceptOperation(
+        operation_id=operation_id, kind=kind, canonical_id=canonical_id,
+        project_id=project_id, now=now_utc(),
+    ))
+    if accepted.status == "duplicate" and accepted.record.execution_arn:
+        return accepted                      # 已完整啟動過，回既有紀錄，不重跑
+    assert_time_left(deadline, step="put-input")
+    input_ref = _put_canonical_input_once(wiring.repository, operation_id, payload)
+    if accepted.record.input_ref != input_ref:
+        operations.record_normalized(operation_id, input_ref)
+    assert_time_left(deadline, step="start-execution")
+    arn = _start_once(wiring.starter, operations, PIPELINE_FOR_KIND[kind], operation_id,
+                      {"operation_id": operation_id, "project_id": project_id,
+                       "input_ref": input_ref})
+    operations.record_execution(operation_id, arn)
+    record = operations.load(operation_id)
+    if record is None:
+        raise CoordinationError(f"{operation_id} 接受後讀不回紀錄")
+    return Acceptance(status=accepted.status, operation_id=operation_id, record=record)
+
+
+def _put_canonical_input_once(repository: Repository, operation_id: str,
+                              payload: dict[str, JSONValue]) -> str:
+    """把 canonical 輸入寫進私有 S3；同一個 operation 重送沿用既有物件，不覆寫。
+
+    `sort_keys=True` 讓同一份 canonical 物件每次算出同一串 bytes；`ensure_ascii=False`
+    讓中文原樣存下來（這是私有物件，不是 log）。`ObjectAlreadyExists` 用**型別**判斷，
+    不比對訊息字串；其他 S3 錯誤照常往上拋，不吞錯。
+    """
+    key = operation_ref(operation_id, INPUT_NAME)
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    try:
+        repository.put_object(key, body, "application/json", if_none_match=True)
+    except ObjectAlreadyExists:
+        pass                                 # 同一 operation 重送：沿用既有輸入
+    return key
+
+
+def _start_once(starter: PipelineStarter, operations: OperationCoordinator,
+                pipeline: PipelineName, operation_id: str,
+                asl_input: dict[str, JSONValue]) -> str:
+    """啟動執行；失敗先留下可追溯紀錄，再把**原例外**往外丟。
+
+    `retryable` 只看是不是 `TransientError`（與 `run_sequence` 同一條判準）。紀錄失敗之後
+    `input_ref` 仍在，重送會走續跑分支、沿用同一個 execution name，不會換名重跑。
+    這裡**不自己重試**：重試由呼叫端（webhook 的來源重送、ASL 的 Retry）管，只有一層。
+    """
+    try:
+        return starter.start(pipeline, execution_name(operation_id), asl_input)
+    except Exception as error:
+        operations.fail(operation_id, str(error), isinstance(error, TransientError),
+                        now=now_utc())
+        raise
+
+
 # --- 5. 接線點（Phase 30 stub → Phase 32 接受端 → Phase 37 完整三層）----------
 
 
@@ -233,7 +382,24 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
     入口設定提供，**不得從 payload 反推**；`headers` 一律小寫鍵；`deadline` 是 handler
     進入時算好的絕對時刻，往下傳而不重新計時。
 
-    這裡刻意丟 `PermanentError` 而不是回一個假的成功：設計 §14.1 要求驗簽以外的任何一步
-    失敗都回操作失敗，不能「先回成功、之後再背景處理」。
+    本 Phase 補的是**接受**那半邊：`_normalize` 拿到 canonical 物件後交給
+    `accept_normalized` 依型別分派。正規化那半邊是 Phase 37 的 Rote 三層，在它接上之前
+    `_normalize` 刻意丟 `PermanentError` 而不是回一個假的成功：設計 §14.1 要求驗簽以外的
+    任何一步失敗都回操作失敗，不能「先回成功、之後再背景處理」。
     """
-    raise PermanentError("Phase 31／32 尚未接線；本 Phase 不得先回成功再背景處理")
+    assert_time_left(deadline, step="normalize")
+    normalized = _normalize(domain=domain, adapter=adapter, event_type=event_type,
+                            headers=headers, payload=payload)
+    return accept_normalized(normalized, deadline=deadline)
+
+
+def _normalize(*, domain: str, adapter: str, event_type: str,
+               headers: Mapping[str, str],
+               payload: Mapping[str, JSONValue]) -> Ticket | Release:
+    """留給 Phase 37 的接縫：組 `RawEvent` → `Rote.normalize` → canonical `Ticket`／`Release`。
+
+    四個參數本 Phase 不解讀，只固定它們會被原樣轉交（`domain`／`adapter` 來自可信入口設定，
+    不得從 payload 反推）。接上之前一律明確失敗。
+    """
+    raise PermanentError(f"Phase 37 尚未接線：{domain}/{event_type}（adapter={adapter}）"
+                         f"；headers={len(headers)} 個、payload={len(payload)} 個鍵")
