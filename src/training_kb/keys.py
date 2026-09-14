@@ -4,19 +4,22 @@
 已帶前綴的字串再傳進任何 builder 一律拒絕（00A §3.3）。邊的形狀固定是
 `PK=起點`、`SK=<關係>#<終點 PK>`、`target=<終點 PK>`（設計 §9.2）。
 
-檔案分成五段，Phase 10 的 `ops_pk`／`operation_ref` 直接接在最後一段，不必改動前四段：
+檔案分成六段，Phase 10 的 `ops_pk`／`operation_ref` 接在最後一段，前五段不動：
 1. 常數（`META`、`RELATIONS`）
 2. 私有守門員（`_bare`、`_pk`）
 3. 十個 PK builder
 4. 三個 parser
 5. 關係邊（`edge_sk`／`parse_edge_sk`）
+6. 操作紀錄（`ops_pk`／`operation_ref`）
 """
 
 import json
+import re
 from datetime import datetime
 from hashlib import sha256
 
 from training_kb.clock import to_iso
+from training_kb.errors import PermanentError
 
 # --- 1. 常數 -----------------------------------------------------------------
 
@@ -147,3 +150,41 @@ def parse_edge_sk(value: str) -> tuple[str, str]:
         raise ValueError(f"invalid edge sort key: {value!r}")
     parse_pk(target)
     return relation, target
+
+
+# --- 6. 操作紀錄（非業務實體）-----------------------------------------------
+
+OPERATIONS_PREFIX = "operations/"
+"""操作紀錄的私有 S3 前綴（00A §3.4）；與公開的 `site/` 互斥，bucket policy 不會授權它。"""
+
+_REF_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]*")
+"""`operations/<operation_id>/<name>.json` 兩段路徑各自允許的字元。
+
+第一個字元限英數，所以 `.`／`-` 開頭的相對路徑一開始就不成立；`/` 不在集合裡，
+一段永遠只是一段，接不出 `../site/index` 這種跳出私有前綴的 key。
+"""
+
+
+def _ref_part(label: str, value: str) -> str:
+    """S3 key 的單段守門員。丟 `PermanentError` 而不是 `ValueError`：拼錯的 key 會把
+    私有產物寫到別的前綴，屬於「確定不合法」而非鍵格式筆誤（00A §4.1）。"""
+    if not _REF_PART.fullmatch(value) or ".." in value:
+        raise PermanentError(f"{label} must be one safe path segment: {value!r}")
+    return value
+
+
+def ops_pk(operation_id: str) -> str:
+    """`OPS#<operation_id>`；`OPS` 是非業務前綴，不進 `Entity`，但 `entity` 屬性照樣是它，
+    所以 `scan_entity("OPS")` 找得到（00A §3.3、§3.6）。"""
+    return _pk("OPS", operation_id)
+
+
+def operation_ref(operation_id: str, name: str) -> str:
+    """`operations/<operation_id>/<name>.json`：操作的私有輸入與模型輸出（00A §3.4）。
+
+    只組**單層**檔名；`operations/<operation_id>/site/<site_key>` 這種多層 staging key
+    由 Phase 24 自己組，不走這裡。
+    """
+    _ref_part("operation_id", operation_id)
+    _ref_part("name", name)
+    return f"{OPERATIONS_PREFIX}{operation_id}/{name}.json"
