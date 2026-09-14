@@ -51,7 +51,14 @@ from pydantic import ValidationError
 
 from training_kb.errors import ContentError, CoordinationError, ObjectAlreadyExists
 from training_kb.keys import edge_sk, feature_pk, parse_pk, rule_pk, step_pk, version_pk
-from training_kb.models import Feature, StepDraft, StepType, TutorialContent, TutorialVersion
+from training_kb.models import (
+    Feature,
+    StepDraft,
+    StepType,
+    TutorialContent,
+    TutorialStatus,
+    TutorialVersion,
+)
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import Repository, item_to_model
 
@@ -811,3 +818,55 @@ def _missing_parts(version_id: str, repository: Repository) -> list[str]:
         # 它也是 `ValueError`）。收斂成一條「問題」而不是往外丟：關卡的答案只有齊全／不齊全。
         problems.append(f"關係資料損壞，無法核對：{error}")
     return problems
+
+
+# --- 9. 教學退役與後繼導向 ---------------------------------------------------
+
+RETIRED_NOTICE = "此教學已退役，內容僅供歷史查閱。"
+"""公開頁**唯一**的過期說明（00A §6.6）。
+
+刻意不含退役原因：`reason` 是 `release:<release_id>` 這種上游識別碼，設計 §13 把它列為
+私有；讀者需要的資訊只有「這篇過期了、可以改看哪一篇」（F19）。`site.py` 與 Phase 57 的
+完整退役頁都 `import` 這個常數，不各自抄一份字面值，改字只改這一處。
+"""
+
+
+def resolve_successor(slug: str, successor: str | None, *,
+                      repository: Repository) -> str | None:
+    """把「維護者填的後繼」收斂成「可以公開導向的後繼」；任何一關不過回 `None`，**不丟例外**。
+
+    四項檢查的固定順序（設計 §8.4）：
+
+    ```text
+    None 或等於自己 -> None            自我導向會讓讀者原地打轉
+    查不到 Tutorial -> None            指向不存在的教學＝壞連結
+    status != active -> None           已退役的後繼只會再把讀者推一次
+    current_version is None -> None    還沒有任何已發布版本＝讀者看不到內容
+    沿 successor 往下走遇到重複節點 -> None
+    ```
+
+    **回 `None` 不是失敗**：F19 明訂「找不到合法後繼時保持空值，不能阻擋退役」，
+    所以這裡的每一關都只是「不導向」，由 `retire_tutorial` 照常把教學退役掉。
+
+    鏈走訪用 `visited` 而不是固定跳數上限：`visited` 直接描述「不形成循環」這件事，
+    也順便擋掉 `A -> B -> C -> B` 這種**不含起點**的環。走到 `None` 就停；
+    中途某一節點查不到時同樣回 `None`——鏈斷掉就無法證明它不成環，不放行比較安全。
+    """
+    if successor is None or successor == slug:
+        return None
+    target = repository.get_tutorial(successor)
+    if target is None or target.status != TutorialStatus.ACTIVE:
+        return None
+    if target.current_version is None:
+        return None
+    visited = {slug, successor}
+    cursor = target.successor
+    while cursor is not None:
+        if cursor in visited:
+            return None
+        visited.add(cursor)
+        following = repository.get_tutorial(cursor)
+        if following is None:
+            return None
+        cursor = following.successor
+    return successor
