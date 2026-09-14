@@ -4,12 +4,13 @@ PRP Rule 6 由 `test_tutorial_and_feature_ids_have_no_tenant_dimension` 直接�
 TIC Rule 6 由 `test_ticket_has_at_most_one_feature` 直接斷言（零與一在 test_entities.py）。
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from training_kb.keys import view_pk
 from training_kb.models import (
     AuthoringRule,
     Feature,
@@ -26,6 +27,9 @@ from training_kb.models import (
 
 NOW = datetime(2026, 8, 3, 10, tzinfo=UTC)
 NAIVE = datetime(2026, 8, 3, 10)
+TAIPEI = timezone(timedelta(hours=8))
+SUB_SECOND = datetime(2026, 8, 3, 10, 0, 0, 123456, tzinfo=UTC)
+SAME_MOMENT_IN_TAIPEI = datetime(2026, 8, 3, 18, tzinfo=TAIPEI)
 EVIDENCE = ["f_12", "f_15", "f_19", "f_23", "f_27"]
 
 
@@ -192,3 +196,52 @@ def test_relation_fields_store_bare_identifiers() -> None:
         AuthoringRule(rule_id="R-011", rule="x", applies_when="read", status="candidate",
                       evidence=EVIDENCE, applied_to=["VERSION#prepare-meeting@v1"],
                       derived_from="prepare-meeting@v1")
+
+
+def test_every_datetime_field_rejects_sub_second_precision() -> None:
+    """00A §3.5：時間只到整秒。`clock.to_iso` 已經拒絕微秒，實體落地時也必須同一套規則，
+    否則 `model_dump(mode="json")` 會寫出 `.123456Z` 這種 `parse_iso` 讀得回來、
+    `to_iso` 卻吐不出來的字串。"""
+    with pytest.raises(ValidationError, match="whole seconds"):
+        Feature(feature_id="Prepare", name="Prepare", aliases=[], first_seen=SUB_SECOND)
+    with pytest.raises(ValidationError, match="whole seconds"):
+        TutorialView(tutorial_version="prepare-meeting@v1", user="u_01", ts=SUB_SECOND)
+    with pytest.raises(ValidationError, match="whole seconds"):
+        Ticket(id="t_884", source="email", text="找不到按鈕", author="u_01",
+               ts=SUB_SECOND, project_id="demo")
+    with pytest.raises(ValidationError, match="whole seconds"):
+        Release(id="r_47", source="changelog", feature="Prepare", kind="changed",
+                evidence="changelog entry", ts=SUB_SECOND)
+    with pytest.raises(ValidationError, match="whole seconds"):
+        Feedback(id="f_9", tutorial_version="prepare-meeting@v1", rating=3, user="u_01",
+                 ts=SUB_SECOND)
+    with pytest.raises(ValidationError, match="whole seconds"):
+        TutorialVersion(version_id="prepare-meeting@v1", slug="prepare-meeting",
+                        supersedes=None, reason="gap:c12", rules_applied=[],
+                        s3_key="tutorials/prepare-meeting/v1.md", published_at=SUB_SECOND)
+    with pytest.raises(ValidationError, match="whole seconds"):
+        proc(last_used=SUB_SECOND)
+
+
+def test_datetime_fields_normalise_to_utc_on_the_way_in() -> None:
+    """`+08:00` 建模後序列化成 `Z`：`put_meta` 走的是 `model_dump(mode="json")`，
+    不正規化就會把偏移量原樣寫進表，同一時刻在表裡出現兩種字串。"""
+    ticket = Ticket(id="t_885", source="email", text="找不到按鈕", author="u_01",
+                    ts=SAME_MOMENT_IN_TAIPEI, project_id="demo")
+    assert ticket.ts.utcoffset() == timedelta(0)
+    assert ticket.model_dump(mode="json")["ts"] == "2026-08-03T10:00:00Z"
+    feature = Feature(feature_id="Prepare", name="Prepare", aliases=[],
+                      first_seen=SAME_MOMENT_IN_TAIPEI)
+    assert feature.model_dump(mode="json")["first_seen"] == "2026-08-03T10:00:00Z"
+
+
+def test_tutorial_view_key_and_ts_agree_across_offsets() -> None:
+    """`view_pk` 走 `clock.to_iso`（一律 UTC），`ts` 走 pydantic 序列化；兩者對同一瞬間
+    必須得到同一個字串，否則同一次瀏覽會有兩個去重鍵。"""
+    offset = TutorialView(tutorial_version="prepare-meeting@v1", user="u_01",
+                          ts=SAME_MOMENT_IN_TAIPEI)
+    utc = TutorialView(tutorial_version="prepare-meeting@v1", user="u_01", ts=NOW)
+    assert view_pk(offset.tutorial_version, offset.user, offset.ts) == view_pk(
+        utc.tutorial_version, utc.user, utc.ts)
+    assert offset.model_dump(mode="json")["ts"] == utc.model_dump(mode="json")["ts"]
+    assert offset.model_dump(mode="json")["ts"] == "2026-08-03T10:00:00Z"

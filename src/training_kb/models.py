@@ -4,7 +4,7 @@ Phase 03 放不依賴實體的 primitive，Phase 04 在其後追加十個邏輯�
 領域模型不帶 DynamoDB 的 `PK`／`SK`／`entity`／`_revision`，只保存裸識別碼與原生型別。
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
 from typing import Any
@@ -123,10 +123,21 @@ class TutorialContent(StrictModel):
 
 
 def aware(value: datetime) -> datetime:
-    """確認時間帶時區。模型內不補 `now`，時間一律由呼叫端傳入（Phase 02 的規則）。"""
+    """確認時間帶時區，並收斂成 **UTC 整秒**（00A §3.5）。
+
+    模型內不補 `now`，時間一律由呼叫端傳入（Phase 02 的規則）。三步固定：
+
+    1. naive 直接拒絕——沒有偏移量就無從換算。
+    2. 微秒非零直接拒絕，與 `clock.to_iso` 同一句話。**不靜默截斷**：截掉的那一段
+       會讓 `view_pk` 這種以時間入鍵的計算靜靜地改變答案。
+    3. 換算成 UTC。`put_meta` 走 `model_dump(mode="json")`，不在這裡換算，`+08:00`
+       就會原樣寫進表，同一時刻在表裡出現兩種字串，也與 `to_iso` 只吐 `Z` 分岔。
+    """
     if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
         raise ValueError("datetime must be timezone aware")
-    return value
+    if value.microsecond:
+        raise ValueError("datetime must be whole seconds")
+    return value.astimezone(UTC)
 
 
 class Tutorial(StrictModel):
