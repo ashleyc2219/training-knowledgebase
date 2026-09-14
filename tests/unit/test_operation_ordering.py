@@ -14,7 +14,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from training_kb.errors import CoordinationError
+from training_kb import operations
+from training_kb.errors import CoordinationError, PermanentError
 from training_kb.keys import META, parse_pk
 from training_kb.operations import SEQUENCE_ATTEMPTS, AcceptOperation, OperationCoordinator
 from training_kb.repository import DynamoItem, DynamoValue, Repository
@@ -142,3 +143,71 @@ def test_sequence_contention_fails_loudly_instead_of_spinning(
     with pytest.raises(CoordinationError, match=str(SEQUENCE_ATTEMPTS)):
         coordinator.next_sequence("PROJECT#demo")
     assert attempts == SEQUENCE_ATTEMPTS
+
+
+def test_expired_lease_can_be_taken_over_but_only_by_condition(
+    coordinator: OperationCoordinator, clock: _Clock
+) -> None:
+    """到期判斷自己比 `expires_at`，不等 DynamoDB 的 TTL 刪除。
+
+    最後一行是重點：`worker-a` 已非持有者，它的 `release_lease` 不能清掉 `worker-b` 的租約。
+    """
+    scope = "TUTORIAL#prepare-meeting"
+    assert coordinator.acquire_lease(scope, "worker-a", ttl_seconds=30, now=clock.at(0))
+    assert not coordinator.acquire_lease(scope, "worker-b", ttl_seconds=30, now=clock.at(29))
+    assert coordinator.acquire_lease(scope, "worker-b", ttl_seconds=30, now=clock.at(31))
+    coordinator.release_lease(scope, "worker-a")
+    assert not coordinator.acquire_lease(scope, "worker-c", ttl_seconds=30, now=clock.at(32))
+
+
+def test_the_same_owner_re_entering_extends_the_expiry(
+    coordinator: OperationCoordinator, repository: _MemoryRepository, clock: _Clock
+) -> None:
+    """同一個 owner 重入是續約，不是搶佔：到期時間往後推，租約沒有換手。"""
+    scope = "TUTORIAL#prepare-meeting"
+    assert coordinator.acquire_lease(scope, "worker-a", ttl_seconds=30, now=clock.at(0))
+    first = repository.items["LEASE#TUTORIAL#prepare-meeting"]["expires_at"]
+    assert coordinator.acquire_lease(scope, "worker-a", ttl_seconds=30, now=clock.at(10))
+    item = repository.items["LEASE#TUTORIAL#prepare-meeting"]
+    assert (item["owner"], item["expires_at"]) == ("worker-a", "2026-09-13T12:00:40Z")
+    assert first == "2026-09-13T12:00:30Z"
+
+
+def test_a_non_positive_ttl_is_rejected_before_any_write(
+    coordinator: OperationCoordinator, repository: _MemoryRepository, clock: _Clock
+) -> None:
+    """`ttl_seconds <= 0` 是「確定不合法」，用 `PermanentError`，而且一個 item 都不寫。"""
+    for ttl in (0, -1):
+        with pytest.raises(PermanentError):
+            coordinator.acquire_lease("TUTORIAL#x", "worker-a", ttl_seconds=ttl, now=clock.at(0))
+    assert repository.items == {}
+
+
+def test_release_by_a_non_holder_changes_nothing(
+    coordinator: OperationCoordinator, repository: _MemoryRepository, clock: _Clock
+) -> None:
+    """非持有者呼叫 `release_lease` 之後讀回來的 `owner` 沒變；不存在的 scope 也安靜返回。"""
+    scope = "TUTORIAL#prepare-meeting"
+    coordinator.acquire_lease(scope, "worker-a", ttl_seconds=30, now=clock.at(0))
+    before = dict(repository.items["LEASE#TUTORIAL#prepare-meeting"])
+    coordinator.release_lease(scope, "worker-b")
+    coordinator.release_lease("TUTORIAL#never-seen", "worker-b")
+    assert repository.items["LEASE#TUTORIAL#prepare-meeting"] == before
+    assert "LEASE#TUTORIAL#never-seen" not in repository.items
+
+
+def test_a_released_lease_is_free_for_anyone(
+    coordinator: OperationCoordinator, clock: _Clock
+) -> None:
+    """持有者自己放掉之後，`owner` 是空字串，下一個人不必等到期就能接手。"""
+    scope = "TUTORIAL#prepare-meeting"
+    coordinator.acquire_lease(scope, "worker-a", ttl_seconds=300, now=clock.at(0))
+    coordinator.release_lease(scope, "worker-a")
+    assert coordinator.acquire_lease(scope, "worker-b", ttl_seconds=30, now=clock.at(1))
+
+
+def test_the_two_sentences_stay_in_the_module(coordinator: OperationCoordinator) -> None:
+    """「鎖不等於接受順序」「TTL 不是準時解鎖」必須留在程式註解裡（Phase 11 完成清單）。"""
+    text = (operations.__doc__ or "") + (OperationCoordinator.acquire_lease.__doc__ or "")
+    assert "鎖不等於接受順序" in text
+    assert "TTL 不是準時解鎖" in text
