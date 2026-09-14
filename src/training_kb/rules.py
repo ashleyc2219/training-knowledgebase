@@ -39,3 +39,24 @@ def select_active_rules(
     matching.sort(key=lambda item: item.rule_id)
     matching.sort(key=lambda item: validated_at_by_rule[item.rule_id], reverse=True)
     return matching[:1]
+
+
+def render_rules_block(rules: Sequence[AuthoringRule]) -> str:
+    """把本次選中的規則排成 prompt 的 `<active_rules>` 內容；轉義由 Phase 17 的 renderer 負責。"""
+    return "\n".join(f"[{item.rule_id}] applies_when={item.applies_when.value}\n{item.rule}"
+                     for item in rules)
+
+
+def applied_rule_ids(rules: Sequence[AuthoringRule]) -> list[str]:
+    """本次實際注入的規則 ID，去重且保留注入順序；直接給 `allocate_version(rules_applied=...)`。"""
+    return list(dict.fromkeys(item.rule_id for item in rules))
+
+
+def rules_for_content(
+    rules: Sequence[AuthoringRule],
+    step_types: Sequence[StepType],
+    validated_at_by_rule: Mapping[str, datetime],
+) -> dict[StepType, list[AuthoringRule]]:
+    """CREATE／UPDATE／REFINE 共用的入口；`dict.fromkeys` 去掉重複型態又保留順序。"""
+    return {step_type: select_active_rules(rules, step_type, validated_at_by_rule)
+            for step_type in dict.fromkeys(step_types)}
