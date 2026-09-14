@@ -42,7 +42,9 @@ V2 = f"{SLUG}@v2"
 FEATURE = "Summary"
 REASON = "release:r_88"
 MARKDOWN_KEY = f"tutorials/{SLUG}/v2.md"
+DIFF_KEY = f"tutorials/{SLUG}/v2.diff"
 MARKDOWN = "# 會議摘要\n\n## Steps\n\n1. (type=read, feature=Summary) 打開摘要頁。\n"
+DIFF = "--- v1\n+++ v2\n@@ -1 +1 @@\n-打開會議頁。\n+打開摘要頁。\n"
 
 
 def _version(version_id: str, *, supersedes: str | None, number: int) -> TutorialVersion:
@@ -73,6 +75,8 @@ def repo(repository: Repository) -> Repository:
     repository.put_edge(feedback_pk("f_12"), "REFERS_TO", version_pk(V2))
     repository.put_object(MARKDOWN_KEY, MARKDOWN.encode("utf-8"),
                           "text/markdown; charset=utf-8", if_none_match=False)
+    repository.put_object(DIFF_KEY, DIFF.encode("utf-8"),
+                          "text/plain; charset=utf-8", if_none_match=False)
     return repository
 
 
@@ -84,6 +88,7 @@ def _history(repository: Repository) -> tuple[object, ...]:
         repository.query_pk(step_pk(V2, 1)),
         repository.query_pk(feedback_pk("f_12")),
         repository.get_object(MARKDOWN_KEY),
+        repository.get_object(DIFF_KEY),
     )
 
 
@@ -115,7 +120,11 @@ def test_retired_tutorial_still_accepts_views(repo: Repository) -> None:
 
 
 def test_retire_keeps_versions_steps_feedback_and_markdown_untouched(repo: Repository) -> None:
-    """人工驗收的自動化版：除了 `TUTORIAL` 的三個屬性以外，一個 byte 都沒有變。"""
+    """人工驗收的自動化版：除了 `TUTORIAL` 的三個屬性以外，一個 byte 都沒有變。
+
+    `_history` 同時涵蓋 `VERSION`／`STEP`／`FEEDBACK` item 與 S3 的 `.md`／`.diff`——
+    設計 §8.1／§8.4 要求退役保留歷史原文與版本，少驗一樣就等於默許「退役順手清理」。
+    """
     before = _history(repo)
     tutorial_before = repo.get_meta_item(tutorial_pk(SLUG))
     result = retire_tutorial(SLUG, reason=REASON, successor=SUCCESSOR,
