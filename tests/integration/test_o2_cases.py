@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from training_kb.content import make_version_id, parse_version_id
+
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "infra" / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -132,3 +134,15 @@ def test_every_case_also_passes_offline(case: O2Case, moto_table: str) -> None:
         pytest.skip("restart 要 spawn 真的子程序，子程序看不到本行程的 moto 攔截器")
     result = run_o2_case(case, table=moto_table, region="us-west-2")
     assert result.verdict == "PASS", result.observed
+
+
+def test_the_script_reuses_contents_version_functions() -> None:
+    """版號字串的定義只有 `training_kb.content` 這一份，腳本不得自己寫一份比較寬鬆的。
+
+    寬鬆的那份把 `a@v01` 讀成第 1 版、也組得出 `a@v0`，等於讓兩個字串對應同一版；
+    案例腳本用它算出來的「第幾版」就可能跟正式路徑不一樣。
+    """
+    assert o2_report.make_version_id is make_version_id
+    assert o2_report.parse_version_id is parse_version_id
+    assert not hasattr(o2_report, "make_version")
+    assert not hasattr(o2_report, "version_number")

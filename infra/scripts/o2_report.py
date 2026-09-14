@@ -18,8 +18,9 @@ lease 過期、交錯事件、closed execution 五種情況下，是不是都只
 兩個替身（本 Phase 自備，避免用到更後面 Phase 才有的東西）：
 
 - **版號**：Phase 20 的 `allocate_version` 此時還不存在，`restart` 與 `interleaved`
-  用「讀 `Tutorial.current_version` → 版號加一 → `record_version`」的替身，字串直接組成
-  `<slug>@v<n>`。本 Phase 只證明「同一 operation 重送拿到同一個 `version_id`、兩個
+  用「讀 `Tutorial.current_version` → 版號加一 → `record_version`」的替身；版號字串
+  一律走 `training_kb.content` 的 `make_version_id`／`parse_version_id`，本檔不另寫
+  一份。本 Phase 只證明「同一 operation 重送拿到同一個 `version_id`、兩個
   operation 不分叉」。
 - **closed execution**：不在此實作 `PipelineStarter`（Phase 32 才接真正的 boto3 adapter），
   用最小 stub `ExecutionAlreadyExists` 證明協調紀錄足以判斷。
@@ -51,6 +52,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from training_kb.clock import now_utc, to_iso
+from training_kb.content import make_version_id, parse_version_id
 from training_kb.errors import CoordinationError
 from training_kb.keys import tutorial_pk
 from training_kb.models import Tutorial, TutorialStatus
@@ -161,24 +163,12 @@ def seed_tutorial(repository: Repository, slug: str, *, version: int) -> None:
     repository.put_meta(
         Tutorial(
             slug=slug,
-            current_version=make_version(slug, version),
+            current_version=make_version_id(slug, version),
             topic=f"O2 case {slug}",
             feature_ids=[],
             status=TutorialStatus.ACTIVE,
         )
     )
-
-
-def make_version(slug: str, number: int) -> str:
-    """版號替身的字串形狀（00A §3.3 的 `<slug>@v<n>`）。Phase 20 才有真正的 `allocate_version`。"""
-    return f"{slug}@v{number}"
-
-
-def version_number(version_id: str | None) -> int:
-    """`prepare-meeting@v3` -> 3；還沒有版本時回 0。"""
-    if not version_id or "@v" not in version_id:
-        return 0
-    return int(version_id.rsplit("@v", 1)[1])
 
 
 def allocate_stub(
@@ -188,6 +178,10 @@ def allocate_stub(
 
     同一個 operation 重送時**不重新取號**：ledger 已經有 `version_id` 就直接沿用，
     這正是 `restart` 案例要證明的「重啟後不會出現第三個版號」。
+
+    版號字串一律走 `training_kb.content` 的 `make_version_id`／`parse_version_id`
+    （Phase 20 才有真正的 `allocate_version`）：本檔不另寫一份比較寬鬆的版號函式，
+    否則 `a@v01` 這種前導零字串會被讀成第 1 版，案例算出來的「第幾版」就與正式路徑分岔。
     """
     record = operations.load(operation_id)
     if record is not None and record.version_id:
@@ -195,7 +189,9 @@ def allocate_stub(
     tutorial = repository.get_tutorial(slug)
     if tutorial is None:
         raise CoordinationError(f"tutorial is missing: {slug}")
-    version_id = make_version(slug, version_number(tutorial.current_version) + 1)
+    current = tutorial.current_version
+    number = 0 if current is None else parse_version_id(current)[1]
+    version_id = make_version_id(slug, number + 1)
     operations.record_version(operation_id, version_id)
     return version_id
 
@@ -302,7 +298,7 @@ def run_restart(case: O2Case, *, table: str, region: str) -> O2CaseResult:
         child.returncode == -signal.SIGKILL
         and child_version == version_id
         and again.status == "duplicate"
-        and version_id == make_version(slug, 2)
+        and version_id == make_version_id(slug, 2)
         and tutorial is not None
         and tutorial.current_version == version_id
         and count_ops(restarted, project_id) == 1
@@ -363,7 +359,7 @@ def run_resend(case: O2Case, *, table: str, region: str) -> O2CaseResult:
         and seqs[0] == 1
         and count_ops(final, project_id) == 1
         and backfilled == 1
-        and set(versions) == {make_version(slug, 2)}
+        and set(versions) == {make_version_id(slug, 2)}
         and sequence_counter(final, project_id) == 4  # 重送燒掉三個號碼，允許缺口
     )
     return O2CaseResult(case, observed, "PASS" if passed else "FAIL",
@@ -498,10 +494,10 @@ def run_interleaved(case: O2Case, *, table: str, region: str) -> O2CaseResult:
         and release.record.accept_seq is not None
         and feedback.record.accept_seq is not None
         and release.record.accept_seq < feedback.record.accept_seq
-        and assigned == [(f"op-release-r42-{mark}", make_version(slug, 3)),
-                         (f"op-feedback-{mark}", make_version(slug, 4))]
+        and assigned == [(f"op-release-r42-{mark}", make_version_id(slug, 3)),
+                         (f"op-feedback-{mark}", make_version_id(slug, 4))]
         and tutorial is not None
-        and tutorial.current_version == make_version(slug, 4)
+        and tutorial.current_version == make_version_id(slug, 4)
         and count_ops(final, project_id) == 2
     )
     return O2CaseResult(case, observed, "PASS" if passed else "FAIL",
@@ -572,12 +568,12 @@ def run_closed_execution(case: O2Case, *, table: str, region: str) -> O2CaseResu
         "ops": count_ops(final, project_id),
     })
     passed = (
-        resumed_version == finished == make_version(slug, 2)
+        resumed_version == finished == make_version_id(slug, 2)
         and resumed_error == "CoordinationError"
         and empty_record is not None
         and empty_record.version_id is None
         and tutorial is not None
-        and tutorial.current_version == make_version(slug, 2)
+        and tutorial.current_version == make_version_id(slug, 2)
         and count_ops(final, project_id) == 2
     )
     return O2CaseResult(case, observed, "PASS" if passed else "FAIL",
