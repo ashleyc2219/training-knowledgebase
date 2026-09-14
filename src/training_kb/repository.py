@@ -37,6 +37,7 @@ from training_kb.keys import (
     feedback_pk,
     parse_edge_sk,
     parse_pk,
+    parse_step_pk,
     proc_pk,
     release_pk,
     rule_pk,
@@ -52,6 +53,7 @@ from training_kb.models import (
     Feedback,
     ProvenWorkflow,
     Release,
+    RuleStatus,
     StrictModel,
     Ticket,
     Tutorial,
@@ -483,6 +485,27 @@ class Repository:
 
     # --- 六個固定讀取 ---
 
+    def get_steps(self, version_id: str) -> list[TutorialStep]:
+        """一個版本的全部步驟，依 `number` 升序。
+
+        STEP 沒有 metadata item——它的 item 本身就是 `REFERENCES#<FEATURE PK>` 邊，所以這是
+        唯一要傳 `meta_only=False` 的呼叫點。`tutorial_version` 與 `number` 一律用
+        `parse_step_pk`（`step_pk` 的反函式）從 PK 還原、`feature_id` 由邊的 `target` 還原：
+        鍵是權威，item 上就算另外存了同名屬性也不會分岔（00A §3.6）。每一步的 PK 都不同，
+        沒辦法用單一 PK Query 一次拿整版，設計 §10 已接受 MVP 對基表分頁 Scan 這個取捨；
+        應有步驟數的權威是 S3 全文的 `parse_markdown().steps`，**不可以**為了省掉 Scan
+        在 item 上加 `step_count`。
+        """
+        steps: list[TutorialStep] = []
+        for item in self.scan_entity("STEP", meta_only=False):
+            owner, number = parse_step_pk(str(item["PK"]))
+            if owner != version_id:
+                continue
+            payload: DynamoItem = {**item, "tutorial_version": owner, "number": number,
+                                   "feature_id": parse_pk(str(item["target"]))[1]}
+            steps.append(item_to_model(payload, TutorialStep))
+        return sorted(steps, key=lambda step: step.number)
+
     def list_feedback_of_version(self, version_id: str) -> list[Feedback]:
         """某版的全部回饋，依 ID 升序（設計 §10 六問之一）。
 
@@ -504,3 +527,34 @@ class Repository:
                 raise PermanentError(f"feedback edge has no base item: {pk}")
             found.append(item)
         return sorted(found, key=lambda item: item.id)
+
+    def _scan_models[M: StrictModel](self, entity: str, model: type[M],
+                                     key: Callable[[M], Any], **equals: str) -> list[M]:
+        """`scan_entity` 預設值 + raw item 等值過濾 + `item_to_model` + 穩定排序。
+
+        `equals` 直接比對 raw item 的屬性字串，不先轉 model：為了篩掉九成資料而建一堆物件
+        沒有必要。`meta_only` 用預設的 `True`，所以同前綴的關係邊不會進來。
+        """
+        rows = [row for row in self.scan_entity(entity)
+                if all(row.get(name) == value for name, value in equals.items())]
+        return sorted((item_to_model(row, model) for row in rows), key=key)
+
+    def list_views_of_version(self, version_id: str) -> list[TutorialView]:
+        """某版的全部瀏覽紀錄，依時間再依 user 排序（設計 §10：VIEW 靠欄位掃描，不建邊）。"""
+        return self._scan_models("VIEW", TutorialView, lambda view: (view.ts, view.user),
+                                 tutorial_version=version_id)
+
+    def list_tickets(self, project_id: str) -> list[Ticket]:
+        """某個專案的全部工單，依 ID 升序；別的專案不入選。"""
+        return self._scan_models("TICKET", Ticket, lambda ticket: ticket.id,
+                                 project_id=project_id)
+
+    def list_rules(self, status: RuleStatus | None = None) -> list[AuthoringRule]:
+        """全部撰寫規則，依 `rule_id` 升序；`status` 有值時只留那個狀態。"""
+        rules = self._scan_models("RULE", AuthoringRule, lambda rule: rule.rule_id)
+        return rules if status is None else [rule for rule in rules if rule.status == status]
+
+    def list_procs(self, domain: str, adapter: str) -> list[ProvenWorkflow]:
+        """某個 domain＋adapter 的全部既有流程，依 signature 升序；兩個條件都要相等。"""
+        return self._scan_models("PROC", ProvenWorkflow, lambda proc: proc.signature,
+                                 domain=domain, adapter=adapter)

@@ -5,6 +5,10 @@
 一致）。`page_size` 是測試鉤子：有值時每個請求加 `Limit`，正式程式不設定它。
 """
 
+import ast
+from pathlib import Path
+
+from training_kb import repository
 from training_kb.repository import Repository
 
 
@@ -70,3 +74,16 @@ def test_page_size_adds_limit_to_every_request_and_is_off_by_default() -> None:
     assert Repository(default).query_pk("VERSION#prepare-meeting@v1", consistent=False) == []
     assert "Limit" not in default.requests[0]
     assert default.requests[0]["ConsistentRead"] is False
+
+
+def test_query_layer_never_imports_the_model_writer() -> None:
+    """GPH Rule 3（相關，primary 在 Phase 27）：正常關係遍歷不呼叫 AI。
+
+    這裡用 import 邊界佐證：`repository` 連 `writing`／Bedrock 都沒有 import，所以查詢層
+    不可能在遍歷途中呼叫模型。
+    """
+    tree = ast.parse(Path(repository.__file__).read_text(encoding="utf-8"))
+    modules = {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    modules |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                for alias in node.names}
+    assert not [name for name in modules if "writing" in name or "bedrock" in name]
