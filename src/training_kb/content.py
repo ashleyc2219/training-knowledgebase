@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from training_kb.errors import ContentError, CoordinationError, ObjectAlreadyExists
+from training_kb.keys import feature_pk, rule_pk, step_pk, version_pk
 from training_kb.models import Feature, StepDraft, StepType, TutorialContent, TutorialVersion
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import Repository, item_to_model
@@ -593,7 +594,30 @@ def create_version(plan: VersionPlan, content: TutorialContent,
 
 
 def _write_edges(plan: VersionPlan, content: TutorialContent, repository: Repository) -> None:
-    """三種關係邊；Task 2 才真的寫出來。"""
+    """三種關係邊，順序固定：STEP 的 `REFERENCES`、`SUPERSEDES`、每條規則的 `APPLIED_TO`。
+
+    **STEP 的 `attrs` 只放 `type` 與 `text`**：`entity` 是 `put_edge` 自己從 PK 前綴算出的保留
+    屬性（多傳會被丟 `PermanentError`），`tutorial_version` 與 `number` 由
+    `STEP#<version_id>#<n>` 還原、`feature_id` 由 `target` 還原，所以 Phase 08 的
+    `get_steps` 讀得回完整的 `TutorialStep`（00A §3.6）。STEP 沒有 `META` item——這筆邊
+    本身就是它。
+
+    `APPLIED_TO` **只依 `plan.rules_applied` 產生**，不從前一版繼承：沿用原文不算套用
+    （F29、D17），`VERSION.rules_applied` 才是權威，這條邊隨時可由 Phase 28 重建。
+
+    邊的內容完全由 `plan` 與 `content` 決定，重送時重寫同一筆邊會得到一模一樣的 item，
+    所以這裡用無條件 `put_edge`，不需要條件寫入。
+    """
+    version_key = version_pk(plan.version_id)
+    for step in content.steps:
+        repository.put_edge(
+            step_pk(plan.version_id, step.number), "REFERENCES", feature_pk(step.feature_id),
+            {"type": str(step.type), "text": step.text},
+        )
+    if plan.supersedes is not None:
+        repository.put_edge(version_key, "SUPERSEDES", version_pk(plan.supersedes))
+    for rule_id in plan.rules_applied:
+        repository.put_edge(rule_pk(rule_id), "APPLIED_TO", version_key)
 
 
 def _missing_parts(version_id: str, repository: Repository) -> list[str]:

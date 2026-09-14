@@ -227,3 +227,67 @@ def test_published_version_is_never_overwritten(published_v1: Repository) -> Non
     assert version.published_at == NOW
     # 一條邊都沒有多寫出來：`VERSION#…@v1` 上只有 metadata item。
     assert [str(item["SK"]) for item in repository.query_pk(version_pk(V1))] == ["META"]
+
+
+# --- Task 2：三種關係邊與 target 一致 ---------------------------------------
+
+
+def test_step_reference_edge_target_matches_sk(published_v1: Repository) -> None:
+    """`建立教學版本` Rule 8、Rule 10：STEP 本身就是邊，`target` 等於 SK 的終點。"""
+    repository = published_v1
+    create_version(version_plan(V2, **V2_PLAN), four_step_content(), repository)
+    rows = repository.query_pk(step_pk(V2, 3), consistent=True)
+    assert len(rows) == 1
+    assert rows[0]["SK"] == "REFERENCES#FEATURE#Prepare"
+    assert rows[0]["target"] == "FEATURE#Prepare"
+    assert rows[0]["entity"] == "STEP"
+    assert set(rows[0]) == {"PK", "SK", "target", "entity", "type", "text"}
+
+
+def test_steps_round_trip_through_get_steps(published_v1: Repository) -> None:
+    """寫入端少寫的欄位，讀取端必須算得出來（00A §3.6）：四步都還原得回 `TutorialStep`。"""
+    repository = published_v1
+    create_version(version_plan(V2, **V2_PLAN), four_step_content(), repository)
+    steps = repository.get_steps(V2)
+    assert [step.number for step in steps] == [1, 2, 3, 4]
+    assert [str(step.type) for step in steps] == list(_TYPES)
+    assert [step.feature_id for step in steps] == [FEATURE] * 4
+    assert [step.tutorial_version for step in steps] == [V2] * 4
+    assert steps[2].text == _TEXTS[2]
+
+
+def test_supersedes_and_applied_to_edges_exist(published_v1: Repository) -> None:
+    """`建立教學版本` Rule 3：`SUPERSEDES` 指向前一版；`APPLIED_TO` 只記本次的規則（F29）。"""
+    repository = published_v1
+    create_version(version_plan(V2, **V2_PLAN), four_step_content(), repository)
+    supersedes = repository.list_edges(version_pk(V2), "SUPERSEDES")
+    assert [(row["SK"], row["target"]) for row in supersedes] == [
+        (f"SUPERSEDES#{version_pk(V1)}", version_pk(V1))]
+    applied = repository.list_edges("RULE#R-007", "APPLIED_TO")
+    assert [(row["SK"], row["target"]) for row in applied] == [
+        (f"APPLIED_TO#{version_pk(V2)}", version_pk(V2))]
+    version = repository.get_version(V2)
+    assert version is not None
+    assert version.rules_applied == ["R-007"]
+
+
+def test_first_version_has_no_supersedes_edge(seeded_feature: Repository) -> None:
+    """v1 沒有前一版：`VERSION#…@v1` 上只有 metadata item，`v1.diff` 是 0 位元組。"""
+    repository = seeded_feature
+    create_version(version_plan(V1, number=1, supersedes=None, reason="gap:c12"),
+                   four_step_content(), repository)
+    assert [str(item["SK"]) for item in repository.query_pk(version_pk(V1))] == ["META"]
+    assert repository.get_object(diff_key(SLUG, 1)) == b""
+
+
+def test_the_same_plan_twice_does_not_add_a_version(published_v1: Repository) -> None:
+    """§8 Boundary：同 plan 第二次呼叫不新增版本、不重建 VERSION item，仍然回完整的版本。"""
+    repository = published_v1
+    plan = version_plan(V2, **V2_PLAN)
+    first = create_version(plan, four_step_content(), repository)
+    revision = repository.revision_of(version_pk(V2))
+    second = create_version(plan, four_step_content(), repository)
+    assert second == first
+    assert repository.revision_of(version_pk(V2)) == revision
+    assert sorted(str(item["PK"]) for item in repository.scan_entity("VERSION")) == [
+        version_pk(V1), version_pk(V2)]
