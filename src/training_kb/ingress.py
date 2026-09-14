@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from training_kb.clock import parse_iso
 from training_kb.errors import IngressError, PermanentError
-from training_kb.models import Ticket, TicketSource
+from training_kb.models import Release, ReleaseKind, ReleaseSource, Ticket, TicketSource
 from training_kb.operations import Acceptance
 from training_kb.pipelines.common import JSONValue
 
@@ -79,6 +79,8 @@ def assert_time_left(deadline: float, *, step: str) -> None:
 # --- 3. 正規化（Phase 31）-----------------------------------------------------
 
 TICKET_REQUIRED = ("id", "source", "text", "author", "ts", "project_id")
+RELEASE_REQUIRED = ("id", "source", "feature", "kind", "evidence", "ts")
+RENAMED_REQUIRED = ("old_name", "new_name")
 ANALYSIS_FIELDS = ("cluster_id", "feature_ids", "embedding")
 """接入不得預填的分析欄位：分群、Feature 命中與向量都由後面的 pipeline 補。"""
 
@@ -106,6 +108,18 @@ def _parsed_ts(payload: Mapping[str, object]) -> datetime:
     if parsed.microsecond:  # 靜默截斷會讓以時間入鍵的計算悄悄改變答案
         raise IngressError("ts 必須是整秒", ("ts",))
     return parsed
+
+
+def _optional_string(payload: Mapping[str, object], key: str) -> str | None:
+    """「必填但值可為 null」的欄位：沒出現或給 null 一律 `None`，給了非字串就是接入錯誤。
+
+    `RELEASE_REQUIRED`（00A §6.8）不含這三個欄位，所以這裡只管型別，不要求 key 一定出現：
+    `changed`／`removed` 事件本來就沒有名稱欄位，`changelog` 來源也沒有上游事件識別碼。
+    """
+    value = payload.get(key)
+    if value is None or isinstance(value, str):
+        return value
+    raise IngressError(f"{key} 必須是字串或 null", (key,))
 
 
 def _invalid_fields(error: ValidationError) -> tuple[str, ...]:
@@ -142,6 +156,35 @@ def validate_ticket(payload: Mapping[str, object]) -> Ticket:
         )
     except ValidationError as error:
         raise IngressError("Ticket 欄位值不合法", _invalid_fields(error)) from error
+
+
+def validate_release(payload: Mapping[str, object]) -> Release:
+    """候選欄位 → canonical `Release`；`feature` 與 `kind` 在接入當下就要解析完成。
+
+    `source_event_id`／`old_name`／`new_name` 是「必填但可為 null」，一律用 `payload.get(...)`：
+    `changed`／`removed` 事件沒有名稱欄位，`payload["old_name"]` 會丟 `KeyError`，
+    那是程式錯誤不該變成接入錯誤（00A §5.1「模型寬、入口嚴」）。
+    """
+    fields = missing_nonempty_strings(payload, RELEASE_REQUIRED)
+    if payload.get("kind") == ReleaseKind.RENAMED:  # StrEnum 成員等於自己的字串值
+        fields += missing_nonempty_strings(payload, RENAMED_REQUIRED)
+    if fields:
+        raise IngressError("Release 欄位不完整", fields)
+    if payload["source"] not in set(ReleaseSource):
+        raise IngressError("Release source 不合法", ("source",))
+    if payload["kind"] not in set(ReleaseKind):
+        raise IngressError("Release kind 不合法", ("kind",))
+    try:
+        return Release(
+            id=str(payload["id"]), source_event_id=_optional_string(payload, "source_event_id"),
+            source=ReleaseSource(str(payload["source"])), feature=str(payload["feature"]),
+            kind=ReleaseKind(str(payload["kind"])), old_name=_optional_string(payload, "old_name"),
+            new_name=_optional_string(payload, "new_name"),
+            evidence=str(payload["evidence"]),
+            ts=_parsed_ts(payload),
+        )
+    except ValidationError as error:
+        raise IngressError("Release 欄位值不合法", _invalid_fields(error)) from error
 
 
 # --- 4. 接線點（Phase 30 stub → Phase 32 接受端 → Phase 37 完整三層）----------
