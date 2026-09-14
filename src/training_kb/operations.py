@@ -384,9 +384,15 @@ class OperationCoordinator:
         UTC 字串，字典序等於時間序，`to_iso(now) < expires_at` 就是「還沒到期」。到期之後靠
         `expected_revision` 決勝負：兩個 worker 同時判定過期也只有一個寫得進去。`ttl` 屬性
         只給 DynamoDB 長期清理，官方說明是到期後「typically within a few days」才刪。
+
+        **空白 owner 一律拒絕。** `release_lease` 拿 `owner=""` 當「已釋放」的標記，所以
+        空白 owner 寫下去等於一把誰都能立刻覆蓋、持有者自己也放不掉的租約。與
+        `ttl_seconds` 同一類「確定不合法」，用 `PermanentError`，一個 item 都不寫。
         """
         if ttl_seconds <= 0:
             raise PermanentError(f"ttl_seconds must be positive: {ttl_seconds}")
+        if not owner.strip():
+            raise PermanentError("lease owner must not be blank")
         pk = f"{LEASE_PREFIX}{scope}"
         fields: dict[str, DynamoValue] = {
             "owner": owner,

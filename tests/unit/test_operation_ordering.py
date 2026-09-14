@@ -248,3 +248,15 @@ def test_a_first_time_accept_still_fails_when_the_counter_is_too_hot(
     with pytest.raises(CoordinationError, match=str(SEQUENCE_ATTEMPTS)):
         coordinator.accept(AcceptOperation("op-release-r_99", "release", "r_99", "demo", BASE))
     assert "OPS#op-release-r_99" not in repository.items
+
+
+def test_a_blank_lease_owner_is_rejected_before_any_write(
+    coordinator: OperationCoordinator, repository: _MemoryRepository, clock: _Clock
+) -> None:
+    """`release_lease` 用 `owner=""` 表示「已釋放」，所以空白 owner 會造出一把
+    任何人都能立刻覆蓋、也放不掉的租約——那不是租約。與 `ttl_seconds` 同樣是
+    「確定不合法」，用 `PermanentError`，而且一個 item 都不寫。"""
+    for owner in ("", "  ", "\t\n"):
+        with pytest.raises(PermanentError, match="must not be blank"):
+            coordinator.acquire_lease("TUTORIAL#x", owner, ttl_seconds=30, now=clock.at(0))
+    assert repository.items == {}
