@@ -672,6 +672,20 @@ def verify_version_complete(version_id: str, repository: Repository) -> bool:
     return not _missing_parts(version_id, repository)
 
 
+def _expected_sk(relation: str, target: str) -> str | None:
+    """`edge_sk` 的安全版：`target` 不是合法 PK（例如手改出來的 `FEATURE#`）時回 `None`。
+
+    **核對是關卡，不是程式錯誤回報點。** 損壞的邊只可能來自 `put_edge` 以外的路徑（維護
+    腳本、主控台手改），它要讓 `verify_version_complete` 回 `False`，不能變成 `ValueError`
+    炸給 Phase 24——那會讓「不可發布」變成「發布流程當掉」。`PermanentError` 類的程式錯誤
+    不在這裡吞，只有鍵格式的 `ValueError` 被收斂成「問題」。
+    """
+    try:
+        return edge_sk(relation, target)
+    except ValueError:
+        return None
+
+
 def _exact_edge_problems(repository: Repository, pk: str, relation: str,
                          expected: Sequence[str]) -> list[str]:
     """某個起點上的某種邊必須**恰好**等於 `expected`：缺的是問題，**多的也是問題**。
@@ -683,7 +697,7 @@ def _exact_edge_problems(repository: Repository, pk: str, relation: str,
     problems: list[str] = []
     for row in repository.query_pk(pk, sk_prefix=f"{relation}#", consistent=True):
         sort_key, target = str(row.get("SK", "")), str(row.get("target", ""))
-        if sort_key != edge_sk(relation, target):
+        if sort_key != _expected_sk(relation, target):
             problems.append(f"{pk} 的 {relation} 邊 SK 與 target 不一致：{sort_key}")
             continue
         endpoints.append(target)
@@ -748,7 +762,7 @@ def _step_edge_problems(version_id: str, steps: Sequence[StepDraft],
             problems.append(f"第 {step.number} 步應恰好一條引用邊，實際 {len(rows)} 條")
             continue
         sort_key, target = str(rows[0].get("SK", "")), str(rows[0].get("target", ""))
-        if not target.startswith("FEATURE#") or sort_key != edge_sk("REFERENCES", target):
+        if not target.startswith("FEATURE#") or sort_key != _expected_sk("REFERENCES", target):
             problems.append(f"第 {step.number} 步的 SK 與 target 不一致：{sort_key}")
         elif repository.get_feature(parse_pk(target)[1]) is None:
             problems.append(f"第 {step.number} 步引用的 Feature 不存在：{target}")
@@ -785,9 +799,14 @@ def _missing_parts(version_id: str, repository: Repository) -> list[str]:
     if not repository.object_exists(df_key):
         problems.append(f"缺少 S3 差異檔 {df_key}")
     steps = parse_markdown(body.decode("utf-8")).steps
-    problems += _step_edge_problems(version_id, steps, repository)
-    problems += _extra_step_problems(version_id, steps, repository)
-    expected_base = [] if version.supersedes is None else [version_pk(version.supersedes)]
-    problems += _exact_edge_problems(repository, version_key, "SUPERSEDES", expected_base)
-    problems += _applied_to_problems(version_id, version.rules_applied, repository)
+    try:
+        problems += _step_edge_problems(version_id, steps, repository)
+        problems += _extra_step_problems(version_id, steps, repository)
+        expected_base = [] if version.supersedes is None else [version_pk(version.supersedes)]
+        problems += _exact_edge_problems(repository, version_key, "SUPERSEDES", expected_base)
+        problems += _applied_to_problems(version_id, version.rules_applied, repository)
+    except ValueError as error:
+        # 鍵或 item 損壞（`parse_step_pk`、`parse_pk`，以及 pydantic 的 `ValidationError`——
+        # 它也是 `ValueError`）。收斂成一條「問題」而不是往外丟：關卡的答案只有齊全／不齊全。
+        problems.append(f"關係資料損壞，無法核對：{error}")
     return problems

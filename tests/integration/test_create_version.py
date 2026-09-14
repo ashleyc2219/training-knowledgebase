@@ -187,6 +187,17 @@ class ReadyVersion:
         """同一版指向兩個前一版：版本鏈分岔，追溯會得到兩個答案。"""
         self.repository.put_edge(version_pk(V2), "SUPERSEDES", version_pk("other-topic@v1"))
 
+    def corrupt_step_target(self) -> None:
+        """把第 3 步的 `target` 改成損壞值 `FEATURE#`（`put_edge` 寫不出來，只能直接塞 item）。
+
+        核對是關卡，不是程式錯誤回報點：這種只可能來自外部手改的資料要讓
+        `verify_version_complete` 回 `False`，不能丟 `ValueError` 炸給 Phase 24。
+        """
+        self._delete_item(step_pk(V2, 3), f"REFERENCES#{feature_pk(FEATURE)}")
+        self.table.put_item(Item={"PK": step_pk(V2, 3), "SK": "REFERENCES#FEATURE#",
+                                  "target": "FEATURE#", "entity": "STEP",
+                                  "type": "click_ui", "text": _TEXTS[2]})
+
     def add_second_step_edge(self) -> None:
         """同一步再指向另一個 Feature：`get_steps` 會讀出兩步，關係就不完整了。"""
         self.repository.put_meta(Feature(feature_id="Summary", name="Summary", aliases=[],

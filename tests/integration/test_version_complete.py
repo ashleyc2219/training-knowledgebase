@@ -15,6 +15,7 @@ import pytest
 from test_create_version import (
     SLUG,
     V1,
+    V2_PLAN,
     ReadyVersion,
     build_ready_v2,
     fail_next,
@@ -24,7 +25,7 @@ from test_create_version import (
 )
 
 from training_kb.content import create_version, markdown_key, verify_version_complete
-from training_kb.errors import TransientError
+from training_kb.errors import ContentError, TransientError
 from training_kb.keys import version_pk
 from training_kb.repository import Repository
 
@@ -87,6 +88,14 @@ def test_extra_relations_are_not_complete(ready_v2: ReadyVersion, break_it: str)
     """
     getattr(ready_v2, break_it)()
     assert verify_version_complete(V2, ready_v2.repository) is False
+
+
+def test_corrupt_edge_target_is_a_problem_not_an_exception(ready_v2: ReadyVersion) -> None:
+    """損壞的 `target` 讓核對回 `False`，而不是把 `ValueError` 丟給 Phase 24。"""
+    ready_v2.corrupt_step_target()
+    assert verify_version_complete(V2, ready_v2.repository) is False
+    with pytest.raises(ContentError, match="版本核對失敗"):
+        create_version(version_plan(V2, **V2_PLAN), four_step_content(), ready_v2.repository)
 
 
 def test_missing_version_item_is_not_complete(seeded_feature: Repository) -> None:
