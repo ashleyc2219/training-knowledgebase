@@ -11,13 +11,7 @@ from itertools import permutations
 import pytest
 
 from training_kb.models import ProcStatus, ProvenWorkflow
-from training_kb.rote import (
-    JACCARD_THRESHOLD,
-    RawEvent,
-    jaccard,
-    pick_layer2,
-    replayable,
-)
+from training_kb.rote import JACCARD_THRESHOLD, RawEvent, jaccard, pick_layer2, replayable
 
 NOW = datetime(2026, 9, 12, tzinfo=UTC)
 ANY_SIG = "0123456789abcdef"  # signature 必須是 16 個小寫 hex（Phase 04 的不變條件）
