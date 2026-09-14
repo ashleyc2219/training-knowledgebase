@@ -318,20 +318,27 @@ UNPUBLISHED_MARKER = b'data-published="false"'
 
 
 def _put_public_object(repository: Repository, relative: str, body: bytes,
-                       content_type: str) -> None:
-    """版本頁與 diff 副本採條件寫入：同 key 已存在就比對 bytes。
+                       content_type: str, *, if_none_match: bool = True) -> None:
+    """**寫進 `site/` 的唯一出口**；寫出去之前一律先驗 `UNPUBLISHED_MARKER`。
 
-    完全相同代表同 operation 重送，靜靜通過；不同代表兩次不同內容搶同一個公開 key，
-    丟 `PublishError` 並**保留既有物件**。條件交給 S3 判斷（`if_none_match=True`），
-    不「先查再寫」——那會在兩個請求之間留下空窗。
+    帶「未發布」標記的 bytes 不得進 `site/`（00A §3.8）。這是 runtime 守門，不是測試斷言
+    ——`promote_site_objects` 是公開函式，Phase 48／52／59 可以不經 `Publisher.commit`
+    直接呼叫它，而兩個索引頁也一樣要過這一關（不能因為它們是可重建投影就繞過去）。
 
-    寫出去之前先驗 `UNPUBLISHED_MARKER`：帶「未發布」標記的 bytes 一律不得進 `site/`
-    （00A §3.8）。這是 runtime 守門，不是測試斷言——`promote_site_objects` 是公開函式，
-    Phase 48／52／59 可以不經 `Publisher.commit` 直接呼叫它。
+    版本頁與 diff 副本是一次性產物，採條件寫入（`if_none_match=True`）：同 key 已存在就
+    比對 bytes，完全相同代表同 operation 重送，靜靜通過；不同代表兩次不同內容搶同一個公開
+    key，丟 `PublishError` 並**保留既有物件**。條件交給 S3 判斷，不「先查再寫」——那會在
+    兩個請求之間留下空窗。
+
+    `if_none_match=False` 是索引頁的覆寫語意：內容完全由 DynamoDB 決定，重建多少次都一樣，
+    所以既有物件本來就該被新的投影蓋掉，沒有「兩份不同內容搶同一個 key」的問題。
     """
     key = _public_key(relative)
     if UNPUBLISHED_MARKER in body:
         raise PublishError(f"未發布標記不得進公開前綴，停止寫入：{key}")
+    if not if_none_match:
+        repository.put_object(key, body, content_type, if_none_match=False)
+        return
     try:
         repository.put_object(key, body, content_type, if_none_match=True)
     except ObjectAlreadyExists:
@@ -678,8 +685,9 @@ class Publisher:
         self._put_index(site_index_key(), self._renderer.render_site_index(tutorials))
 
     def _put_index(self, relative: str, page: str) -> None:
-        self._repository.put_object(_public_key(relative), page.encode("utf-8"),
-                                    SITE_PAGE_CONTENT_TYPE, if_none_match=False)
+        """兩個索引頁的唯一寫入點；覆寫語意，但守門與版本頁同一個 `_put_public_object`。"""
+        _put_public_object(self._repository, relative, page.encode("utf-8"),
+                           SITE_PAGE_CONTENT_TYPE, if_none_match=False)
 
     def _models[M: TutorialVersion | Tutorial](self, entity: str,
                                                model: type[M]) -> list[M]:

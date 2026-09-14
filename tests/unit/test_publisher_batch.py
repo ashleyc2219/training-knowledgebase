@@ -413,6 +413,23 @@ def test_pending_promote_list_stays_in_the_private_prefix(
     assert item is not None and "site_keys" not in item and "pending_promote" not in item
 
 
+def test_index_pages_go_through_the_same_unpublished_marker_guard(
+        publisher: Publisher, repo: BatchRepository,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """兩個索引頁與版本頁走**同一道** `UNPUBLISHED_MARKER` 守門（00A §3.8）。
+
+    索引是可重建投影，所以仍然是覆寫語意（`if_none_match=False`）；但「帶未發布標記的
+    bytes 不得進 `site/`」是 runtime 守門，不因為寫的是索引就繞過去（Phase 25 review
+    便宜修正 A-minor 1）。
+    """
+    monkeypatch.setattr(publisher._renderer, "render_tutorial_index",
+                        lambda *_args, **_kwargs: '<article data-published="false"></article>')
+    prepared = publisher.prepare(batch_request(), now=NOW)
+    with pytest.raises(PublishError, match="未發布標記不得進公開前綴"):
+        publisher.commit(prepared, now=NOW)
+    assert [key for key in site_keys(repo) if key.endswith("index.html")] == []
+
+
 def test_promote_site_objects_returns_public_keys_in_request_order(
         publisher: Publisher, repo: BatchRepository) -> None:
     """每篇兩個公開物件（版本頁先、公開 diff 副本後，D-54），順序同 `version_ids`。"""
