@@ -227,10 +227,15 @@ class ScriptedWriter:
         self.calls: list[dict[str, Any]] = []
 
     def _plan(self, text: str) -> tuple[str, str]:
+        """從 prompt 的 `<source_data>` 讀 adapter。
+
+        比對的是 `"adapter": "<名稱>"` 這個鍵值對而不是裸名稱：`<allowed_tools>` 裡有
+        `parse_github_issue`，用子字串比對會讓 PR 事件也命中 `github_issue`。
+        """
         for adapter, plan in AGENT_PLAN.items():
-            if adapter in text:
+            if f'"adapter": "{adapter}"' in text:
                 return plan
-        raise AssertionError(f"ScriptedWriter 認不出這個 prompt 的 adapter: {text[:80]}")
+        raise AssertionError(f"ScriptedWriter 認不出這個 prompt 的 adapter: {text[:120]}")
 
     def converse_with_tools(self, system: str, messages: Sequence[Mapping[str, Any]],
                             tools: Sequence[Mapping[str, Any]], *,
@@ -349,7 +354,9 @@ def rote_deps(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., FakeRot
                             fail_at=fail_at, execution_arn=execution_arn)
         created.append(deps)
         ingress._reset_wiring()
+        ingress._reset_rote_deps()
         monkeypatch.setattr(ingress, "_wiring", lambda: deps.wiring)
+        monkeypatch.setattr(ingress, "_rote_deps", lambda: deps)
         return deps
 
     real_failure, real_success = rote.on_replay_failure, rote.on_replay_success
@@ -371,8 +378,14 @@ def rote_deps(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., FakeRot
             deps.commit_calls += 1
         return real_commit(self, *args, **kwargs)
 
+    def no_real_aws(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("測試忘了注入 _rote_deps／_wiring：這條路徑會連到真實 AWS")
+
     monkeypatch.setattr(rote, "on_replay_failure", spy_failure)
     monkeypatch.setattr(rote, "on_replay_success", spy_success)
     monkeypatch.setattr(rote.Rote, "commit_success", spy_commit)
+    monkeypatch.setattr(ingress, "_build_rote_deps", no_real_aws)
+    monkeypatch.setattr(ingress, "_build_wiring", no_real_aws)
     yield make
     ingress._reset_wiring()
+    ingress._reset_rote_deps()

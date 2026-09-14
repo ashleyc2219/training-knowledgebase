@@ -505,13 +505,23 @@ class NormalizationResult:
 
 
 class RoteDeps(Protocol):
-    """Rote 需要的五個相依（結構型 Protocol，fake 物件直接滿足即可，可多帶測試專用屬性）。"""
+    """Rote 需要的五個相依（結構型 Protocol，fake 物件直接滿足即可，可多帶測試專用屬性）。
 
-    repository: Repository
-    operations: OperationCoordinator
-    registry: ToolRegistry
-    writer: Writer
-    now: Callable[[], datetime]
+    五個成員都宣告成**唯讀**（`@property`）而不是可寫變數：Rote 只讀不寫，寫成可寫變數會
+    讓 `frozen=True` 的 dataclass（例如 `ingress.RoteWiring`）無法滿足這個 Protocol。
+    普通的實例屬性、`@property` 與 bound method 三種形狀都通得過。
+    """
+
+    @property
+    def repository(self) -> Repository: ...
+    @property
+    def operations(self) -> OperationCoordinator: ...
+    @property
+    def registry(self) -> ToolRegistry: ...
+    @property
+    def writer(self) -> Writer: ...
+    @property
+    def now(self) -> Callable[[], datetime]: ...
 
 
 class Rote:

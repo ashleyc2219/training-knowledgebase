@@ -7,7 +7,8 @@ owner 是 Phase 30；P31（正規化）、P32（接受／啟動）、P37（Rote 
 2. 整體期限（P30）—— webhook 的八秒 deadline，下游每一步開始前呼叫 `assert_time_left`。
 3. 正規化（P31）—— 候選欄位轉成 canonical `Ticket`／`Release`，是唯一的 model 邊界。
 4. 接受與啟動（P32）—— canonical 事件的永久去重、私有輸入與 pipeline 啟動。
-5. 接線點（P30 stub → P32 接受端 → P37 完整三層）。
+5. 接線點（P30 stub → P32 接受端 → P37 完整三層）—— `trace_operation_id`、`_rote_deps`、
+   `normalize_then_accept`。
 
 log 不得出現原始 body、簽名或 secret（00A §3.8）。
 """
@@ -17,10 +18,11 @@ import hmac
 import json
 import re
 import string
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
+from typing import TYPE_CHECKING
 
 import boto3
 from pydantic import ValidationError
@@ -50,6 +52,11 @@ from training_kb.pipeline_starter import (
 )
 from training_kb.pipelines.common import JSONValue, PipelineName
 from training_kb.repository import Repository
+from training_kb.writing.client import Writer
+
+if TYPE_CHECKING:                       # 只給型別檢查用，執行期不 import（見 `_build_rote_deps`）
+    from training_kb.adapters import ToolRegistry
+    from training_kb.rote import RoteDeps
 
 # --- 1. 驗簽（Phase 30）-------------------------------------------------------
 
@@ -426,34 +433,115 @@ def _start_once(starter: PipelineStarter, operations: OperationCoordinator,
 
 # --- 5. 接線點（Phase 30 stub → Phase 32 接受端 → Phase 37 完整三層）----------
 
+TRACE_ID_PREFIX = "op-ingress-"
+DELIVERY_HEADERS = ("x-github-delivery", "x-tkb-delivery")
+"""哪個 header 帶「這次投遞」的識別碼；GitHub 是 `X-GitHub-Delivery`，手動匯入由 P42 提供。"""
+
+
+def trace_operation_id(headers: Mapping[str, str]) -> str:
+    """正規化之前的臨時 operation id：`op-ingress-<來源投遞識別碼>`（00A §3.3）。
+
+    這個值**只**給 `CallTrace` 與模型輸出 ref 用：它不經 `operation_id_for`、不會寫成
+    `OPS#` item，也**不是**去重鍵——永久去重鍵是 `Acceptance.operation_id`
+    （`op-<kind>-<canonical_id>`），正規化成功之後才拿得到。
+
+    沒有投遞識別碼時回固定的 `op-ingress-unknown`，**不自己造隨機值**：trace 的用途是
+    對回來源的那一次投遞，隨機值只會讓它對不回去。`headers` 一律是小寫鍵（P30）。
+    """
+    for name in DELIVERY_HEADERS:
+        value = headers.get(name, "").strip()
+        if value:
+            return f"{TRACE_ID_PREFIX}{value}"
+    return f"{TRACE_ID_PREFIX}unknown"
+
+
+@dataclass(frozen=True)
+class RoteWiring:
+    """`Rote` 需要的五個相依；結構上滿足 `rote.RoteDeps`（00A §6.8 的結構型 Protocol）。"""
+
+    repository: Repository
+    operations: OperationCoordinator
+    registry: "ToolRegistry"
+    writer: Writer
+    now: Callable[[], datetime]
+
+
+_ROTE_DEPS: "RoteDeps | None" = None
+
+
+def _rote_deps() -> "RoteDeps":
+    """Rote 的相依（模組層工廠，快取一次）；測試 `monkeypatch.setattr` 覆寫它注入 fake。"""
+    global _ROTE_DEPS
+    if _ROTE_DEPS is None:
+        _ROTE_DEPS = _build_rote_deps(_wiring())
+    return _ROTE_DEPS
+
+
+def _reset_rote_deps() -> None:
+    """丟掉快取的相依，下一次 `_rote_deps()` 會重建（與 `_reset_wiring` 同一個理由）。"""
+    global _ROTE_DEPS
+    _ROTE_DEPS = None
+
+
+def _build_rote_deps(wiring: Wiring) -> "RoteDeps":
+    """建立連真實 AWS／Bedrock 的五個相依；**只有第一次呼叫 `_rote_deps()` 時執行**。
+
+    `adapters` 與 `writing` 都在**函式內** import：Phase 36 的 `adapters.validate` 反向
+    import 本模組，本模組若在模組層 import `adapters` 就會變成循環 import
+    （controller 裁決 2026-09-14）。`rote.py` 則是模組層 import 本模組，所以
+    `normalize_then_accept` 也用函式內 import 取得 `Rote`。
+
+    **O5 未通過時 `generation_model_id` 是 `None`**：`BedrockWriter` 會在真的要呼叫模型時
+    明確失敗，這裡不填猜測的 model ID，也不預先擋掉整條路徑（兩層重放不需要模型）。
+    """
+    from training_kb.adapters import default_registry
+    from training_kb.writing import BedrockWriter, CallTrace
+    from training_kb.writing.client import build_bedrock_client
+
+    settings = wiring.settings
+    client = build_bedrock_client(settings.bedrock_region or settings.aws_region or "")
+    writer = BedrockWriter(client, CallTrace(),
+                           generation_model_id=settings.generation_model_id,
+                           embedding_model_id=settings.embedding_model_id)
+    return RoteWiring(repository=wiring.repository, operations=wiring.operations,
+                      registry=default_registry(), writer=writer, now=now_utc)
+
 
 def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
                           headers: Mapping[str, str], payload: Mapping[str, JSONValue],
-                          deadline: float) -> Acceptance:
-    """Phase 31 正規化 + Phase 32 接受的接線點。
+                          deadline: float) -> list[Acceptance]:
+    """整條接入的**唯一**固定次序：Rote 三層正規化 → `accept_normalized` → `commit_success`。
 
-    本 Phase 只固定呼叫位置與六個 keyword 參數（00A D-60）：`domain`／`adapter` 由可信
-    入口設定提供，**不得從 payload 反推**；`headers` 一律小寫鍵；`deadline` 是 handler
-    進入時算好的絕對時刻，往下傳而不重新計時。
+    六個參數全是 keyword（00A D-60）：`domain`／`adapter`／`event_type`／`headers` 由可信
+    入口設定提供，**不得從 payload 反推**；`deadline` 是 handler 進入時算好的
+    `time.monotonic()` 絕對時刻，往下傳而不重新計時。
 
-    本 Phase 補的是**接受**那半邊：`_normalize` 拿到 canonical 物件後交給
-    `accept_normalized` 依型別分派。正規化那半邊是 Phase 37 的 Rote 三層，在它接上之前
-    `_normalize` 刻意丟 `PermanentError` 而不是回一個假的成功：設計 §14.1 要求驗簽以外的
-    任何一步失敗都回操作失敗，不能「先回成功、之後再背景處理」。
+    **回傳 `list[Acceptance]`（裁決 D-73，2026-09-14）**：F14 一個 PR 改到 n 個功能會展開成
+    n 筆子 Release，每一筆各自 `accept_release`、各自一個 operation
+    （`op-release-…-1`、`…-2`），但共用同一個 `source_event_id`。Ticket 與只改一個功能的
+    PR 都只回長度 1 的 list，所以呼叫端取 `[0]` 就是原本的行為。
+
+    `duplicate` 且已經有 `execution_arn` 代表這筆事件先前就完整跑過：回原 operation 與原
+    結果，**不進 `commit_success`**，不會替同一次事件多記一個 PROC 成功樣本。任何一筆丟
+    例外都原樣往上拋，已成功的那幾筆靠自己的 operation 紀錄留存，不回頭刪除。
     """
     assert_time_left(deadline, step="normalize")
-    normalized = _normalize(domain=domain, adapter=adapter, event_type=event_type,
-                            headers=headers, payload=payload)
-    return accept_normalized(normalized, deadline=deadline)
+    # 函式內 import：`rote.py` 在模組層 import 本模組，這裡反向 import 才不會變成循環。
+    from training_kb.rote import RawEvent, Rote
 
-
-def _normalize(*, domain: str, adapter: str, event_type: str,
-               headers: Mapping[str, str],
-               payload: Mapping[str, JSONValue]) -> Ticket | Release:
-    """留給 Phase 37 的接縫：組 `RawEvent` → `Rote.normalize` → canonical `Ticket`／`Release`。
-
-    四個參數本 Phase 不解讀，只固定它們會被原樣轉交（`domain`／`adapter` 來自可信入口設定，
-    不得從 payload 反推）。接上之前一律明確失敗。
-    """
-    raise PermanentError(f"Phase 37 尚未接線：{domain}/{event_type}（adapter={adapter}）"
-                         f"；headers={len(headers)} 個、payload={len(payload)} 個鍵")
+    event = RawEvent(domain=domain, adapter=adapter, event_type=event_type,
+                     headers=dict(headers), payload=dict(payload))
+    deps = _rote_deps()
+    rote = Rote(deps)
+    accepted: list[Acceptance] = []
+    for result in rote.normalize_all(event, operation_id=trace_operation_id(headers),
+                                     deadline=deadline):
+        acceptance = accept_normalized(result.entity, deadline=deadline)
+        arn = acceptance.record.execution_arn or ""
+        if not (acceptance.status == "duplicate" and arn):   # 重送不重複提交 PROC 成功
+            rote.commit_success(result, operation_id=acceptance.operation_id,
+                                execution_arn=arn, now=deps.now())
+        accepted.append(acceptance)
+    if not accepted:
+        raise PermanentError(f"{domain}/{event_type} 正規化沒有產出任何 canonical 物件")
+    return accepted
