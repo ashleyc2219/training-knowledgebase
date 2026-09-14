@@ -1,5 +1,6 @@
-"""教學內容模組：版號分配（Phase 20）。Phase 21–23 會在同一支檔案追加內容驗證、
-Markdown／diff 與建版，欄位與函式名一律以 00A §6.6 為準。
+"""教學內容模組：版號分配（Phase 20）、內容驗證（Phase 21）、Markdown 與 diff 私有產物
+（Phase 22）、未發布版本與關係完整寫入（Phase 23）都在這一支檔案；Phase 26 之後還會在同一支
+追加退役。欄位與函式名一律以 00A §6.6 為準。
 
 版號屬於 Tutorial，不屬於流程：三條 pipeline（CREATE／UPDATE／REFINE）都只能經
 `allocate_version` 取號，任何 handler 自己拼「current + 1」都會讓同一篇教學出現兩條版本鏈
