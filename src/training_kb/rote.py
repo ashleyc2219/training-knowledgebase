@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from training_kb.errors import PermanentError
 from training_kb.models import ProcStatus, ProvenWorkflow
 from training_kb.pipelines.common import JSONValue
+from training_kb.repository import Repository
 
 # --- 1. 來源脈絡與白名單（Phase 33）-------------------------------------------
 
@@ -149,6 +150,23 @@ def pick_layer2(event: RawEvent, candidates: Sequence[ProvenWorkflow]) -> Proven
     ]
     hits = [pair for pair in hits if pair[0] >= JACCARD_THRESHOLD]
     return min(hits, key=_order_key)[1] if hits else None
+
+
+def find_replayable(event: RawEvent, signature: str, *,
+                    repository: Repository) -> ProvenWorkflow | None:
+    """兩層的唯一順序：Layer 1 精確比對主鍵，不成才查同範圍候選交 Layer 2。
+
+    exact item 存在但 retired 或成功次數不足時**不能直接放棄**：設計 §7.2 的第二層條件是
+    「第一層未命中」，而不可重放就是未命中（決策 D20、Rule 20）。那筆 exact PROC 會在
+    Layer 2 被同一個 `replayable` 濾掉，不需要另外排除它。
+
+    全系統只有這一份順序：Phase 37 的 `Rote._pick_proc` 直接 import 本函式（00A §6.8），
+    不得自己再抄一次這三行。整條路徑只讀不寫，也沒有任何模型呼叫，所以簽名裡沒有 writer。
+    """
+    exact = repository.get_proc(signature)
+    if exact is not None and replayable(exact):
+        return exact
+    return pick_layer2(event, repository.list_procs(event.domain, event.adapter))
 
 
 # --- 4. PROC 生命週期（Phase 35 追加）-----------------------------------------
