@@ -11,10 +11,10 @@
 ## 全域限制
 
 - 唯一主來源是 [Training KB 設計 §7.5、§8.3、§14.1、§18 O3](../../design/training-kb.md)。
-- 前置為 [Phase 24：單篇教學發布提交](./24-Phase24-單篇教學發布提交.md)，未通過時停止；下一階段是 [Phase 26：教學退役與後繼導向](./26-Phase26-教學退役與後繼導向.md)。
+- 前置為 [Phase 24：單篇教學發布提交](./24-Phase24-單篇教學發布提交.md)（已完成，commits `bc12fd3..0a33b2f`）；下一階段是 [Phase 26：教學退役與後繼導向](./26-Phase26-教學退役與後繼導向.md)。
 - 本階段不做：不改 Phase 24 的四個 dataclass 與三個方法簽名、不做退役、不做完整教學站、不決定哪些版本該進同一批（由 [Phase 48](./48-Phase48-Feedback-Review排程流程.md) 與 [Phase 52](./52-Phase52-Release-RETIRE與流程驗收.md) 決定）、不新增第二個 publisher。
 - **不可放寬 F49**（F01–F55 是設計 §19 的功能決策編號；F49＝「整次執行以失敗結束，不發布新版本」）。它不得改寫成「允許部分成功再補」，也不得用「先發布 A、B 失敗就刪掉 A」代替；事後刪除不會消除先前曝光。
-- O1–O7 gate 狀態：O3 由 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 判定。O3 未 PASS 前，多篇 `commit` 只能在隔離環境執行，且**不得宣稱多篇原子發布已通過**。O2 未 PASS 前不得宣稱同 operation 重送必得同一批版號。
+- O1–O7 gate 狀態：O3 由 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 判定，目前是 **FAIL**（報告 `docs/plan/report/o3-20260914t181109z.md`）。**O3 未 PASS 不是本 Phase 的停止條件**：依 controller 2026-09-14 裁決，離線開發照常——程式與測試照協定 A 在 moto＋隔離環境完成，真實 AWS 的切點重跑延後至 P41／P59。但**不得宣稱多篇原子發布已通過**，也不得把 moto 全綠當成 O3 證據。O2 已 PASS（P11），仍不得在本 Phase 宣稱「同 operation 重送必得同一批版號」——版號分配不在本 Phase。
 - 只要任一測試或實測觀察到 partial 可見（A 新 B 舊），即保留可追溯 FAIL 並停止公開路徑，不改需求、不加 CloudFront、不加公開讀取 API。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
@@ -64,7 +64,7 @@ share-summary 的關係不完整：prepare 直接丟 PublishError，不產生 Pu
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 修改 | `src/training_kb/publishing.py` | `MAX_BATCH_VERSIONS`、`assert_batch_publishable`、`build_commit_transaction`、`promote_site_objects`，並把 `Publisher` 三個方法改成走批次路徑。 |
+| 修改 | `src/training_kb/publishing.py` | `MAX_BATCH_VERSIONS`、`assert_batch_publishable`、`build_commit_transaction`、`promote_site_objects`，並把 `Publisher` 三個方法改成走批次路徑。實作時另外追加 `PENDING_PROMOTE_NAME`、`PENDING_PROMOTE_CONTENT_TYPE`、`UNPUBLISHED_MARKER`、`public_site_keys(version_ids)` 四個公開名稱與 `_version_and_tutorial_actions`／`_promote_version`／`_put_public_object`／`_cut_point` 四個 module-private helper。 |
 | 沿用 | `src/training_kb/site.py` | [Phase 24](./24-Phase24-單篇教學發布提交.md) 的 `SiteRenderer`；本 Phase 只呼叫既有三個 render 方法重建索引，不改它。 |
 | 測試 | `tests/unit/test_publisher_batch.py` | 批次邊界、一次交易、promote 順序與待補清單。 |
 | 測試 | `tests/integration/test_batch_publish_cutpoints.py` | 五個切點的可觀察結果（moto + 公開讀取）。 |
@@ -103,7 +103,20 @@ def build_commit_transaction(
 def promote_site_objects(
     prepared: PreparedPublish, *, repository: Repository
 ) -> tuple[str, ...]: ...
+
+# 實作時追加（同一支檔，P48／P52／P59 可用）
+PENDING_PROMOTE_NAME: str = "pending-promote"
+PENDING_PROMOTE_CONTENT_TYPE: str = "application/json"
+UNPUBLISHED_MARKER: bytes = b'data-published="false"'
+
+def public_site_keys(version_ids: tuple[str, ...]) -> tuple[str, ...]: ...
 ```
+
+**`Repository.transact_write` 的 item 值用原生 Python 值**（`{"PK": pk, "SK": META}`、
+`{":now": "…Z", ":one": 1}`），**不是**低階 `{"S": ...}` AttributeValue：`boto3.resource`
+的 client 會再序列化一次，送低階形式會變成 `{"M": {"S": {"S": …}}}` 而被 moto 與真實
+DynamoDB 拒絕（Phase 24 §5 已更正；00A §6.7 那一句尚待 controller 同步）。本 Phase 以
+Phase 24 實作為準。
 
 `Publisher` 的四個 dataclass 與三個方法簽名由 Phase 24 擁有，本 Phase **只換實作**；[Phase 48](./48-Phase48-Feedback-Review排程流程.md) 與 [Phase 52](./52-Phase52-Release-RETIRE與流程驗收.md) 已在消費它們，不得改名或改參數。`promote_site_objects` 回傳這一批**實際寫出**的公開 key（含 `site/` 前綴），順序與 `prepared.version_ids` 相同，**每篇兩個**：版本頁 `v<n>.html` 與它的公開 diff 副本 `v<n>.diff.txt`（兩份 staging 都由 [Phase 24](./24-Phase24-單篇教學發布提交.md) 的 `prepare` 產生，D-54）。已存在且 bytes 相同的 key 仍然回傳，因為它同樣代表「這個公開物件已就緒」。
 
@@ -142,6 +155,9 @@ def promote_site_objects(
 切點 5 就是設計 §8.3 明列、O3 尚未解的那一段。本計畫的做法是把它縮到最小並留下可補齊的痕跡，**不是宣稱已解決**：
 
 - `commit` 在交易成功後、promote 之前，先把待 promote 的公開 key 清單寫進私有操作紀錄 `operations/<operation_id>/pending-promote.json`（key 用 [Phase 10](./10-Phase10-O2操作紀錄與永久去重契約.md) 的 `operation_ref(operation_id, "pending-promote")` 組出來，內容是 `{"version_ids": [...], "site_keys": [...]}`）。[Phase 59](./59-Phase59-失敗復原與重送驗收.md) 以同一個 `operation_id` 重送時讀這份清單精確補齊，不會重新建版或重新呼叫模型。這份清單**只寫私有前綴**，不得塞進 `TUTORIAL`／`VERSION` item：十實體模型是嚴格模型，多一個欄位下次讀取就驗證失敗。
+- **只有多篇（N≥2）寫這份清單**（00A §6.7：「單篇發布不寫這個檔」）。單篇的復原輸入是 operation 紀錄的 `version_id` ＋ `site_key`，所以 `commit` 在交易成功後**先** `record_version`、**再**寫 `site/`（Phase 24 review Important 1）；多篇因為 D-59 下父 operation 不持有版號，唯一的復原輸入就是這份清單。兩者剛好互補，不重複。
+- **多篇不在父 operation 上 `record_version`**（D-59）：`OperationRecord.version_id` 是單值，對第二篇呼叫會直接丟 `CoordinationError`，而且那個例外若落在 S3 階段之外，會留下「DynamoDB 全切、`site/` 只寫一篇、例外型別不是 `PublishError`」的半發布。版號由上游（[Phase 48](./48-Phase48-Feedback-Review排程流程.md)／[Phase 52](./52-Phase52-Release-RETIRE與流程驗收.md)）在每篇自己的 per-slug 子 operation 上 `allocate_version` 時就記好了，父 operation 只負責整批追溯。
+- **交易成功之後的任何例外一律轉成 `PublishError`**，而且訊息帶切點代號（單篇 `a2_after_transact_before_site`、多篇 `a3_after_first_site_before_second`）：半發布只以同一種錯誤現身，呼叫端不會漏接別的型別而誤判故障種類。
 - promote 順序固定為「版本頁 → 教學索引 → 站台索引」，讓中斷時公開站最多是「新頁已存在但索引還沒指過去」，而不是索引指向不存在的頁。`promote_site_objects` 只負責第一段：依 `prepared.version_ids` 的順序把私有 staging 的同一份 bytes 複製到 `site/`，每篇先版本頁、再公開 diff 副本 `v<n>.diff.txt`。教學索引與站台索引是可重建投影（Phase 24 已如此處理），由 `commit` 在 `promote_site_objects` 回傳之後才用 `SiteRenderer` 重寫，因此整體順序仍然成立。**本計畫選擇：** 這樣切分是為了讓 `promote_site_objects` 的參數只有 `prepared` 與 `repository`，不必再傳一個 renderer 進來。
 - 切點 5 對應 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 的 O3 切點 `a3_after_first_site_before_second`（多篇中途），判定屬於 Phase 12 的報告，本 Phase 只負責製造與記錄這個觀察。只要真實環境觀察到它，Phase 25 就停在 FAIL：保留報告與重現指令，**不得**改成逐篇 publish、不得刪除已 promote 的頁面充當回滾、不得把 F49 改寫成「允許部分成功」，也不得用「反正沒有連結指過去」當成沒有公開（設計 §18 O3 明文禁止）。
 
@@ -149,7 +165,7 @@ def promote_site_objects(
 
 ### Task 1：整批邊界與單一交易
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_commit_batch_switches_all_or_nothing(publisher, repo):
@@ -165,9 +181,9 @@ def test_commit_batch_switches_all_or_nothing(publisher, repo):
     assert [key for key in repo.objects if key.startswith("site/")] == []
 ```
 
-`move_base_during_transaction` 讓假的 `Repository` 在 `transact_write` **被呼叫的那一刻**才改掉 `share-summary` 的 `current_version`：這裡要驗的是「`inspect` 通過之後、交易之前被別人插隊」這個時間窗，只有交易的條件式擋得住。若基底在 `inspect` 之前就位移，走的是 [Phase 24](./24-Phase24-單篇教學發布提交.md) 的另一條路（`inspect` 回 `ok=False`、`commit` 丟 `PublishError`），同樣零公開產物。
+`move_base_during_transaction` 讓 `Repository` 子類別在 `transact_write` **被呼叫的那一刻**才改掉 `share-summary` 的 `current_version`：這裡要驗的是「`inspect` 通過之後、交易之前被別人插隊」這個時間窗，只有交易的條件式擋得住。（實作時兩處 `repo.get_*(...)` 加了 `is not None` 的中間變數，斷言內容不變——`Tutorial | None` 直接取屬性讀起來像是保證非空。）若基底在 `inspect` 之前就位移，走的是 [Phase 24](./24-Phase24-單篇教學發布提交.md) 的另一條路（`inspect` 回 `ok=False`、`commit` 丟 `PublishError`），同樣零公開產物。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_publisher_batch.py -q
@@ -175,7 +191,11 @@ uv run pytest tests/unit/test_publisher_batch.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'assert_batch_publishable'`。
 
-- [ ] **Step 3：建立最小實作**
+**實際紅燈訊號**：`ImportError: cannot import name 'MAX_BATCH_VERSIONS' from
+'training_kb.publishing'`——同一個原因（整組新名稱都還不存在），只是 import 清單的第一個
+名稱不同。
+
+- [x] **Step 3：建立最小實作**
 
 ```python
 MAX_BATCH_VERSIONS = 50
@@ -216,7 +236,7 @@ def build_commit_transaction(
 
 `_version_and_tutorial_actions` 是把 Phase 24 的私有 `Publisher._transact_items` 搬成模組函式，兩個 `Update` action 與條件式**逐字不變**（`published_at` 用 `attribute_not_exists(published_at) OR attribute_type(published_at, :null)`；`current_version` 用 `current_version = :base`，v1 用 `attribute_not_exists(current_version) OR ...`）。搬家之後單篇路徑就是 N=1 特例，全套只有一份條件式；私有方法不是跨 Phase 介面，改它不算動 Phase 24 的固定簽名。`commit` 的順序固定是 `inspect` → `build_commit_transaction` → **一次** `Repository.transact_write`；回傳非 `None` 時用 `prepared.version_ids[index // 2]` 當 `failed`（每篇兩個 action，VERSION 在前、TUTORIAL 在後），`published` 保持空 tuple，**不得**改成逐篇重試或只重送失敗那一篇。
 
-- [ ] **Step 4：補上邊界與成功案例並跑綠燈**
+- [x] **Step 4：補上邊界與成功案例並跑綠燈**
 
 ```python
 BAD_BATCHES = [((), "至少要有一個版本"), (tuple(f"t-{n}@v1" for n in range(51)), "最多 50 篇"),
@@ -236,16 +256,16 @@ def test_assert_batch_publishable_rejects_bad_batches(version_ids, signal):
 uv run pytest tests/unit/test_publisher_batch.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/publishing.py tests/unit/test_publisher_batch.py
-git commit -m "feat(content): 整批邊界檢查與單一交易提交"
+git commit -m "feat(content): 整批邊界檢查、單一交易與 promote 順序"   # 與 Task 2 合併
 ```
 
 ### Task 2：待補清單與 promote 順序
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_commit_records_pending_keys_then_promotes_in_fixed_order(publisher, repo):
@@ -262,9 +282,9 @@ def test_commit_records_pending_keys_then_promotes_in_fixed_order(publisher, rep
         "site/tutorials/share-summary/index.html", "site/index.html"]
 ```
 
-`repo.site_writes` 是假 `Repository` 記下的「寫進 `site/` 前綴的 key，依實際寫入順序」。斷言同時鎖住兩件事：待補清單在第一個公開物件出現**之前**就已存在，以及「版本頁 → 教學索引 → 站台索引」的順序。
+`repo.site_writes` 是 `Repository` 子類別記下的「寫進 `site/` 前綴的 key，依實際寫入順序」（器材與 [Phase 24](./24-Phase24-單篇教學發布提交.md) 一致：接上 moto 表與 bucket 的真實 `Repository`，只加觀察點，**不是**假物件；`put_object` 丟例外時不入列，所以「重送略過」看得出來）。斷言同時鎖住兩件事：待補清單在第一個公開物件出現**之前**就已存在，以及「版本頁 → 教學索引 → 站台索引」的順序。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_publisher_batch.py -q
@@ -272,51 +292,77 @@ uv run pytest tests/unit/test_publisher_batch.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'promote_site_objects'`。
 
-- [ ] **Step 3：建立最小實作**
+**實作時合併**：Task 1 與 Task 2 動的是同兩個檔（`publishing.py`、`test_publisher_batch.py`），
+而且 Task 2 的斷言要靠 Task 1 的 `commit` 才跑得起來，所以兩個 Task 的 import 在同一次紅燈
+就一起出現、綠燈之後合成**一個 commit**（`feat(content): 整批邊界檢查、單一交易與 promote 順序`）。
+
+- [x] **Step 3：建立最小實作**
 
 ```python
 def promote_site_objects(
     prepared: PreparedPublish, *, repository: Repository
 ) -> tuple[str, ...]:
-    staged = {key.rsplit("/site/", 1)[1]: key for key in prepared.staged_keys}
-    promoted: list[str] = []
+    operation_id = prepared.request.operation_id
     for version_id in prepared.version_ids:
-        pairs = ((site_key(version_id), "text/html; charset=utf-8"),
-                 (_diff_copy_key(version_id), "text/plain; charset=utf-8"))
-        for relative, content_type in pairs:      # 版本頁先、公開 diff 副本後
-            body = repository.get_object(staged[relative])
-            if body is None:
-                raise PublishError(f"{version_id} 的 staging 物件不見了，停止 promote：{relative}")
-            public_key = PUBLIC_SITE_PREFIX + relative
-            existing = repository.get_object(public_key)
-            if existing is None:
-                repository.put_object(public_key, body, content_type, if_none_match=True)
-            elif existing != body:
-                raise PublishError(f"{public_key} 已存在且內容不同，不覆寫已發布內容")
-            promoted.append(public_key)
-    return tuple(promoted)
+        _promote_version(version_id, operation_id, repository)   # 版本頁先、diff 副本後
+    return public_site_keys(prepared.version_ids)
+
+
+def _promote_version(version_id: str, operation_id: str, repository: Repository) -> None:
+    for relative, content_type in _public_pairs(version_id):
+        body = repository.get_object(_staging_key(operation_id, relative))
+        if body is None:
+            raise PublishError(f"{version_id} 的 staging 物件不見了，停止 promote：{relative}")
+        _put_public_object(repository, relative, body, content_type)
+
+
+def _put_public_object(repository, relative, body, content_type) -> None:
+    key = PUBLIC_SITE_PREFIX + relative
+    if UNPUBLISHED_MARKER in body:                       # 00A §3.8 的 runtime 守門
+        raise PublishError(f"未發布標記不得進公開前綴，停止寫入：{key}")
+    try:                                                 # 條件交給 S3，不「先查再寫」
+        repository.put_object(key, body, content_type, if_none_match=True)
+    except ObjectAlreadyExists:
+        if repository.get_object(key) != body:
+            raise PublishError(f"公開物件已存在且內容不同，不覆寫：{key}") from None
 ```
 
-`commit` 在交易成功之後固定照這五步收尾，順序不可對調：(1) 用 `operation_ref(operation_id, "pending-promote")` 組 key，以 `put_object(..., if_none_match=False)` 寫待補清單（同 operation 重送要能覆寫成同一份內容）；(2) `promote_site_objects(...)`；(3) 依 `version_ids` 首次出現順序重寫每個 slug 的教學索引；(4) 重寫站台索引；(5) 逐一 `operations.record_version(...)`。版本頁一律 `if_none_match=True`：已發布內容不可被覆寫，相同 bytes 就略過、不同 bytes 就停。
+三處與初稿不同，都是實作時的裁決：
 
-- [ ] **Step 4：補上三個案例並跑綠燈**
+1. staging key 直接用 `_staging_key(operation_id, relative)` 組，不從 `staged_keys` 反推
+   （`key.rsplit("/site/", 1)[1]` 撞到沒 staging 的相對 key 會是 `KeyError`，不是 `PublishError`）。
+2. content type 用既有常數 `SITE_PAGE_CONTENT_TYPE`／`DIFF_CONTENT_TYPE`（值相同），不重打字面值。
+3. 條件寫入用 `if_none_match=True` ＋ 撞鍵後比對 bytes，不「先 `get_object` 再 `put_object`」——
+   後者在兩個請求之間留下空窗。這與 [Phase 24](./24-Phase24-單篇教學發布提交.md) 的
+   `_put_public` 是同一段邏輯，本 Phase 把它搬成模組函式共用。
+4. 寫出去之前再驗一次 `UNPUBLISHED_MARKER`（00A §3.8）：`promote_site_objects` 是公開函式，
+   P48／P52／P59 可以不經 `Publisher.commit` 直接呼叫它，守門不能只靠呼叫順序。
 
-staging 物件不見了 → `PublishError`；公開 key 已存在但 bytes 不同 → `PublishError` 且不寫入；同 operation 重送、公開 key 已存在且 bytes 相同 → 不再寫入但仍回同一組 key，`site_writes` 不增加版本頁。
+`commit` 在交易成功之後固定照這六步收尾，順序不可對調：(1) `record_version`（**只有單篇**，D-59）；(2) 用**已切換好的欄位**重新渲染每篇的 staging（Phase 24 的 `_restage`，00A §6.7：不重新渲染就 promote 會把 `data-published="false"` 帶進公開站）；(3) 用 `operation_ref(operation_id, "pending-promote")` 組 key，以 `put_object(..., if_none_match=False)` 寫待補清單（**只有多篇**；同 operation 重送要能覆寫成同一份內容）；(4) 逐篇 promote 版本頁與公開 diff 副本；(5) 依 `version_ids` 首次出現順序重寫每個 slug 的教學索引；(6) 重寫站台索引（整批只寫一次）。版本頁一律 `if_none_match=True`：已發布內容不可被覆寫，相同 bytes 就略過、不同 bytes 就停。
+
+**本計畫選擇（實作時的裁決）：** 第 (4) 步 `commit` 走的是 `Publisher._promote(version_id, operation_id)`，而不是直接呼叫 `promote_site_objects(...)`。兩者是同一段邏輯（共用 `_promote_version`），寫出的 key、順序與條件寫入語意完全相同；保留這個私有方法是因為 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 與 [Phase 24](./24-Phase24-單篇教學發布提交.md) 的切點注入點就是它，本 Phase 的切點 5（只讓**第 j 篇**失敗）也靠它注入。`promote_site_objects` 則是給 P48／P52／P59 的 repository-only 入口，有自己的測試。
+
+- [x] **Step 4：補上三個案例並跑綠燈**
+
+staging 物件不見了 → `PublishError`；公開 key 已存在但 bytes 不同 → `PublishError` 且不寫入；同 operation 重送、公開 key 已存在且 bytes 相同 → 不再寫入但仍回同一組 key，`site_writes` 不增加版本頁；staging 還帶 `data-published="false"` → `PublishError`，公開前綴零物件。
+
+直接呼叫 `promote_site_objects` 的測試要先把 staging 換成已發布標記（測試內的
+`restage_as_published`），因為 `prepare` 那次渲染 `published_at` 必然是 `None`；正式路徑上
+這件事由 `Publisher.commit` 的 `_restage` 做。
 
 ```bash
 uv run pytest tests/unit/test_publisher_batch.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
-git add src/training_kb/publishing.py tests/unit/test_publisher_batch.py
-git commit -m "feat(content): 固定整批 promote 順序與待補清單"
+# 與 Task 1 同兩個檔、同一次紅燈→綠燈，已併入上一個 commit `92820ab`
 ```
 
 ### Task 3：切點注入與 O3 觀察
 
-- [ ] **Step 1：建立整合測試起始狀態與失敗測試**（兩篇都已有已發布舊版且公開 URL 讀得到；兩個新版都是 `published_at=null`，公開站讀不到）
+- [x] **Step 1：建立整合測試起始狀態與失敗測試**（兩篇都已有已發布舊版且公開 URL 讀得到；兩個新版都是 `published_at=null`，公開站讀不到）
 
 ```python
 @pytest.mark.parametrize("fault", ["prepare_second", "inspect_second", "transact"])
@@ -329,9 +375,11 @@ def test_batch_cutpoints_2_to_4_keep_everything_old(fault, aws_publisher, site_r
     assert site_reader.current_version("share-summary") == "share-summary@v1"
 ```
 
-`injected_fault` 是**本測試檔內**的 `contextmanager`，用 `monkeypatch` 把對應呼叫換成丟 `TransientError` 的替身。[Phase 59](./59-Phase59-失敗復原與重送驗收.md) 之後才有正式的 `TKB_FAULT` 切點；本 Phase 不預先使用它，也不假裝它已存在。
+`injected_fault` 是**本測試檔內**的 `contextmanager`，用 `monkeypatch` 把對應呼叫換成丟 `TransientError` 的替身。[Phase 59](./59-Phase59-失敗復原與重送驗收.md) 之後才有正式的 `TKB_FAULT` 切點；本 Phase 不預先使用它，也不假裝它已存在。三個注入點分別是 `Publisher._stage_one`（prepare 第 k 篇）、`Publisher.inspect`、`Repository.transact_write`。
 
-- [ ] **Step 2：執行並確認紅燈**
+實作時的測試簽名多了兩個 fixture：`(fault, aws_publisher, site_reader, repository, monkeypatch)`——注入故障需要 `repository` 與 `monkeypatch`，**觀察面的四條斷言逐字不變**。`aws_publisher`／`site_reader` 這兩個名字照抄本文件，但它們跑在 **moto** 上、檔案**不標 `aws`**（00A §3.2）；真實 AWS 的同一組切點重跑延後至 P41／P59。
+
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_batch_publish_cutpoints.py -q
@@ -339,23 +387,27 @@ uv run pytest tests/integration/test_batch_publish_cutpoints.py -q
 
 預期：FAIL，訊號包含 `fixture 'aws_publisher' not found`。
 
-- [ ] **Step 3：補上守門實作**
+- [x] **Step 3：補上守門實作**
 
 `commit` 未經 `inspect` 或 `inspect` 不通過就丟 `PublishError`，不進交易；`transact_write` 回非 `None` 時直接回 `PublishResult(published=())`，不進收尾五步。切點 2、3、4 的「全部舊」因此由程式順序保證，不靠 AWS 幫忙回滾。
 
-- [ ] **Step 4：跑綠燈並存證**
+- [x] **Step 4：跑綠燈並存證**
 
-切點 2、3、4 必須都是「兩篇皆舊」。每個切點各存一筆證據：兩篇的 `TUTORIAL` item（`get_item`）與公開 website endpoint 的 HTTP 回應，時間戳要能對得上。
+切點 2、3、4 必須都是「兩篇皆舊」。每個切點各存一筆證據：兩篇的 `TUTORIAL` item（`get_item`）與公開頁的讀取結果，時間戳要能對得上——實作用 `SiteReader.report()` 在同一次呼叫裡讀 `current_version`、新版的 `published_at`、公開世代標記 `data-site-version` 與新版頁的 200／404，一行印出來（見 Phase 25 報告第 3 節）。
+
+**真實 website endpoint 的 HTTP 回應延後至 P41／P59**（controller 2026-09-14 裁決）：本 Phase 在 moto 上讀同一個公開 key。
 
 ```bash
 uv run pytest tests/integration/test_batch_publish_cutpoints.py -q
 ```
 
-- [ ] **Step 5：觀察切點 5、重送補齊並提交**
+- [x] **Step 5：觀察切點 5、重送補齊並提交**
 
 切點 5（交易成功、promote 第 2 篇失敗）**不寫成綠燈斷言**。用同一組 fixture 實際跑一次，同時記錄兩篇的 `TUTORIAL` item 與公開 HTTP 回應，判定交給 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 的 O3 報告（切點 `a3_after_first_site_before_second`）。觀察到「一新一舊」就是 partial 可見：保留 FAIL、停止公開路徑，**不得**改斷言、標 `xfail`、刪除已 promote 的頁面充當回滾，或把 F49 改寫成允許部分成功。
 
 移除故障後以**同一個 `operation_id`** 重送：讀 `operations/op-review-0914/pending-promote.json` 補齊缺的公開物件，斷言沒有第三個版本、沒有第二份模型輸出、沒有新的 `version_id`。
+
+正式的補償重送 `resume_publish` 歸 [Phase 59](./59-Phase59-失敗復原與重送驗收.md)，本 Phase **不預先實作它**：測試自己讀那份清單、再呼叫 `promote_site_objects(prepared, repository=...)` 補齊，只證明本 Phase 留下的痕跡**夠用**（清單完整、staging 還在、已 promote 的物件因 bytes 相同而靜靜略過）。補齊之後兩個教學索引仍指向舊世代——那正是「新頁已存在但索引還沒指過去」，不會指向不存在的頁；索引重建歸 P59 的 `resume_publish`。
 
 ```bash
 uv run pytest tests/integration/test_batch_publish_cutpoints.py -q
@@ -378,7 +430,7 @@ git commit -m "test(content): 驗證整批發布的失敗切點"
 | Boundary | 空 `version_ids` | `PublishError`；不視為「成功但沒事做」。 |
 | Idempotency | 同 operation 重送 | 讀 `pending-promote.json` 沿用原 staging 與版號，只補齊缺的公開物件，不重複建版。 |
 
-人工驗收：在故障注入的當下用公開 website endpoint 同時讀 A 與 B 兩頁，把兩個 HTTP 回應與當時的 `TUTORIAL` item 一起存證；不能只看測試顯示 PASS，也不能只檢查 DynamoDB。
+人工驗收（**延後至 P41／P59**，controller 2026-09-14 裁決）：在故障注入的當下用公開 website endpoint 同時讀 A 與 B 兩頁，把兩個 HTTP 回應與當時的 `TUTORIAL` item 一起存證；不能只看測試顯示 PASS，也不能只檢查 DynamoDB。本 Phase 已在 moto 上用 `SiteReader.report()` 做同一組「公開頁 ＋ `TUTORIAL` item 同時觀察」，證據列在 Phase 25 報告第 3 節。
 
 ## 9. 常見錯誤與停止條件
 
@@ -410,13 +462,17 @@ git commit -m "test(content): 驗證整批發布的失敗切點"
 
 ## 11. 完成清單
 
-- [ ] `MAX_BATCH_VERSIONS`、`assert_batch_publishable`、`build_commit_transaction`、`promote_site_objects` 簽名符合本文件。
-- [ ] Phase 24 的四個 dataclass 與三個方法簽名完全沒有更動。
-- [ ] 整批 prepare／inspect 失敗時，零公開產物且零 `current_version` 變更。
-- [ ] N 篇只用一次 `transact_write_items`，測試直接斷言呼叫次數為 1。
-- [ ] 51 篇、同 slug 兩版、重複 id、空清單四個邊界各有拒絕測試。
-- [ ] `promote_site_objects` 有自己的測試：順序、staging 遺失、bytes 不同、重送略過各一例；每篇都搬版本頁與 `v<n>.diff.txt` 兩個公開物件（D-54）。
-- [ ] 待 promote 的公開 key 清單寫在 `operations/<operation_id>/pending-promote.json`，沒有任何欄位進 `TUTORIAL`／`VERSION` item。
-- [ ] 切點 2、3、4 各有一筆 DynamoDB 與公開 HTTP 的同時觀察證據；切點 5 的觀察結果交給 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 的 O3 報告。
-- [ ] 出現 partial 可見時保留 FAIL，未放寬 F49、未新增服務、未改寫需求。
-- [ ] 未把單元測試或 moto PASS 說成 O3 已通過或多篇原子發布已驗收。
+- [x] `MAX_BATCH_VERSIONS`、`assert_batch_publishable`、`build_commit_transaction`、`promote_site_objects` 簽名符合本文件。
+- [x] Phase 24 的四個 dataclass 與三個方法簽名完全沒有更動。
+- [x] 整批 prepare／inspect 失敗時，零公開產物且零 `current_version` 變更。
+- [x] N 篇只用一次 `transact_write_items`，測試直接斷言呼叫次數為 1。
+- [x] 51 篇、同 slug 兩版、重複 id、空清單四個邊界各有拒絕測試。
+- [x] `promote_site_objects` 有自己的測試：順序、staging 遺失、bytes 不同、重送略過各一例；每篇都搬版本頁與 `v<n>.diff.txt` 兩個公開物件（D-54）。
+- [x] 待 promote 的公開 key 清單寫在 `operations/<operation_id>/pending-promote.json`，沒有任何欄位進 `TUTORIAL`／`VERSION` item。
+- [x] 切點 2、3、4 各有一筆 DynamoDB 與公開頁的同時觀察證據（moto）；切點 5 的觀察結果交給 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) 的 O3 報告。
+- [x] 待補清單只在**多篇**時寫出（00A §6.7：單篇不寫）；單篇的復原輸入是 operation 紀錄的 `version_id`，所以 `record_version` 排在交易成功之後、寫 `site/` 之前。
+- [x] 多篇的父 operation **不持有版號**（D-59）；交易成功之後的任何例外一律轉 `PublishError`，訊息帶切點代號。
+- [x] `promote_site_objects` 寫出去之前再驗一次 `data-published="false"`（00A §3.8 的 runtime 守門）。
+- [ ] **延後至 P41／P59**（controller 2026-09-14 裁決）：在真實 AWS 上重跑五個切點，並用公開 website endpoint 的 HTTP 回應做人工驗收。
+- [x] 出現 partial 可見時保留 FAIL，未放寬 F49、未新增服務、未改寫需求。
+- [x] 未把單元測試或 moto PASS 說成 O3 已通過或多篇原子發布已驗收。
