@@ -12,14 +12,15 @@ Phase 41（Task 包裝與 handler）會繼續在同一支檔案上追加。
 
 import json
 from collections.abc import Iterable
-from datetime import date, timedelta
-from typing import Any
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import Any, Literal, Protocol, runtime_checkable
 
-from training_kb.clock import utc_date
+from training_kb.clock import to_iso, utc_date
 from training_kb.config import Thresholds
 from training_kb.errors import ContentError, PermanentError
-from training_kb.keys import META, operation_ref, ticket_pk
-from training_kb.models import Feature, Ticket
+from training_kb.keys import META, feature_pk, operation_ref, ticket_pk
+from training_kb.models import Feature, Ticket, Tutorial, TutorialStatus
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import DynamoItem, Repository, item_to_model
 from training_kb.vectors import centroid, cosine
@@ -263,3 +264,114 @@ def name_gap(cluster_id: str, *, repository: Repository, writer: Writer,
     repository.put_object(ref, body, "application/json", if_none_match=True)
     operations.record_model_output(operation_id, ref)
     return naming
+
+
+# --- 5. CREATE／KEEP 決策（Task：decide_action） -----------------------------
+
+TicketAction = Literal["CREATE", "KEEP", "NO_FEATURE"]
+"""這一輪的三種結果：建新教學、什麼都不改、缺有效 Feature 先擱著（設計 §7.3）。"""
+
+
+@dataclass(frozen=True)
+class TicketGap:
+    """一個 recurring 群的命名結果加上它的成員。
+
+    由 Phase 41 的 `DecideAction` Task 用 `cluster_id` 與 Phase 39 `name_gap` 回的 dict
+    （`naming["gap"]`、`naming["feature_id"]`）以及同群 `Ticket.id` 組出來。`feature_id`
+    只可能是**既有 Feature 的裸 ID** 或 `None`——不存在的 ID 在 Phase 39 就已經被
+    `gap_naming_validator` 擋掉了。
+    """
+
+    cluster_id: str
+    gap: str
+    feature_id: str | None
+    ticket_ids: tuple[str, ...]
+
+
+@runtime_checkable
+class _ActiveTutorialFinder(Protocol):
+    """Phase 27 `find_active_tutorial_for_feature` 的最小形狀。
+
+    P27 尚未落地，`Repository` 上還沒有這個方法；有就用它、沒有就走 `_active_tutorial`
+    裡同一份判準的基表查法。P27 落地後這個 Protocol 與 fallback 都可以一起刪掉，
+    判準不會因此改變（兩邊都是「`status == active` 且 `feature_id in feature_ids`，
+    多篇時取 slug 升序第一筆」）。
+    """
+
+    def find_active_tutorial_for_feature(self, feature_id: str) -> Tutorial | None: ...
+
+
+def _active_tutorial(repository: Repository, feature_id: str) -> Tutorial | None:
+    """這個 Feature 目前有沒有 `status=active` 的教學（設計 §7.3、F12）。"""
+    if isinstance(repository, _ActiveTutorialFinder):
+        return repository.find_active_tutorial_for_feature(feature_id)
+    found = sorted((item_to_model(row, Tutorial) for row in _meta_rows(repository, "TUTORIAL")),
+                   key=lambda one: one.slug)
+    return next((one for one in found if one.status == TutorialStatus.ACTIVE
+                 and feature_id in one.feature_ids), None)
+
+
+def decide_ticket_action(gap: TicketGap, *, repository: Repository) -> TicketAction:
+    """純判斷：只讀 Feature 與 Tutorial 狀態，**不寫任何資料**（設計 §7.3）。
+
+    判斷順序固定，而且「有沒有教學」看的是 `status`，不是 `current_version`：
+
+    ```text
+    feature_id 是 None？ -- 是 --> NO_FEATURE（保留 gap，Ticket Analysis 永不建 Feature）
+    get_feature 找得到？ -- 否 --> ContentError（資料不一致，不猜也不補建）
+    有 status=active 的教學？ -- 是 --> KEEP（即使 current_version 還是 None，F12）
+                              -- 否 --> CREATE（只有 retired 不算已有教學）
+    ```
+
+    F12 明說 active 但尚待首次發布也算「已有教學」，避免同一個功能被建兩篇；retired 不算，
+    所以退役後遇到同樣的重複工單可以重新建立。
+    """
+    if gap.feature_id is None:
+        return "NO_FEATURE"
+    if repository.get_feature(gap.feature_id) is None:
+        raise ContentError(f"Feature {gap.feature_id} 不存在")
+    return "KEEP" if _active_tutorial(repository, gap.feature_id) is not None else "CREATE"
+
+
+def record_decision(action: TicketAction, gap: TicketGap, *, repository: Repository,
+                    operation_id: str, now: datetime) -> str:
+    """寫 `operations/<operation_id>/ticket-decision.json` 並回傳它的私有 ref。
+
+    **三種結果都要寫**，這就是 `分析工單` Rule 8 的「只記錄 log」：KEEP 一個字都不寫進教學
+    內容，但為什麼不改要留得下來。物件用 `if_none_match=False` 覆寫，所以同一個
+    `operation_id` 重跑安全。
+
+    `action` 不是 `NO_FEATURE` 時，順便把 `gap.ticket_ids` 的每張工單連到 Feature
+    （00A D-52／D-57）：那是**工單側的標註**，不是教學內容。本 Phase 是 `Ticket.feature_ids`
+    與 `ASKS_ABOUT` 邊的唯一寫入者。
+    """
+    ref = operation_ref(operation_id, "ticket-decision")
+    record = {"action": action, "cluster_id": gap.cluster_id, "gap": gap.gap,
+              "feature_id": gap.feature_id, "ticket_ids": list(gap.ticket_ids),
+              "decided_at": to_iso(now)}
+    body = json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    repository.put_object(ref, body, "application/json", if_none_match=False)
+    if action != "NO_FEATURE":
+        _link_tickets(gap, repository=repository)      # D-52：只有有效 Feature 才連
+    return ref
+
+
+def _link_tickets(gap: TicketGap, *, repository: Repository) -> None:
+    """同群每張工單指到同一個 Feature；一張工單最多一個（D04），重跑不會變成兩條。
+
+    先一致讀回 `TICKET#<id>`：`feature_ids` 已經等於 `[feature_id]` 就跳過寫入，否則
+    `put_meta(create_only=False)` 覆寫成**單一元素**（不是 append）。邊的 SK 固定是
+    `ASKS_ABOUT#FEATURE#<id>`，重寫同一條不會多出 item，所以 Phase 41 的 `DecideAction`
+    Task 與 `create_first_version` 各呼叫一次也安全。
+    """
+    feature_id = gap.feature_id
+    if feature_id is None:
+        raise ContentError(f"群 {gap.cluster_id} 沒有有效 Feature，不能連工單")
+    for ticket_id in gap.ticket_ids:
+        ticket = repository.get_meta(ticket_pk(ticket_id), Ticket)
+        if ticket is None:
+            raise ContentError(f"工單 {ticket_id} 不存在，無法連到 Feature")
+        if ticket.feature_ids != [feature_id]:         # 最多一個元素（D04）
+            repository.put_meta(ticket.model_copy(update={"feature_ids": [feature_id]}),
+                                create_only=False)
+        repository.put_edge(ticket_pk(ticket_id), "ASKS_ABOUT", feature_pk(feature_id))
