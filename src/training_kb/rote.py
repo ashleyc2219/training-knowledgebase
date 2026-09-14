@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from training_kb.errors import PermanentError
+from training_kb.models import ProcStatus, ProvenWorkflow
 from training_kb.pipelines.common import JSONValue
 
 # --- 1. 來源脈絡與白名單（Phase 33）-------------------------------------------
@@ -91,6 +92,38 @@ def structure_signature(event: RawEvent) -> str:
 
 
 # --- 3. 兩層命中與候選排序（Phase 34 追加）------------------------------------
+
+JACCARD_THRESHOLD = 0.8
+"""第二層欄位重疊度的下限（設計 §7.2）；用 `>=` 比較，`4/5` 命中、`3/4` 淘汰。"""
+
+PROC_MIN_SUCCESS = 3
+"""可重放所需的最少完整成功次數（設計 §7.2、決策 F03）。
+
+Phase 34 首建（00A §5.4），Phase 35 只 `import` 這個名字、不為同一個數字另取第二個名稱。
+"""
+
+
+def jaccard(left: frozenset[str], right: frozenset[str]) -> float:
+    """兩組 key 名稱的交集數除以聯集數（設計 §7.2）。
+
+    空聯集回 `0.0` 而不是數學慣例的 `1.0`：設計 §7.2 明說「空集合不當成命中」，
+    回 `1.0` 會讓兩個沒有任何欄位的事件互相命中。
+    """
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
+def replayable(proc: ProvenWorkflow) -> bool:
+    """可重放的兩個硬條件：`status=active` 且 `success_count >= PROC_MIN_SUCCESS`。
+
+    兩層共用這一份判斷（決策 F03）。`ProcStatus` 只有 `active`／`retired`，
+    「還沒累積到三次」是用 `success_count` 表達，不是另外加一個狀態。
+    """
+    return proc.status == ProcStatus.ACTIVE and proc.success_count >= PROC_MIN_SUCCESS
+
+
 # --- 4. PROC 生命週期（Phase 35 追加）-----------------------------------------
 # --- 5. 記錄步驟的驗證與執行（Phase 36 追加）----------------------------------
 # --- 6. 三層 normalize 與成功提交（Phase 37 追加）-----------------------------
