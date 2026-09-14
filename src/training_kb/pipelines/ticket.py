@@ -10,10 +10,14 @@
 Phase 41（Task 包裝與 handler）會繼續在同一支檔案上追加。
 """
 
+from collections.abc import Iterable
+
 from training_kb.config import Thresholds
+from training_kb.errors import PermanentError
 from training_kb.keys import ticket_pk
 from training_kb.models import Ticket
 from training_kb.repository import Repository
+from training_kb.vectors import centroid, cosine
 from training_kb.writing.client import Writer
 
 CLUSTER_COSINE_THRESHOLD = Thresholds().cosine_match
@@ -49,3 +53,59 @@ def ensure_embedding(ticket: Ticket, *, writer: Writer, repository: Repository,
     updated = current.model_copy(update={"embedding": vector})
     repository.put_meta(updated, create_only=False)
     return updated
+
+
+# --- 2. 分群（Task：assign_cluster） ----------------------------------------
+
+
+def assign_cluster(ticket: Ticket, *, repository: Repository) -> str:
+    """回傳這則 Ticket 該屬於哪一個 `cluster_id`；**只做判斷，不寫資料庫**。
+
+    把 `cluster_id` 寫回 TICKET 是 Phase 41 `assign_cluster` Task 的責任（該 Task 必須
+    先一致讀取 TICKET 再呼叫這裡）。
+
+    已經有 `cluster_id` 就原樣回傳：重送沿用同一群（設計 §14.2）。否則讀同專案的全部
+    Ticket（`list_tickets` 走 Phase 08 的 `scan_entity("TICKET")`，`meta_only=True` 讓
+    Phase 40 之後掛在 `TICKET#<id>` 上的 `ASKS_ABOUT#` 邊不會被誤算成工單），依
+    `cluster_id` 分組、每組算**群中心**再比 cosine。
+
+    三條規則讓重跑結果固定：
+    1. 一律拿 `centroid` 比，即使群裡只有一筆，也不拿「第一筆」當代表（F10）。
+    2. 排序鍵是 `(-分數, cluster_id)`：同分取最小 `cluster_id`，不依賴掃描或 dict 順序。
+    3. 自己不當自己的群中心，但自己的群編號仍算既有編號。
+
+    沒有任何群達到 `CLUSTER_COSINE_THRESHOLD` 就開新群。編號唯一性只在同一個
+    `project_id` 內成立；跨專案併發的保證屬於 O2，未通過前不得宣稱無競態。
+    """
+    if ticket.cluster_id:
+        return ticket.cluster_id
+    if not ticket.embedding:
+        raise PermanentError("assign_cluster 需要已保存的 embedding")
+    known: set[str] = set()
+    groups: dict[str, list[list[float]]] = {}
+    for other in repository.list_tickets(ticket.project_id):
+        if not other.cluster_id:
+            continue
+        known.add(other.cluster_id)
+        if other.id != ticket.id and other.embedding:
+            groups.setdefault(other.cluster_id, []).append(other.embedding)
+    scored = [(cosine(ticket.embedding, centroid(rows)), cid) for cid, rows in groups.items()]
+    good = sorted((row for row in scored if row[0] >= CLUSTER_COSINE_THRESHOLD),
+                  key=lambda row: (-row[0], row[1]))
+    return good[0][1] if good else new_cluster_id(known)
+
+
+def new_cluster_id(existing: Iterable[str]) -> str:
+    """既有 `c<數字>` 的最大值加一；完全沒有既有群時回 `c1`。
+
+    只認得 `c<數字>` 這個形狀，其他字串不影響編號。MVP 不合群也不重編號，既有
+    `cluster_id` 永遠保留，`Tutorial.cluster_id` 才追溯得回來（設計 §7.3、D29）。
+    最後那道撞號檢查是防守用的：`max + 1` 在結構上不會撞到既有編號，真的撞到代表
+    上游資料或這段邏輯壞了，**明確失敗**而不是靜默換一個號碼。
+    """
+    known = set(existing)
+    numbers = [int(value[1:]) for value in known if value[:1] == "c" and value[1:].isdigit()]
+    candidate = f"c{max(numbers) + 1 if numbers else 1}"
+    if candidate in known:
+        raise PermanentError(f"新群編號 {candidate} 已存在")
+    return candidate
