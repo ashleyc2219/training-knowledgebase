@@ -509,7 +509,7 @@ class Repository:
     def list_feedback_of_version(self, version_id: str) -> list[Feedback]:
         """某版的全部回饋，依 ID 升序（設計 §10 六問之一）。
 
-        `by_target` 候選只有鍵，而且同一個終點上還有 `SUPERSEDES` 這類別的關係邊，所以要
+        `by_target` 候選只有鍵，而且同一個終點上還有 `SUPERSEDES`／`ASKS_ABOUT` 這些別的邊，所以要
         三重過濾（關係是 `REFERS_TO`、起點是 `FEEDBACK`、終點確實是這一版），再逐筆回基表
         一致讀取取得內容。GSI 只會落後基表、不會多出基表沒有的資料，所以候選讀不到本體
         代表資料不完整，必須明確失敗而不是安靜跳過。這裡用 `get_meta`（整筆重讀）而不是
