@@ -134,13 +134,13 @@ problems 為空 -> return None；否則一次丟 ContentError
 三個 Task 共用同一支檔案內的兩個小工具（照 Phase 23 的慣例，寫在測試檔裡，不另建 conftest）：
 
 - `known_feature_ids` fixture：回傳 `frozenset({"Prepare", "Share Summary", "Notification Settings"})`。
-- `four_step_content(**overrides)`：預設組出合格的四步草稿——`title="準備會議"`，步驟編號 1–4、`type` 依序 `read`／`click_ui`／`click_ui`／`read`、`feature_id` 都是 `Prepare`、第 3 步文字 `開啟摘要。`。
+- `four_step_content(**overrides)`：預設組出合格的四步草稿——`title="準備會議"`，步驟編號 1–4、`type` 依序 `read`／`click_ui`／`click_ui`／`read`、`feature_id` 都是 `Prepare`、第 3 步文字 `開啟摘要。`。實作時的 override 為 keyword-only 的 `title`／`problem`／`prerequisites`／`expected_outcome`／`numbers`／`step2_feature`／`step3_feature`／`step4_feature`／`step3_type`／`step3_text`；`numbers` 決定實際步數，所以 `numbers=()` 就是「`steps` 為空清單」那個邊界，`step3_text` 供 Task 3 Step 4 的不外洩斷言使用。
 
 **不合格的變體必須用 `model_construct` 繞過 Phase 03 的模型驗證。** `TutorialContent` 已經擋掉空白段落與不連續編號，`StepDraft` 已經擋掉空白文字、非法 `type` 與非裸 ID 的 `feature_id`。若 helper 用一般建構式組 `problem="  "`、`numbers=[1, 2, 4, 5]`、`step3_feature=""` 或 `step3_type="scroll"`，測試會停在 `ValidationError`，證明不了 `validate_content` 這道防線。所以 helper 在 override 會被模型擋下時，改用 `StepDraft.model_construct(...)` 與 `TutorialContent.model_construct(...)`。這不是繞過檢查，而是讓第二道防線可以被單獨證明（設計 §14.1、F48）。
 
 ### Task 1：五段齊全與步驟編號連續
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_valid_content_passes(known_feature_ids):
@@ -157,7 +157,9 @@ def test_non_contiguous_step_numbers_are_rejected(known_feature_ids):
         validate_content(content, known_feature_ids)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+實作時第三個測試依 §8 驗收矩陣與 §11 完成清單擴成 `@pytest.mark.parametrize("numbers", [[1, 2, 4, 5], [1, 1, 2, 3]])`（跳號與重複），並另加 `test_empty_steps_is_rejected`（`numbers=()`，斷言「缺少 Steps」）。這兩個案例在 Task 1 的實作下就是綠的，紅燈證據只會出現在本 Task 的前兩個測試上。
+
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_validate_content.py -q
@@ -165,7 +167,7 @@ uv run pytest tests/unit/test_validate_content.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'validate_content'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 LEGAL_STEP_TYPES = frozenset(StepType)
@@ -188,7 +190,7 @@ def _section_problems(content: TutorialContent) -> list[str]:
     return problems
 ```
 
-- [ ] **Step 4：補上 `validate_content` 外殼並跑完整檔案**
+- [x] **Step 4：補上 `validate_content` 外殼並跑完整檔案**
 
 ```python
 def validate_content(content: TutorialContent, known_feature_ids: frozenset[str]) -> None:
@@ -199,7 +201,7 @@ def validate_content(content: TutorialContent, known_feature_ids: frozenset[str]
 
 這一版只看五段與編號，是刻意的最小實作；步驟引用在 Task 2 才接上。執行 `uv run pytest tests/unit/test_validate_content.py -q`，預期三個測試 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/unit/test_validate_content.py
@@ -208,7 +210,7 @@ git commit -m "feat(content): 驗證教學五段與步驟編號"
 
 ### Task 2：每步恰好一個存在的 Feature
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 @pytest.mark.parametrize(
@@ -231,7 +233,9 @@ def test_illegal_step_type_is_rejected(known_feature_ids):
 
 `""`、`"   "` 與 `"scroll"` 會先被 Phase 03 的 `bare_id` 與 `StepType` 擋下，所以 helper 走本節開頭說的 `model_construct` 路徑，證明 schema 以外仍有第二道防線；`"Prepare, Share Summary"` 與 `"Calendar"` 則是模型放行、只有 `validate_content` 攔得住的值，用一般建構式即可。
 
-- [ ] **Step 2：執行並確認紅燈**
+§8 驗收矩陣的 `Import/Export` 邊界一併在本 Task 補成 `test_known_feature_name_with_separator_passes`：把 `known_feature_ids | {"Import/Export"}` 傳進去，斷言不丟例外，證明「清單命中優先於分隔符號」的順序真的存在。
+
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_validate_content.py -q
@@ -239,7 +243,7 @@ uv run pytest tests/unit/test_validate_content.py -q
 
 預期：FAIL，因為目前只檢查五段，非法引用會被放行。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 _FEATURE_SPLITTERS = (",", "、", ";", "/", "+", " and ")
@@ -255,7 +259,7 @@ def _feature_problem(index: int, raw: str, known: frozenset[str]) -> str | None:
     return f"第 {index} 步引用的 Feature 不存在：{feature_id}"
 ```
 
-- [ ] **Step 4：把逐步檢查接進 `validate_content` 並跑綠燈**
+- [x] **Step 4：把逐步檢查接進 `validate_content` 並跑綠燈**
 
 ```python
 def _step_problems(content: TutorialContent, known: frozenset[str]) -> list[str]:
@@ -281,7 +285,7 @@ def validate_content(content: TutorialContent, known_feature_ids: frozenset[str]
 
 這一版仍是「五段不過就先丟出」，Task 3 才把兩組問題合併。執行 `uv run pytest tests/unit/test_validate_content.py -q`，預期零個、多個、不存在與非法型態全部 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/unit/test_validate_content.py
@@ -290,7 +294,7 @@ git commit -m "feat(content): 要求每步恰好引用一個既有 Feature"
 
 ### Task 3：一次回報所有問題
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_all_problems_are_reported_in_one_error(known_feature_ids):
@@ -305,7 +309,7 @@ def test_all_problems_are_reported_in_one_error(known_feature_ids):
         assert signal in message
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_validate_content.py::test_all_problems_are_reported_in_one_error -q
@@ -313,7 +317,7 @@ uv run pytest tests/unit/test_validate_content.py::test_all_problems_are_reporte
 
 預期：FAIL，因為 Task 2 的實作在五段有問題時就先丟出例外，訊息只有「缺少 Problem」一句，第 2、3、4 步的引用問題還沒被看到。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def validate_content(content: TutorialContent, known_feature_ids: frozenset[str]) -> None:
@@ -323,11 +327,17 @@ def validate_content(content: TutorialContent, known_feature_ids: frozenset[str]
         raise ContentError("教學內容驗證失敗：" + "；".join(problems))
 ```
 
-- [ ] **Step 4：驗證錯誤訊息不外洩敏感內容**
+- [x] **Step 4：驗證錯誤訊息不外洩敏感內容**
 
-斷言訊息只含段落名稱、步驟編號與 `feature_id`，不含 `step.text` 全文、回饋原文或使用者 ID。執行 `uv run pytest tests/unit/test_validate_content.py -q`，預期整個檔案 PASS。
+斷言訊息只含段落名稱、步驟編號與 `feature_id`，不含 `step.text` 全文、回饋原文或使用者 ID。實作為 `test_error_message_does_not_leak_step_text`：把含使用者 ID 的假回饋放進第 3 步文字、`feature_id` 設成不存在的 `Calendar`，斷言訊息含「第 3 步引用的 Feature 不存在：Calendar」但不含那段文字與 `u_7788`。執行 `uv run pytest tests/unit/test_validate_content.py -q`，預期整個檔案 PASS。
 
-- [ ] **Step 5：提交**
+人工驗收（§8 最後一段）實際印出的全文：
+
+```text
+教學內容驗證失敗：缺少 Problem；第 2 步沒有引用 Feature；第 3 步引用了多個 Feature：Prepare, Share Summary；第 4 步引用的 Feature 不存在：Calendar
+```
+
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/unit/test_validate_content.py
@@ -374,11 +384,11 @@ git commit -m "feat(content): 一次回報全部內容問題"
 
 ## 11. 完成清單
 
-- [ ] `validate_content` 簽名與回傳型別符合本文件。
-- [ ] 五段缺任何一段都有獨立 assertion。
-- [ ] 步驟編號跳號、重複與空清單都被拒絕。
-- [ ] 零個、多個、不存在的 Feature 各有獨立 assertion，且清單命中優先於分隔符號判定。
-- [ ] 非法 `StepType` 在繞過 schema 時仍被拒絕；多個問題一次回報且訊息不含步驟全文或使用者資料。
-- [ ] 測試 helper 對「會被 Phase 03 模型擋下的值」使用 `model_construct`，紅燈不是 `ValidationError`。
-- [ ] 驗證器沒有修改任何內容，也沒有讀 DynamoDB 或呼叫模型。
-- [ ] 單元測試已實際執行並保存輸出。
+- [x] `validate_content` 簽名與回傳型別符合本文件。
+- [x] 五段缺任何一段都有獨立 assertion。
+- [x] 步驟編號跳號、重複與空清單都被拒絕。
+- [x] 零個、多個、不存在的 Feature 各有獨立 assertion，且清單命中優先於分隔符號判定。
+- [x] 非法 `StepType` 在繞過 schema 時仍被拒絕；多個問題一次回報且訊息不含步驟全文或使用者資料。
+- [x] 測試 helper 對「會被 Phase 03 模型擋下的值」使用 `model_construct`，紅燈不是 `ValidationError`。
+- [x] 驗證器沒有修改任何內容，也沒有讀 DynamoDB 或呼叫模型。
+- [x] 單元測試已實際執行並保存輸出。
