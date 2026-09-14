@@ -288,6 +288,19 @@ def test_load_validated_at_parses_iso_and_refuses_broken_files(
         load_validated_at(fake_repo)
 
 
+@pytest.mark.parametrize("body", [b"{not json", b"\xff\xfe", b"", b'"R-007"'])
+def test_load_validated_at_turns_a_corrupt_file_into_a_permanent_error(
+        fake_repo: FakeRepository, body: bytes) -> None:
+    """壞 JSON／壞 UTF-8 也要是 `PermanentError`，不能漏出裸的 `ValueError`。
+
+    漏出去的話 ASL 的 Catch 分不到失敗終點，呼叫端也接不到——規則要不要注入是可重現的
+    判斷，讀不懂這個檔就該明確停下來（Phase 40 review 便宜修正 B-minor 2）。
+    """
+    fake_repo.objects[VALIDATED_AT_KEY] = body
+    with pytest.raises(PermanentError):
+        load_validated_at(fake_repo)
+
+
 def test_no_active_rule_means_empty_rules_applied(fake_repo: FakeRepository,
                                                   fake_writer: FakeWriter,
                                                   fake_ops: FakeOperations) -> None:

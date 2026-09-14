@@ -41,14 +41,19 @@ def load_validated_at(repository: Repository) -> dict[str, datetime]:
 
     檔案壞掉（不是 JSON 物件、值不是 ISO 時間）一律 `PermanentError`：規則要不要注入是
     可重現的判斷，猜一個時間會讓同一批輸入在不同時刻得到不同的 `rules_applied`。
+
+    **解碼與 `json.loads` 也在 `try` 之內**：壞 UTF-8 會丟 `UnicodeDecodeError`、壞 JSON
+    會丟 `json.JSONDecodeError`，兩者都不是 `PermanentError`，漏出去的話 ASL 的 Catch
+    分不到失敗終點、呼叫端也接不到（00A §4.1）。`PermanentError` 不是 `ValueError` 的子類，
+    所以 `try` 裡那個「不是物件」的 raise 不會被自己的 `except` 再包一層。
     """
     body = repository.get_object(VALIDATED_AT_KEY)
     if body is None:
         return {}
-    payload: object = json.loads(body.decode("utf-8"))
-    if not isinstance(payload, dict):
-        raise PermanentError(f"{VALIDATED_AT_KEY} 必須是 rule_id 對應時間的物件")
     try:
+        payload: object = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise PermanentError(f"{VALIDATED_AT_KEY} 必須是 rule_id 對應時間的物件")
         return {str(rule_id): parse_iso(str(value)) for rule_id, value in payload.items()}
-    except ValueError as error:
-        raise PermanentError(f"{VALIDATED_AT_KEY} 有不合法的時間字串") from error
+    except (ValueError, UnicodeDecodeError) as error:
+        raise PermanentError(f"{VALIDATED_AT_KEY} 內容損壞或有不合法的時間字串") from error
