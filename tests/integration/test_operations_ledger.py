@@ -135,3 +135,20 @@ def test_a_retryable_failure_never_creates_a_second_record(repository: Repositor
     assert (again.status, again.record.status) == ("duplicate", "failed")
     assert (again.record.error, again.record.retryable) == ("bedrock timeout", True)
     assert len(repository.scan_entity("OPS")) == 1
+
+
+def test_record_version_is_write_once(repository: Repository) -> None:
+    """一個 operation 只對應一個版本（00A D-59）：同值 no-op，不同值明確失敗。
+
+    靜默覆蓋會讓同一筆邏輯操作先後指到兩個版號，Phase 20 的「重試重用原版本號」
+    就失去依據；這裡要求它**吵**，由呼叫端重新讀現況再決定。
+    """
+    operations = OperationCoordinator(repository)
+    operations.accept(REQUEST)
+    operations.record_version("op-ticket-t_881", "prepare-meeting@v2")
+    operations.record_version("op-ticket-t_881", "prepare-meeting@v2")
+    with pytest.raises(CoordinationError):
+        operations.record_version("op-ticket-t_881", "prepare-meeting@v3")
+    record = operations.load("op-ticket-t_881")
+    assert record is not None
+    assert record.version_id == "prepare-meeting@v2"

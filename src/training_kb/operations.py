@@ -289,7 +289,20 @@ class OperationCoordinator:
         self._change(operation_id, {"execution_arn": execution_arn})
 
     def record_version(self, operation_id: str, version_id: str) -> None:
-        self._change(operation_id, {"version_id": version_id})
+        """記下這個 operation 產生的版號。**只能寫一次**（00A D-59）。
+
+        同一個值重送是 no-op（重啟續跑會走到這裡）；換成另一個版號一律 `CoordinationError`。
+        靜默覆蓋會讓同一筆邏輯操作先後指到兩個版號，Phase 20 的「重試重用原版本號」就失去
+        依據，對外也會看起來像是多長了一條版本鏈。要換版號必須重新讀現況再決定。
+        """
+        item = self._existing(operation_id)
+        current = _text(item, "version_id")
+        if current == version_id:
+            return
+        if current is not None:
+            raise CoordinationError(
+                f"operation {operation_id} already has version {current}: {version_id}")
+        self._write(operation_id, {"version_id": version_id}, item)
 
     def record_model_output(self, operation_id: str, output_ref: str) -> None:
         """附加一筆模型輸出 ref；同一個 ref 不重複附加，重送才不會多算一次輸出。"""
