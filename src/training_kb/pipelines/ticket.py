@@ -16,7 +16,7 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -303,27 +303,15 @@ class TicketGap:
     ticket_ids: tuple[str, ...]
 
 
-@runtime_checkable
-class _ActiveTutorialFinder(Protocol):
-    """Phase 27 `find_active_tutorial_for_feature` 的最小形狀。
-
-    P27 尚未落地，`Repository` 上還沒有這個方法；有就用它、沒有就走 `_active_tutorial`
-    裡同一份判準的基表查法。P27 落地後這個 Protocol 與 fallback 都可以一起刪掉，
-    判準不會因此改變（兩邊都是「`status == active` 且 `feature_id in feature_ids`，
-    多篇時取 slug 升序第一筆」）。
-    """
-
-    def find_active_tutorial_for_feature(self, feature_id: str) -> Tutorial | None: ...
-
-
 def _active_tutorial(repository: Repository, feature_id: str) -> Tutorial | None:
-    """這個 Feature 目前有沒有 `status=active` 的教學（設計 §7.3、F12）。"""
-    if isinstance(repository, _ActiveTutorialFinder):
-        return repository.find_active_tutorial_for_feature(feature_id)
-    found = sorted((item_to_model(row, Tutorial) for row in _meta_rows(repository, "TUTORIAL")),
-                   key=lambda one: one.slug)
-    return next((one for one in found if one.status == TutorialStatus.ACTIVE
-                 and feature_id in one.feature_ids), None)
+    """這個 Feature 目前有沒有 `status=active` 的教學（設計 §7.3、F12）。
+
+    判準只有 Phase 27 的 `find_active_tutorial_for_feature` 一份（「`status == active` 且
+    `feature_id in feature_ids`，多篇時取 slug 升序第一筆」），本模組**不再自備基表備援**：
+    備援在查詢缺席時會安靜地回「沒有 active 教學」，把 KEEP 判成 CREATE，同一個功能因此被
+    建第二篇。缺方法要大聲失敗。
+    """
+    return repository.find_active_tutorial_for_feature(feature_id)
 
 
 def decide_ticket_action(gap: TicketGap, *, repository: Repository) -> TicketAction:

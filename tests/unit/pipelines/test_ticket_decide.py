@@ -284,6 +284,20 @@ def test_only_active_status_blocks_create(fake_repo: FakeRepository, status: str
     assert decide_ticket_action(GAP, repository=fake_repo) == expected
 
 
+def test_active_lookup_has_no_silent_fallback(
+        fake_repo: FakeRepository, monkeypatch: pytest.MonkeyPatch) -> None:
+    """P27 落地後「有沒有 active 教學」只有一條路，**沒有**掃全表的備援。
+
+    備援會在查詢缺席時安靜地回「沒有 active 教學」，把 KEEP 判成 CREATE，同一個功能因此被
+    建第二篇，直接違反 F12。缺方法要大聲失敗，不是靜靜換一套判準（Phase 40 review A3）。
+    """
+    fake_repo.save_feature("Prepare")
+    fake_repo.save_tutorial("prepare-meeting", feature_id="Prepare", status="active")
+    monkeypatch.delattr(FakeRepository, "find_active_tutorial_for_feature")
+    with pytest.raises(AttributeError, match="find_active_tutorial_for_feature"):
+        decide_ticket_action(GAP, repository=fake_repo)
+
+
 def test_missing_feature_returns_no_feature(fake_repo: FakeRepository) -> None:
     assert decide_ticket_action(replace(GAP, feature_id=None), repository=fake_repo) \
         == "NO_FEATURE"
