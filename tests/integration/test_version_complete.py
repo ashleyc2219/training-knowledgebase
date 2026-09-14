@@ -76,6 +76,19 @@ def test_two_reference_edges_on_one_step_are_rejected(ready_v2: ReadyVersion) ->
                        four_step_content(), ready_v2.repository)
 
 
+@pytest.mark.parametrize("break_it", ["add_extra_step_item", "add_extra_applied_to_edge",
+                                      "add_extra_supersedes_edge"])
+def test_extra_relations_are_not_complete(ready_v2: ReadyVersion, break_it: str) -> None:
+    """核對不只驗「不缺」，也要驗「不多」：多出來的 STEP／`APPLIED_TO`／`SUPERSEDES` 都不完整。
+
+    只驗「不缺」時，上一版留下的第 5 步會跟著發布出去；`rules_applied=[]` 卻有
+    `RULE#R-999 APPLIED_TO` 邊會讓權威欄位與邊互相矛盾（D17）；兩條 `SUPERSEDES` 會讓
+    版本鏈分岔。三種都必須讓 Phase 24 停下來。
+    """
+    getattr(ready_v2, break_it)()
+    assert verify_version_complete(V2, ready_v2.repository) is False
+
+
 def test_missing_version_item_is_not_complete(seeded_feature: Repository) -> None:
     """連 VERSION item 都沒有時不必再讀 S3，直接回 `False`。"""
     assert verify_version_complete(V2, seeded_feature) is False

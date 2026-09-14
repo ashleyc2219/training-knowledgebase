@@ -28,7 +28,7 @@ from training_kb.content import (
     render_markdown,
 )
 from training_kb.errors import ContentError, TransientError
-from training_kb.keys import feature_pk, step_pk, tutorial_pk, version_pk
+from training_kb.keys import feature_pk, rule_pk, step_pk, tutorial_pk, version_pk
 from training_kb.models import (
     Feature,
     StepDraft,
@@ -172,6 +172,19 @@ class ReadyVersion:
 
     def delete_tutorial(self) -> None:
         self._delete_item(tutorial_pk(SLUG), "META")
+
+    def add_extra_step_item(self) -> None:
+        """全文只有四步，基表卻多一個 `STEP#…#5`（上一版留下的殘骸或手動補寫）。"""
+        self.repository.put_edge(step_pk(V2, 5), "REFERENCES", feature_pk(FEATURE),
+                                 {"type": "read", "text": "多出來的第五步。"})
+
+    def add_extra_applied_to_edge(self) -> None:
+        """`rules_applied` 沒有 R-999，卻有一條 `RULE#R-999 -> APPLIED_TO` 指向這一版。"""
+        self.repository.put_edge(rule_pk("R-999"), "APPLIED_TO", version_pk(V2))
+
+    def add_extra_supersedes_edge(self) -> None:
+        """同一版指向兩個前一版：版本鏈分岔，追溯會得到兩個答案。"""
+        self.repository.put_edge(version_pk(V2), "SUPERSEDES", version_pk("other-topic@v1"))
 
     def add_second_step_edge(self) -> None:
         """同一步再指向另一個 Feature：`get_steps` 會讀出兩步，關係就不完整了。"""

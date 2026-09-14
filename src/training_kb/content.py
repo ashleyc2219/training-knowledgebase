@@ -630,11 +630,65 @@ def verify_version_complete(version_id: str, repository: Repository) -> bool:
     return not _missing_parts(version_id, repository)
 
 
-def _has_edge(repository: Repository, pk: str, relation: str, target_pk: str) -> bool:
-    """起點上有沒有指向這個終點的某一種邊；一律基表一致讀取，不查 `by_target`。"""
-    sort_key = edge_sk(relation, target_pk)
-    return any(row.get("SK") == sort_key
-               for row in repository.query_pk(pk, sk_prefix=f"{relation}#", consistent=True))
+def _exact_edge_problems(repository: Repository, pk: str, relation: str,
+                         expected: Sequence[str]) -> list[str]:
+    """某個起點上的某種邊必須**恰好**等於 `expected`：缺的是問題，**多的也是問題**。
+
+    只驗「不缺」會放行分岔的版本鏈（同一版兩條 `SUPERSEDES`），核對就不再是關卡。
+    一律基表一致讀取，不查最終一致的 `by_target`。
+    """
+    endpoints: list[str] = []
+    problems: list[str] = []
+    for row in repository.query_pk(pk, sk_prefix=f"{relation}#", consistent=True):
+        sort_key, target = str(row.get("SK", "")), str(row.get("target", ""))
+        if sort_key != edge_sk(relation, target):
+            problems.append(f"{pk} 的 {relation} 邊 SK 與 target 不一致：{sort_key}")
+            continue
+        endpoints.append(target)
+    problems += [f"缺少 {relation} 邊：{item}" for item in expected if item not in endpoints]
+    problems += [f"多出 {relation} 邊：{item}" for item in endpoints if item not in expected]
+    return problems
+
+
+def _applied_to_problems(version_id: str, rules_applied: Sequence[str],
+                         repository: Repository) -> list[str]:
+    """指向這一版的 `APPLIED_TO` 邊必須**恰好**是 `rules_applied` 那幾條（D17、F29）。
+
+    這些邊的起點是 `RULE#<rule_id>`，散在不同的 PK 上，所以「只查 `rules_applied` 那幾個
+    起點」驗得出「不缺」、驗不出「不多」——上一版留下或維護腳本補錯的 `RULE#R-999` 會讓
+    權威欄位與邊互相矛盾卻仍然通過。改用基表一致的 `scan_entity("RULE", meta_only=False)`
+    （`entity` 等於 PK 前綴，所以邊會跟著本體一起被掃出來，00A §3.6），**不查 `by_target`**：
+    GSI 最終一致，剛寫入的邊可能還看不到。
+    """
+    version_key = version_pk(version_id)
+    sort_key = edge_sk("APPLIED_TO", version_key)
+    found: list[str] = []
+    problems: list[str] = []
+    for row in repository.scan_entity("RULE", meta_only=False):
+        if str(row.get("SK", "")) != sort_key:
+            continue
+        if str(row.get("target", "")) != version_key:
+            problems.append(f"APPLIED_TO 邊的 target 與 SK 不一致：{str(row.get('PK', ''))}")
+            continue
+        found.append(parse_pk(str(row["PK"]))[1])
+    problems += [f"規則 {rule_id} 缺少 APPLIED_TO 邊" for rule_id in rules_applied
+                 if rule_id not in found]
+    problems += [f"多出 APPLIED_TO 邊：規則 {rule_id} 不在 rules_applied" for rule_id in found
+                 if rule_id not in rules_applied]
+    return problems
+
+
+def _extra_step_problems(version_id: str, steps: Sequence[StepDraft],
+                         repository: Repository) -> list[str]:
+    """基表裡不可以有 S3 全文以外的 STEP item：多出來的步驟同樣讓版本不完整。
+
+    缺的步驟由 `_step_edge_problems`（該步 0 條邊）抓；這裡只抓多的——上一版留下的第 5 步
+    會跟著這一版一起被 `get_steps` 讀出來、一起發布出去，全文卻沒有它。應有步驟的權威
+    是 S3 全文（設計 §10、D-39），所以比較的基準是 `parse_markdown().steps` 的編號集合。
+    """
+    expected = {step.number for step in steps}
+    extra = sorted({item.number for item in repository.get_steps(version_id)} - expected)
+    return [f"多出全文沒有的 STEP item：第 {number} 步" for number in extra]
 
 
 def _step_edge_problems(version_id: str, steps: Sequence[StepDraft],
@@ -666,9 +720,13 @@ def _missing_parts(version_id: str, repository: Repository) -> list[str]:
     `step_count`（strict 模型只收模型欄位加保留屬性），所以步驟清單一律由
     `parse_markdown(全文).steps` 推得。全文讀不回來時後面的核對都沒有意義，直接返回。
 
-    **全部用完整 PK 的 `query_pk(..., consistent=True)`**，不查最終一致的 `by_target`：
-    剛寫入的邊在 GSI 裡可能還看不到，用它核對會誤判「關係不完整」，或更糟地把別人的
-    舊資料當成本版的邊而誤判「完整」。
+    **全部用完整 PK 的 `query_pk(..., consistent=True)` 或基表一致 `scan_entity`**，不查最終
+    一致的 `by_target`：剛寫入的邊在 GSI 裡可能還看不到，用它核對會誤判「關係不完整」，
+    或更糟地把別人的舊資料當成本版的邊而誤判「完整」。
+
+    **「不缺」與「不多」都要驗。** 只驗缺漏時，多出來的 STEP item、指向本版卻不在
+    `rules_applied` 裡的 `APPLIED_TO` 邊、以及第二條 `SUPERSEDES` 都會安靜通過，
+    讓 Phase 24 發布出一份「權威欄位與邊互相矛盾」的版本。
     """
     version = repository.get_version(version_id)
     if version is None:
@@ -686,9 +744,8 @@ def _missing_parts(version_id: str, repository: Repository) -> list[str]:
         problems.append(f"缺少 S3 差異檔 {df_key}")
     steps = parse_markdown(body.decode("utf-8")).steps
     problems += _step_edge_problems(version_id, steps, repository)
-    if version.supersedes is not None and not _has_edge(
-            repository, version_key, "SUPERSEDES", version_pk(version.supersedes)):
-        problems.append(f"缺少 SUPERSEDES 邊：{version.supersedes}")
-    problems += [f"規則 {rule_id} 缺少 APPLIED_TO 邊" for rule_id in version.rules_applied
-                 if not _has_edge(repository, rule_pk(rule_id), "APPLIED_TO", version_key)]
+    problems += _extra_step_problems(version_id, steps, repository)
+    expected_base = [] if version.supersedes is None else [version_pk(version.supersedes)]
+    problems += _exact_edge_problems(repository, version_key, "SUPERSEDES", expected_base)
+    problems += _applied_to_problems(version_id, version.rules_applied, repository)
     return problems
