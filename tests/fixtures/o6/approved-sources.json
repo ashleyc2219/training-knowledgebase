@@ -1,0 +1,57 @@
+[
+  {
+    "domain": "github.com",
+    "event_type": "issues",
+    "adapter": "github_issue",
+    "stable_keys": ["action", "issue", "repository", "sender"],
+    "fixture": "github/issue-opened.json",
+    "id_encoder": "github_ticket_id",
+    "stable_user_source": "sender.id",
+    "approved_by": "docs/design/training-kb.md §7.2",
+    "approved_at": "2026-09-13"
+  },
+  {
+    "domain": "github.com",
+    "event_type": "pull_request",
+    "adapter": "github_pr",
+    "stable_keys": ["action", "number", "pull_request", "repository", "sender"],
+    "fixture": "github/pull-request-merged.json",
+    "id_encoder": "github_release_id",
+    "stable_user_source": "sender.id",
+    "approved_by": "",
+    "approved_at": ""
+  },
+  {
+    "domain": "discord.com",
+    "event_type": "manual_batch",
+    "adapter": "discord_manual",
+    "stable_keys": ["source", "domain", "adapter", "batch_id", "items"],
+    "fixture": "manual/discord-message.json",
+    "id_encoder": "檔案提供",
+    "stable_user_source": "檔案 author",
+    "approved_by": "",
+    "approved_at": ""
+  },
+  {
+    "domain": "mail.local",
+    "event_type": "manual_batch",
+    "adapter": "email_manual",
+    "stable_keys": ["source", "domain", "adapter", "batch_id", "items"],
+    "fixture": "manual/support-email.json",
+    "id_encoder": "檔案提供",
+    "stable_user_source": "檔案 author",
+    "approved_by": "",
+    "approved_at": ""
+  },
+  {
+    "domain": "changelog.local",
+    "event_type": "manual_batch",
+    "adapter": "changelog_manual",
+    "stable_keys": ["source", "domain", "adapter", "batch_id", "items"],
+    "fixture": "manual/changelog-entry.json",
+    "id_encoder": "檔案提供",
+    "stable_user_source": "不適用",
+    "approved_by": "",
+    "approved_at": ""
+  }
+]
