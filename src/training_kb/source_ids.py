@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from training_kb.errors import IngressError
 
 SLUG_PATTERN = re.compile(r"^[a-z0-9._-]+$")
+USER_PATTERN = re.compile(r"^[a-z0-9_-]{2,64}$")
 
 
 def _part(value: str, field: str) -> str:
@@ -61,3 +62,18 @@ def sub_release_ids(
         (name, github_release_id(owner, repo, pr_number, index))
         for index, name in enumerate(sorted(names), start=1)
     )
+
+
+def github_user_id(numeric_id: int) -> str:
+    """GitHub 的穩定使用者：只用數字 id，改名（login）不改人。"""
+    if isinstance(numeric_id, bool) or not isinstance(numeric_id, int) or numeric_id <= 0:
+        raise IngressError("GitHub 使用者識別必須是正整數", ("user",))
+    return f"u_gh-{numeric_id}"
+
+
+def stable_user_from_import(value: str) -> str:
+    """手動匯入檔的使用者 ID：只做格式檢查，缺值直接拒絕，不補值也不從顯示名稱猜。"""
+    candidate = value.strip() if isinstance(value, str) else ""
+    if not USER_PATTERN.fullmatch(candidate):
+        raise IngressError("匯入檔必須提供合法的穩定使用者 ID", ("user",))
+    return candidate

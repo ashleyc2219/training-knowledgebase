@@ -1,0 +1,15 @@
+{
+  "source": "email",
+  "domain": "mail.local",
+  "adapter": "email_manual",
+  "batch_id": "manual-2026-09-06-02",
+  "items": [
+    {
+      "id": "t_em-20260902-0117",
+      "text": "請問會前摘要的入口在哪一頁？我在側欄找不到。",
+      "author": "u_03",
+      "ts": "2026-09-02T05:47:00Z",
+      "project_id": "demo"
+    }
+  ]
+}

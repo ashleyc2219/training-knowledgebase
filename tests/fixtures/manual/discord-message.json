@@ -1,0 +1,15 @@
+{
+  "source": "discord",
+  "domain": "discord.com",
+  "adapter": "discord_manual",
+  "batch_id": "manual-2026-09-06-01",
+  "items": [
+    {
+      "id": "t_dc-1180042-8891",
+      "text": "如何看到開會前整理的重點？",
+      "author": "u_03",
+      "ts": "2026-09-02T03:14:00Z",
+      "project_id": "demo"
+    }
+  ]
+}

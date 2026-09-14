@@ -1,0 +1,17 @@
+{
+  "source": "changelog",
+  "domain": "changelog.local",
+  "adapter": "changelog_manual",
+  "batch_id": "manual-2026-09-06-03",
+  "items": [
+    {
+      "id": "r_cl-20260903-01",
+      "feature": "Prepare",
+      "kind": "renamed",
+      "old_name": "Meeting Summary",
+      "new_name": "Prepare",
+      "evidence": "2026-09-03 changelog：Meeting Summary 更名為 Prepare。",
+      "ts": "2026-09-03T11:05:12Z"
+    }
+  ]
+}
