@@ -14,6 +14,8 @@ owner 是 Phase 33；P34（兩層命中與候選排序）、P35（PROC 生命週
 GitHub 路徑必須先通過 Phase 30 的 HMAC 驗簽。簽名只是結構索引，不是身分驗證。
 """
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -65,9 +67,27 @@ def event_stable_keys(event: RawEvent) -> frozenset[str]:
 # --- 2. 結構簽名（Phase 33）---------------------------------------------------
 
 
+def signature_shape(event: RawEvent) -> dict[str, object]:
+    """簽名素材：只有 domain、白名單 header **名稱**與已核定的最上層 key **名稱**。
+
+    序列化結果裡搜不到任何事件值（ID、標題、時間、header 值都不在）。header 名稱一律
+    小寫、去重、排序；`adapter` 刻意不進 shape，它存在 `ProvenWorkflow.adapter`（D-09）。
+    """
+    headers = sorted(
+        {name.lower() for name in event.headers if name.lower().startswith(HEADER_PREFIXES)}
+    )
+    return {"domain": event.domain, "headers": headers, "keys": sorted(event_stable_keys(event))}
+
+
 def structure_signature(event: RawEvent) -> str:
-    event_stable_keys(event)
-    return ""  # Task 2 換成主來源的雜湊公式
+    """shape 的 UTF-8 JSON 取 SHA-1 前 16 個十六進位字元（設計 §7.2 逐字公式）。
+
+    **不得加 `separators`**：`json.dumps` 的預設分隔符是 `", "` 與 `": "`，改了 bytes 就不同，
+    兩個實作會算出對不起來的簽名。這個 SHA-1 只是結構索引，不是驗簽，也不得用來判斷
+    請求是否可信；GitHub 路徑的安全邊界在 Phase 30 的 HMAC。
+    """
+    shape = signature_shape(event)
+    return hashlib.sha1(json.dumps(shape, sort_keys=True).encode()).hexdigest()[:16]
 
 
 # --- 3. 兩層命中與候選排序（Phase 34 追加）------------------------------------
