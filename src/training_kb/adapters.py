@@ -17,8 +17,17 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from training_kb.config import DEFAULT_PROJECT_ID
 from training_kb.errors import PermanentError
+from training_kb.models import ReleaseKind, ReleaseSource, TicketSource
 from training_kb.pipelines.common import JSONValue
+from training_kb.source_ids import (
+    github_release_id,
+    github_source_event_id,
+    github_ticket_id,
+    github_user_id,
+    stable_user_from_import,
+)
 
 # --- 1. 安全 JSONPath（Phase 36）---------------------------------------------
 
@@ -133,3 +142,274 @@ class ToolRegistry:
         if tool is None:
             raise PermanentError(f"工具不在白名單或未註冊: {name}")
         return tool(arguments)
+
+
+# --- 3. 八個工具（Phase 36）---------------------------------------------------
+
+GITHUB_ENCODING = "github"
+FILE_ENCODING = "file"
+"""parser 宣告「這筆的 ID 與 user 怎麼算」，對應 O6 核定紀錄的 `id_encoder` 欄。
+
+`github` 對應 `github_ticket_id`／`github_release_id`（由 Phase 13 的編碼函式算出），
+`file` 對應「檔案提供」（手動匯入檔自己帶 ID）。parser **不自己產生 ID 或 user**，
+只把算 ID 需要的來源事實（owner／repo／number）原樣往下傳。
+"""
+
+
+def _arg(arguments: Mapping[str, JSONValue], name: str) -> JSONValue:
+    if name not in arguments:
+        raise PermanentError(f"工具參數缺少 {name}")
+    return arguments[name]
+
+
+def _pick(value: JSONValue, *names: str) -> JSONValue:
+    """依序取巢狀欄位；任何一層不是物件或缺欄位都丟 `PermanentError`，**不回 `None`**。"""
+    current = value
+    for name in names:
+        if not isinstance(current, Mapping) or name not in current:
+            raise PermanentError(f"來源資料缺少欄位: {'.'.join(names)}")
+        current = current[name]
+    return current
+
+
+def _mapping(value: JSONValue, field: str) -> dict[str, JSONValue]:
+    if not isinstance(value, Mapping):
+        raise PermanentError(f"{field} 必須是物件")
+    return value
+
+
+def _sequence(value: JSONValue, field: str) -> list[JSONValue]:
+    if not isinstance(value, list):
+        raise PermanentError(f"{field} 必須是清單")
+    return value
+
+
+def _text(value: JSONValue, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PermanentError(f"{field} 必須是非空字串")
+    return value
+
+
+def _whole(value: JSONValue, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PermanentError(f"{field} 必須是整數")
+    return value
+
+
+def _require_kind(parsed: dict[str, JSONValue], expected: str) -> None:
+    """normalizer 與 parser 的配對檢查，在 `validate` **之前**就擋下（設計 §7.2）。
+
+    Agent 仍可自由挑 parser（ING Rule 10），被擋掉的只有「PR diff 拿去做 Ticket」
+    這種配對；訊息一律含 `kind` 兩個字，讓測試抓得到失敗原因而不是只看到型別錯誤。
+    """
+    actual = _text(_pick(parsed, "kind"), "kind")
+    if actual != expected:
+        raise PermanentError(f"kind 不相容：這個 normalizer 只接受 {expected}，收到 {actual}")
+
+
+def parse_github_issue(arguments: Mapping[str, JSONValue]) -> JSONValue:
+    """GitHub Issue webhook payload → Ticket 候選欄位；只讀 fixture 已有的欄位。"""
+    payload = _arg(arguments, "payload")
+    parsed: dict[str, JSONValue] = {
+        "kind": "ticket", "encoding": GITHUB_ENCODING, "source": TicketSource.GITHUB_ISSUE.value,
+        "text": _text(_pick(payload, "issue", "body"), "issue.body"),
+        "author_id": _whole(_pick(payload, "sender", "id"), "sender.id"),
+        "number": _whole(_pick(payload, "issue", "number"), "issue.number"),
+        "owner": _text(_pick(payload, "repository", "owner", "login"), "repository.owner.login"),
+        "repo": _text(_pick(payload, "repository", "name"), "repository.name"),
+        "ts": _text(_pick(payload, "issue", "created_at"), "issue.created_at")}
+    return parsed
+
+
+def _batch_item(arguments: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
+    """手動匯入檔：整包批次時取第一筆 `items`，也接受 path 直接指到某一筆。
+
+    多筆批次的逐筆展開是 Phase 42 固定匯入的事；本 Phase 的工具只處理「一次一筆」，
+    Agent 想指定第幾筆時記 `$event.payload.items[k]` 即可（index 仍在 path 裡，不是真值）。
+    """
+    payload = _mapping(_arg(arguments, "payload"), "payload")
+    if "items" not in payload:
+        return payload
+    items = _sequence(payload["items"], "items")
+    if not items:
+        raise PermanentError("手動匯入批次的 items 是空的")
+    return _mapping(items[0], "items[0]")
+
+
+def _manual_ticket(arguments: Mapping[str, JSONValue], source: TicketSource) -> JSONValue:
+    item = _batch_item(arguments)
+    parsed: dict[str, JSONValue] = {
+        "kind": "ticket", "encoding": FILE_ENCODING, "source": source.value,
+        "id": _text(_pick(item, "id"), "id"),
+        "text": _text(_pick(item, "text"), "text"),
+        "author": _text(_pick(item, "author"), "author"),
+        "ts": _text(_pick(item, "ts"), "ts")}
+    return parsed
+
+
+def parse_discord_message(arguments: Mapping[str, JSONValue]) -> JSONValue:
+    """Discord 手動匯入的一則訊息 → Ticket 候選欄位（ID 與 user 由檔案提供）。"""
+    return _manual_ticket(arguments, TicketSource.DISCORD)
+
+
+def parse_support_email(arguments: Mapping[str, JSONValue]) -> JSONValue:
+    """支援信箱手動匯入的一封信 → Ticket 候選欄位（ID 與 user 由檔案提供）。"""
+    return _manual_ticket(arguments, TicketSource.EMAIL)
+
+
+def _feature_of(change: JSONValue) -> str:
+    return _text(_pick(change, "feature"), "feature")
+
+
+def _changes_from_body(body: str) -> list[JSONValue]:
+    """把 PR body 的「功能變更」條列讀成 `changes`（決策 F14：一個功能變更一筆）。
+
+    Phase 13 的 fixture 把兩個子變更放在 `pull_request.body`，格式是
+    `- <kind>: <舊名> -> <新名>`；`kind` 不在 `ReleaseKind` 三個值裡的條列一律略過，
+    那是說明文字不是變更。清單依 `feature` **升序**排列，才會與 Phase 13 的
+    `sub_release_ids`（同樣依名稱升序配 `k`）算出同一組 `r_` ID——同一個 PR 重送、
+    條列順序不同也得到相同結果。
+    """
+    kinds = set(ReleaseKind)
+    changes: list[JSONValue] = []
+    for line in body.splitlines():
+        if not line.startswith("- ") or ": " not in line:
+            continue
+        kind, rest = line.removeprefix("- ").split(": ", 1)
+        if kind not in kinds:
+            continue
+        old_name, _, new_name = rest.partition(" -> ")
+        changes.append({"kind": kind, "evidence": line, "feature": new_name or old_name,
+                        "old_name": old_name if new_name else None,
+                        "new_name": new_name or None})
+    changes.sort(key=_feature_of)
+    return changes
+
+
+def parse_pr_diff(arguments: Mapping[str, JSONValue]) -> JSONValue:
+    """GitHub PR webhook payload → `{"kind": "release", "changes": [...]}`（F14）。
+
+    一律回**清單**，只改到一個功能時長度就是 1；挑第幾筆是 `normalize_release` 的
+    `index` 的事，本函式不挑也不合併。
+    """
+    payload = _arg(arguments, "payload")
+    parsed: dict[str, JSONValue] = {
+        "kind": "release", "encoding": GITHUB_ENCODING, "source": ReleaseSource.GITHUB_PR.value,
+        "owner": _text(_pick(payload, "repository", "owner", "login"), "repository.owner.login"),
+        "repo": _text(_pick(payload, "repository", "name"), "repository.name"),
+        "pr_number": _whole(_pick(payload, "pull_request", "number"), "pull_request.number"),
+        "ts": _text(_pick(payload, "pull_request", "merged_at"), "pull_request.merged_at"),
+        "changes": _changes_from_body(
+            _text(_pick(payload, "pull_request", "body"), "pull_request.body"))}
+    return parsed
+
+
+def parse_changelog(arguments: Mapping[str, JSONValue]) -> JSONValue:
+    """changelog 手動匯入 → `{"kind": "release", "changes": [...]}`；ID 由檔案提供。"""
+    item = _batch_item(arguments)
+    change: dict[str, JSONValue] = {
+        "id": _text(_pick(item, "id"), "id"),
+        "feature": _text(_pick(item, "feature"), "feature"),
+        "kind": _text(_pick(item, "kind"), "kind"),
+        "old_name": item.get("old_name"), "new_name": item.get("new_name"),
+        "evidence": _text(_pick(item, "evidence"), "evidence"),
+        "ts": _text(_pick(item, "ts"), "ts")}
+    parsed: dict[str, JSONValue] = {
+        "kind": "release", "encoding": FILE_ENCODING, "source": ReleaseSource.CHANGELOG.value,
+        "changes": [change]}
+    return parsed
+
+
+def normalize_ticket(arguments: Mapping[str, JSONValue]) -> JSONValue:
+    """Ticket 候選欄位 → Phase 31 要的 canonical payload；ID 與 user 只由 Phase 13 產生。
+
+    `project_id` 一律填 Phase 02 的 `DEFAULT_PROJECT_ID`：工具只吃 `arguments`，
+    拿不到 `Settings`，所以這裡不猜專案（MVP 只有一個專案）。
+    """
+    parsed = _mapping(_arg(arguments, "parsed"), "parsed")
+    _require_kind(parsed, "ticket")
+    if _text(_pick(parsed, "encoding"), "encoding") == GITHUB_ENCODING:
+        identifier = github_ticket_id(_text(_pick(parsed, "owner"), "owner"),
+                                      _text(_pick(parsed, "repo"), "repo"),
+                                      _whole(_pick(parsed, "number"), "number"))
+        author = github_user_id(_whole(_pick(parsed, "author_id"), "author_id"))
+    else:
+        identifier = _text(_pick(parsed, "id"), "id")
+        author = stable_user_from_import(_text(_pick(parsed, "author"), "author"))
+    candidate: dict[str, JSONValue] = {
+        "id": identifier, "source": _text(_pick(parsed, "source"), "source"),
+        "text": _text(_pick(parsed, "text"), "text"), "author": author,
+        "ts": _text(_pick(parsed, "ts"), "ts"), "project_id": DEFAULT_PROJECT_ID}
+    return candidate
+
+
+def _sub_release_index(arguments: Mapping[str, JSONValue]) -> int:
+    """`index` 省略時當成 1（決策 F14）；小於 1 直接拒絕，`k` 從 1 起算。"""
+    index = _whole(arguments.get(SUB_RELEASE_INDEX, 1), SUB_RELEASE_INDEX)
+    if index < 1:
+        raise PermanentError(f"子 Release 序號從 1 起算: {index}")
+    return index
+
+
+def normalize_release(arguments: Mapping[str, JSONValue]) -> JSONValue:
+    """第 k 筆子 Release 的 canonical payload；同一個 PR 的每一筆共用 `source_event_id`。
+
+    `k` 超出 `changes` 長度一律 `PermanentError`，**不**回一個猜出來的空 Release。
+    對每一筆 change 重跑一次 `normalize_release → validate` 是 Phase 37 的事。
+    """
+    parsed = _mapping(_arg(arguments, "parsed"), "parsed")
+    _require_kind(parsed, "release")
+    changes = _sequence(_pick(parsed, "changes"), "changes")
+    index = _sub_release_index(arguments)
+    if index > len(changes):
+        raise PermanentError(f"子 Release 序號 {index} 超出 changes 的長度 {len(changes)}")
+    change = _mapping(changes[index - 1], f"changes[{index - 1}]")
+    source_event_id: JSONValue = None
+    if _text(_pick(parsed, "encoding"), "encoding") == GITHUB_ENCODING:
+        owner = _text(_pick(parsed, "owner"), "owner")
+        repo = _text(_pick(parsed, "repo"), "repo")
+        number = _whole(_pick(parsed, "pr_number"), "pr_number")
+        identifier = github_release_id(owner, repo, number, index)
+        source_event_id = github_source_event_id(owner, repo, number)
+        ts = _text(_pick(parsed, "ts"), "ts")
+    else:
+        identifier = _text(_pick(change, "id"), "id")
+        ts = _text(_pick(change, "ts"), "ts")
+    candidate: dict[str, JSONValue] = {
+        "id": identifier, "source_event_id": source_event_id,
+        "source": _text(_pick(parsed, "source"), "source"), "feature": _feature_of(change),
+        "kind": _text(_pick(change, "kind"), "kind"), "old_name": change.get("old_name"),
+        "new_name": change.get("new_name"),
+        "evidence": _text(_pick(change, "evidence"), "evidence"), "ts": ts}
+    return candidate
+
+
+def validate(arguments: Mapping[str, JSONValue]) -> JSONValue:
+    """最後一步：交給 Phase 31 的 `validate_ticket`／`validate_release`，缺欄位由它報。
+
+    本 Phase **不自寫欄位檢查**；型別用 `source` 分派（`TicketSource` 與 `ReleaseSource`
+    的值互斥），因為 canonical Release 的 `kind` 已經是 `renamed`／`changed`／`removed`，
+    不能同時兼任「ticket 還是 release」的判別欄位。回 `model_dump(mode="json")`，
+    讓整條工具鏈維持同一個 `JSONValue` 型別；Phase 37 再用同一組 validator 取得物件。
+
+    `ingress` 在函式內 import：`adapters` → `ingress` 是模組層唯一的外部相依，延後到
+    呼叫時才載入，Phase 37 若讓 `ingress` 反向 import `rote` 也不會變成循環 import。
+    """
+    from training_kb.ingress import validate_release, validate_ticket
+
+    candidate = _mapping(_arg(arguments, "candidate"), "candidate")
+    source = _text(_pick(candidate, "source"), "source")
+    if source in set(TicketSource):
+        return validate_ticket(candidate).model_dump(mode="json")
+    if source in set(ReleaseSource):
+        return validate_release(candidate).model_dump(mode="json")
+    raise PermanentError(f"validate 分不出 candidate 的類型: source={source}")
+
+
+def default_registry() -> ToolRegistry:
+    """恰好八個核定工具的 registry；沒有 shell、browser、發布或任意 AWS 工具。"""
+    return ToolRegistry(tools={
+        "parse_github_issue": parse_github_issue, "parse_discord_message": parse_discord_message,
+        "parse_support_email": parse_support_email, "parse_pr_diff": parse_pr_diff,
+        "parse_changelog": parse_changelog, "normalize_ticket": normalize_ticket,
+        "normalize_release": normalize_release, "validate": validate})
