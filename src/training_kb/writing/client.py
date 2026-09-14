@@ -17,8 +17,9 @@ from botocore.exceptions import ConnectTimeoutError, EndpointConnectionError, Re
 from jsonschema.exceptions import ValidationError
 
 from training_kb.clock import now_utc, to_iso
-from training_kb.errors import PermanentError, TransientError
+from training_kb.errors import ContentError, PermanentError, TransientError
 from training_kb.writing.schemas import validate_schema
+from training_kb.writing.validators import BusinessValidator
 
 # 一筆 trace 的欄位 allowlist：多一個或少一個都是 PermanentError。
 TRACE_FIELDS = ("operation_id", "node", "model", "attempt", "kind", "started_at", "outcome")
@@ -128,6 +129,40 @@ def _parse_schema_json(raw: str, schema: Mapping[str, Any], *, stop_reason: str)
     if not isinstance(value, dict):
         raise PermanentError(f"invalid {name} response: not a JSON object")
     return value
+
+
+# 修正 prompt 的固定形狀：`{code}` 只放 validator 的 `<代碼>: <欄位路徑>`，
+# 不放模型輸出、不放 `<source_data>` 裡的不可信原文（設計 §14.3、00A §3.8）。
+CORRECTION_TEMPLATE = ("{user}\n<validation_error>{code}</validation_error>\n"
+                       "只修正上述違規，其餘逐字保留。")
+
+
+def _generate_with_correction(writer: Writer, system: str, user: str,
+                              schema: Mapping[str, Any], validate: BusinessValidator, *,
+                              operation_id: str, node: str) -> dict[str, Any]:
+    """schema 合法之後再過業務 validator；不合法就**只**修正一次，仍不合法即確定失敗。
+
+    這是固定演算法而不是迴圈：first + second 共兩次 request，第三次不存在（設計 §14.3）。
+    module-private 是刻意的——呼叫端只依賴 `Writer.generate_json` 與自己的 validator，
+    不跨模組 import 這支函式，也不自己重試（00A §6.5）。
+
+    `TransientError`（節流、逾時、服務故障）**不進** `except`：它不是業務問題，重送有機會
+    成功，交給 Phase 29 的單層 ASL Task Retry，也因此不消耗這一次修正預算。
+    """
+    first = writer.generate_json(system, user, schema, operation_id=operation_id, node=node)
+    try:
+        validate(first)
+    except ContentError as exc:
+        correction = CORRECTION_TEMPLATE.format(user=user, code=exc)
+    else:
+        return first
+    second = writer.generate_json(system, correction, schema,
+                                  operation_id=operation_id, node=node)
+    try:
+        validate(second)
+    except ContentError as exc:
+        raise PermanentError(f"business-invalid after one correction: {exc}") from exc
+    return second
 
 
 class BedrockWriter:
