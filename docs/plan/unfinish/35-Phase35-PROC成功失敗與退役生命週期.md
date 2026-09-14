@@ -85,6 +85,12 @@ Phase 04  ProvenWorkflow(signature, domain, adapter, steps, keys, success_count,
 Phase 34  PROC_MIN_SUCCESS = 3；replayable(proc) -> bool   # 門檻常數 import 同一份，不另建
 ```
 
+上面這段是 [00A 第 8 節](00A-共用契約與名詞.md) **D-05 裁決後的版本**：`update_meta` 的關鍵字
+參數以 Phase 06 實作的 `*, expected_revision: int` 為準，不是舊稿的 `expected: Mapping[...]`；
+Phase 35 實作時已逐字核對 `src/training_kb/repository.py`，兩者一致。區塊語言標記維持
+` ```text `（D-01：Consumes 是偽簽名，不能 `ast.parse`）。00A 的 D-01／D-05 兩列把位置記成
+「P35 §5 Consumes」，實際在本文件的 §6「固定介面」；只是列號漂移，裁決內容不變。
+
 ### Produces
 
 ```python
@@ -123,7 +129,7 @@ def proc_changes(proc: ProvenWorkflow) -> dict[str, DynamoValue]: ...
 
 ### Task 1：只有不同事件才累積驗證成功
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from datetime import UTC, datetime
@@ -181,7 +187,7 @@ def test_retired_proc_needs_manual_reset() -> None:
         on_new_success(proc(status=ProcStatus.RETIRED), "op-ticket-t_999", FakeOperations(), NOW)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_proc_lifecycle.py -q
@@ -189,7 +195,7 @@ uv run pytest tests/unit/rote/test_proc_lifecycle.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'on_new_success' from 'training_kb.rote'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from datetime import datetime
@@ -214,7 +220,7 @@ def on_new_success(proc: ProvenWorkflow, operation_id: str,
     return proc.model_copy(update={"success_count": proc.success_count + 1, "last_used": now})
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_proc_lifecycle.py -q
@@ -222,7 +228,7 @@ uv run pytest tests/unit/rote/test_proc_lifecycle.py -q
 
 預期：三個測試 PASS；`success_count` 只跟著 `record_proc_sample` 的 `True` 前進。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/unit/rote/test_proc_lifecycle.py
@@ -231,7 +237,7 @@ git commit -m "feat(rote): 累積不同事件的驗證成功"
 
 ### Task 2：連續重放失敗退役與成功歸零
 
-- [ ] **Step 1：建立失敗測試**（沿用 Task 1 的 `proc()`、`NOW`、`LATER`）
+- [x] **Step 1：建立失敗測試**（沿用 Task 1 的 `proc()`、`NOW`、`LATER`）
 
 ```python
 from training_kb.rote import on_replay_failure, on_replay_success
@@ -260,7 +266,7 @@ def test_third_consecutive_failure_retires() -> None:
         on_replay_failure(current, LATER)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_proc_lifecycle.py -q -k replay
@@ -268,7 +274,7 @@ uv run pytest tests/unit/rote/test_proc_lifecycle.py -q -k replay
 
 預期：FAIL，訊號包含 `cannot import name 'on_replay_failure'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def on_replay_success(proc: ProvenWorkflow, now: datetime) -> ProvenWorkflow:
@@ -284,7 +290,7 @@ def on_replay_failure(proc: ProvenWorkflow, now: datetime) -> ProvenWorkflow:
     return proc.model_copy(update={"fail_count": failures, "status": status})
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_proc_lifecycle.py -q
@@ -292,7 +298,7 @@ uv run pytest tests/unit/rote/test_proc_lifecycle.py -q
 
 預期：六個測試全綠；`fail_count` 是連續值（D20），不是歷史總和。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/unit/rote/test_proc_lifecycle.py
@@ -301,7 +307,7 @@ git commit -m "feat(rote): 連敗三次退役與成功歸零"
 
 ### Task 3：條件更新與 PROC 寫入 owner
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from datetime import UTC, datetime
@@ -312,10 +318,12 @@ import pytest
 from training_kb.errors import CoordinationError
 from training_kb.keys import proc_pk
 from training_kb.models import ProcStatus, ProcStep, ProvenWorkflow
+from training_kb.repository import Repository
 from training_kb.rote import (on_replay_failure, on_replay_success,
                               proc_changes, replayable)
 
 SIG, LATER = "a1b2c3d4e5f60718", datetime(2026, 9, 13, 1, 0, tzinfo=UTC)
+REPO_ROOT = Path(__file__).resolve().parents[2]
 PROC_OWNERS = {"keys.py", "repository.py", "rote.py"}
 BASE = ProvenWorkflow(
     signature=SIG, domain="github.com", adapter="github_issue",
@@ -325,47 +333,62 @@ BASE = ProvenWorkflow(
 )
 
 
-def save(repository, updated: ProvenWorkflow) -> None:
+def save(repository: Repository, updated: ProvenWorkflow) -> None:
     # 呼叫端的固定順序：讀 -> 純函式算 -> 條件寫；CoordinationError 由上層重讀重算
     pk = proc_pk(SIG)
     repository.update_meta(pk, proc_changes(updated),
                            expected_revision=repository.revision_of(pk))
 
 
-def test_interleaved_failures_do_not_lose_a_count(repository) -> None:
+def reload(repository: Repository) -> ProvenWorkflow:
+    """重讀那筆 PROC；`get_proc` 回 `None` 代表 item 不見了，直接在這裡斷言比較好讀。"""
+    stored = repository.get_proc(SIG)
+    assert stored is not None
+    return stored
+
+
+def test_interleaved_failures_do_not_lose_a_count(repository: Repository) -> None:
     repository.put_meta(BASE)
     pk, stale = proc_pk(SIG), repository.revision_of(proc_pk(SIG))
-    worker_a, worker_b = repository.get_proc(SIG), repository.get_proc(SIG)
+    worker_a, worker_b = reload(repository), reload(repository)
     save(repository, on_replay_failure(worker_a, LATER))
     with pytest.raises(CoordinationError, match="revision"):
         repository.update_meta(pk, proc_changes(on_replay_failure(worker_b, LATER)),
                                expected_revision=stale)
-    save(repository, on_replay_failure(repository.get_proc(SIG), LATER))
-    assert repository.get_proc(SIG).fail_count == 2
+    save(repository, on_replay_failure(reload(repository), LATER))
+    assert reload(repository).fail_count == 2
 
 
-def test_persisted_failures_reset_then_retire(repository) -> None:
+def test_persisted_failures_reset_then_retire(repository: Repository) -> None:
     repository.put_meta(BASE)
-    save(repository, on_replay_failure(repository.get_proc(SIG), LATER))
-    save(repository, on_replay_success(repository.get_proc(SIG), LATER))
-    assert repository.get_proc(SIG).fail_count == 0
+    save(repository, on_replay_failure(reload(repository), LATER))
+    save(repository, on_replay_success(reload(repository), LATER))
+    assert reload(repository).fail_count == 0
     for _ in range(3):
-        save(repository, on_replay_failure(repository.get_proc(SIG), LATER))
-    stored = repository.get_proc(SIG)
+        save(repository, on_replay_failure(reload(repository), LATER))
+    stored = reload(repository)
     assert (stored.fail_count, stored.status) == (3, ProcStatus.RETIRED)
     assert replayable(stored) is False
 
 
 def test_only_rote_touches_proc_items() -> None:
     offenders = sorted(
-        str(path) for path in Path("src/training_kb").rglob("*.py")
+        str(path.relative_to(REPO_ROOT))
+        for path in (REPO_ROOT / "src" / "training_kb").rglob("*.py")
         if path.name not in PROC_OWNERS
         and any(t in path.read_text(encoding="utf-8") for t in ("proc_pk(", "PROC#"))
     )
     assert offenders == [], f"只有 Rote 可以讀寫 PROC，違規檔案：{offenders}"
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+`get_proc` 回的是 `ProvenWorkflow | None`，直接接進 `on_replay_failure(...)` 時「item 不見了」
+會變成 `AttributeError: 'NoneType' object has no attribute 'status'`，讀不出真正的原因，
+所以統一走 `reload()`（與 Phase 34 對 `pick_layer2` 的 `assert picked is not None` 同一個理由）。
+掃描範圍用 `REPO_ROOT` 而不是相對路徑 `Path("src/training_kb")`：相對路徑在非 repo 根目錄執行時
+會掃到空清單、測試靜默變成永遠通過，反而失去 Rule 31 的證據力（repo 既有測試一律用
+`Path(__file__).resolve().parents[2]`）。`repository` 參數補 `Repository` 型別註記同樣是既有慣例。
+
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_proc_concurrency.py -q
@@ -373,7 +396,7 @@ uv run pytest tests/integration/test_proc_concurrency.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'proc_changes' from 'training_kb.rote'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from training_kb.clock import to_iso
@@ -386,7 +409,7 @@ def proc_changes(proc: ProvenWorkflow) -> dict[str, DynamoValue]:
             "status": proc.status.value, "last_used": to_iso(proc.last_used)}
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_proc_lifecycle.py tests/integration/test_proc_concurrency.py -q
@@ -395,7 +418,7 @@ uv run ruff check src/training_kb/rote.py tests/unit/rote tests/integration/test
 
 預期：交錯更新最終 `fail_count == 2`（不是 1），stale revision 明確丟 `CoordinationError`，掃描測試回空清單。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/integration/test_proc_concurrency.py
@@ -442,9 +465,9 @@ git commit -m "feat(rote): 以條件更新保護 PROC 計數"
 
 ## 12. 完成清單
 
-- [ ] 新 PROC 的第一次完整成功是 1，第三次才讓 `replayable` 成立；過程中 `status` 一直是 `active`。
-- [ ] 同一個 operation 重送不新增樣本，且判斷依據是 `record_proc_sample` 的 `False`，不是呼叫次數。
-- [ ] `on_replay_success` 只清 `fail_count` 並更新 `last_used`、不虛增驗證樣本；連續三次重放失敗才 retired，中間出現一次成功會重新計算連敗。
-- [ ] `on_replay_failure` 不更新 `last_used`；fallback Agent 成功也不抹除既有連敗。
-- [ ] retired 不會自動復活，三個函式都丟 `PermanentError`。
-- [ ] 條件更新測試證明交錯更新不遺失、stale revision 丟 `CoordinationError`，掃描測試證明只有 Rote 會讀寫 PROC item，且文件沒有把 O2 寫成已 PASS。
+- [x] 新 PROC 的第一次完整成功是 1，第三次才讓 `replayable` 成立；過程中 `status` 一直是 `active`。
+- [x] 同一個 operation 重送不新增樣本，且判斷依據是 `record_proc_sample` 的 `False`，不是呼叫次數。
+- [x] `on_replay_success` 只清 `fail_count` 並更新 `last_used`、不虛增驗證樣本；連續三次重放失敗才 retired，中間出現一次成功會重新計算連敗。
+- [x] `on_replay_failure` 不更新 `last_used`；fallback Agent 成功也不抹除既有連敗。
+- [x] retired 不會自動復活，三個函式都丟 `PermanentError`。
+- [x] 條件更新測試證明交錯更新不遺失、stale revision 丟 `CoordinationError`，掃描測試證明只有 Rote 會讀寫 PROC item，且文件沒有把 O2 寫成已 PASS。
