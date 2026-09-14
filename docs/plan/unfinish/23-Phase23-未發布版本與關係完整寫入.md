@@ -15,7 +15,7 @@
 - 下一階段是 [Phase 24：單篇教學發布提交](./24-Phase24-單篇教學發布提交.md)。
 - 本階段不切 `current_version`、不寫 `published_at`、不寫 `site/`、不產生 HTML、不建立 Tutorial 或 Feature、不重算版號。
 - 關係不完整的版本一律不可發布。`create_version` 失敗時不刪除已寫入的私有 S3 產物；它們讀不到，留著讓重送沿用（F36）。
-- 與本 Phase 有關的 gate：O3 仍待 [Phase 12](./12-Phase12-O3發布切換整合驗證.md)，本階段綠燈只代表「未發布版本寫得完整」，不得宣稱發布或公開切換已驗收；O1 尚未核定，metadata 的 `META` 仍是建議值；O2 尚未 PASS 時不得宣稱「同 operation 重送必得同版號」，那是 [Phase 20](./20-Phase20-版本分配與重試重用.md) 與 O2 的責任。以下程式檔均是實作時預計建立或修改。
+- 與本 Phase 有關的 gate（現況依 controller 2026-09-14 裁決，見 `.superpowers/sdd/phase0914-1/COMMON.md`）：**O3 為 FAIL**（`docs/plan/report/o3-20260914t181109z.md`），本批策略是「離線開發照常，真實切點驗證延後到 P41 起」——本階段綠燈只代表「未發布版本寫得完整」，不得宣稱發布或公開切換已驗收；O1 尚未核定，metadata 的 `META` 仍是建議值；**O2 已 PASS**，但「同 operation 重送必得同版號」仍是 [Phase 20](./20-Phase20-版本分配與重試重用.md) 的責任，本 Phase 不重複宣稱。以下程式檔均是實作時預計建立或修改。
 
 ---
 
@@ -135,29 +135,35 @@ verify_version_complete == True -> 交給 Phase 24；False -> ContentError，不
 
 ## 7. TDD Tasks
 
-三個 Task 共用同一組 fixture，寫在 `tests/integration/conftest.py`：`repository` 是接上 moto 表與 bucket 的 `Repository`，並多兩個測試鉤子 `fail_next_put_meta()`／`fail_next_put_edge()`（用 `monkeypatch` 讓下一次呼叫丟 `TransientError`，模擬中斷）；`seeded_feature` 先寫入 `FEATURE#Prepare` 與 `TUTORIAL#prepare-meeting`（`current_version=None`）；`published_v1` 在它之上再補一個 `published_at` 非空的 `prepare-meeting@v1` 與它的 `tutorials/prepare-meeting/v1.md`；`ready_v2` 是已經跑完 `create_version` 的 v2，另外提供 `delete_md()` 等破壞方法。`version_plan(...)` 與 `four_step_content()` 是同檔的小工具：前者組出 `VersionPlan`，後者與 [Phase 21](./21-Phase21-教學內容與步驟引用驗證.md)、[Phase 22](./22-Phase22-Markdown與Diff私有產物.md) 同名同語意——`title="準備會議"`，四步編號 1–4、`type` 依序 `read`／`click_ui`／`click_ui`／`read`、`feature_id` 都是 `Prepare`、第 3 步文字 `開啟摘要。`，三份文件不可各寫一種形狀。
+三個 Task 共用同一組器材，**寫在 `tests/integration/test_create_version.py`，由 `test_version_complete.py` import**（原文寫「寫在 `tests/integration/conftest.py`」，但 00A §3.2 的 conftest owner 是 Phase 06、修改者只有 Phase 07 與 Phase 08，本 Phase 不在其中；moto 的 `repository`／`table`／`bucket` 三個 fixture 仍然來自 conftest）。內容：`fail_next(repository, name)` 讓 `repository.<name>` 的下一次呼叫丟 `TransientError` 模擬中斷（取代原文的 `fail_next_put_meta()`／`fail_next_put_edge()` 兩個鉤子；`repository` fixture 每個測試都是新的，直接覆寫 instance 屬性比 `monkeypatch` 少一層還原邏輯）；`seeded_feature` 先寫入 `FEATURE#Prepare` 與 `TUTORIAL#prepare-meeting`（`current_version=None`）；`published_v1` 在它之上再補一個 `published_at` 非空的 `prepare-meeting@v1`、它的 `tutorials/prepare-meeting/v1.md` 與 `v1.diff`，並把 `current_version` 切到 v1（只有 publish 成功才會切換，F37）；`ready_v2` 是已經跑完 `create_version` 的 v2，另外提供 `delete_md()` 等破壞方法。`version_plan(...)` 與 `four_step_content()` 是同檔的小工具：前者組出 `VersionPlan`，後者與 [Phase 21](./21-Phase21-教學內容與步驟引用驗證.md)、[Phase 22](./22-Phase22-Markdown與Diff私有產物.md) 同名同語意——`title="準備會議"`，四步編號 1–4、`type` 依序 `read`／`click_ui`／`click_ui`／`read`、`feature_id` 都是 `Prepare`、第 3 步文字 `開啟摘要。`，三份文件不可各寫一種形狀。
+
+以下測試片段裡的 `repo` 一律寫成 `repository`（00A §3.2：integration fixture 名稱一律是 `repository`）；本文件列出的 fixture 參數若已由 `seeded_feature`／`published_v1` 回傳同一個 `Repository`，實作時不再重複宣告 `repository` 參數。
 
 ### Task 1：依固定順序寫出未發布版本
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
-def test_create_version_writes_unpublished_version(repository, seeded_feature):
+def test_create_version_writes_unpublished_version(seeded_feature):
+    repository = seeded_feature
     plan = version_plan("prepare-meeting@v1", number=1, supersedes=None, reason="gap:c12")
     version = create_version(plan, four_step_content(), repository)
     assert version.published_at is None
     assert version.s3_key == "tutorials/prepare-meeting/v1.md"
     assert version.reason == "gap:c12"
-    assert repo.object_exists("tutorials/prepare-meeting/v1.diff")
-    assert repo.get_tutorial("prepare-meeting").current_version is None
+    assert repository.object_exists("tutorials/prepare-meeting/v1.diff")
+    assert repository.get_tutorial("prepare-meeting").current_version is None
 
-def test_published_version_is_never_overwritten(repository, published_v1):
+def test_published_version_is_never_overwritten(published_v1):
+    repository = published_v1
     plan = version_plan("prepare-meeting@v1", number=1, supersedes=None, reason="gap:c12")
     with pytest.raises(ContentError, match="已發布"):
         create_version(plan, four_step_content(), repository)
+    # 「S3 與 DynamoDB 都不變」：VERSION#…@v1 上仍然只有 metadata item，一條邊都沒有多寫。
+    assert [str(item["SK"]) for item in repository.query_pk(version_pk("prepare-meeting@v1"))] == ["META"]
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_create_version.py -q
@@ -165,7 +171,7 @@ uv run pytest tests/integration/test_create_version.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'create_version'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def create_version(plan, content, repository) -> TutorialVersion:
@@ -178,11 +184,11 @@ def create_version(plan, content, repository) -> TutorialVersion:
     md_key = markdown_key(plan.slug, plan.number)
     current_md = render_markdown(content)
     previous_md, previous_name = _previous_markdown(plan, repository)
-    put_private_artifact(repository, md_key, current_md, "text/markdown; charset=utf-8")
+    put_private_artifact(repository, md_key, current_md, MARKDOWN_CONTENT_TYPE)
     put_private_artifact(
         repository, diff_key(plan.slug, plan.number),
         make_diff(previous_md, current_md, previous_name=previous_name, current_name=md_key),
-        "text/plain; charset=utf-8",
+        DIFF_CONTENT_TYPE,
     )
     if existing is None:
         repository.put_meta(TutorialVersion(
@@ -193,7 +199,14 @@ def create_version(plan, content, repository) -> TutorialVersion:
     return _verified(plan.version_id, repository)
 ```
 
-- [ ] **Step 4：補上兩個私有輔助函式並跑綠燈**
+Phase 22 沒有把 content type 定成常數，本 Phase 在 `content.py` 定名（Phase 22 報告第 7 節第 5 點允許）：
+
+```python
+MARKDOWN_CONTENT_TYPE = "text/markdown; charset=utf-8"
+DIFF_CONTENT_TYPE = "text/plain; charset=utf-8"
+```
+
+- [x] **Step 4：補上兩個私有輔助函式並跑綠燈**
 
 ```python
 def _previous_markdown(plan, repository) -> tuple[str | None, str]:
@@ -219,7 +232,7 @@ def _verified(version_id: str, repository) -> TutorialVersion:
 
 執行 `uv run pytest tests/integration/test_create_version.py -q`，預期兩個測試 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/integration/test_create_version.py
@@ -228,33 +241,39 @@ git commit -m "feat(content): 寫出未發布的教學版本"
 
 ### Task 2：三種關係邊與 target 一致
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 V2_PLAN = dict(number=2, supersedes="prepare-meeting@v1",
                reason="release:r_42", rules_applied=("R-007",))
 
-def test_step_reference_edge_target_matches_sk(repository, published_v1):
+def test_step_reference_edge_target_matches_sk(published_v1):
+    repository = published_v1
     create_version(version_plan("prepare-meeting@v2", **V2_PLAN), four_step_content(), repository)
-    rows = repo.query_pk("STEP#prepare-meeting@v2#3", consistent=True)
+    rows = repository.query_pk("STEP#prepare-meeting@v2#3", consistent=True)
     assert len(rows) == 1
     assert rows[0]["SK"] == "REFERENCES#FEATURE#Prepare"
     assert rows[0]["target"] == "FEATURE#Prepare"
     assert rows[0]["entity"] == "STEP"
     assert set(rows[0]) == {"PK", "SK", "target", "entity", "type", "text"}
 
-def test_supersedes_and_applied_to_edges_exist(repository, published_v1):
+def test_supersedes_and_applied_to_edges_exist(published_v1):
+    repository = published_v1
     create_version(version_plan("prepare-meeting@v2", **V2_PLAN), four_step_content(), repository)
-    supersedes = repo.list_edges("VERSION#prepare-meeting@v2", "SUPERSEDES")
+    supersedes = repository.list_edges("VERSION#prepare-meeting@v2", "SUPERSEDES")
     assert [(row["SK"], row["target"]) for row in supersedes] == [
         ("SUPERSEDES#VERSION#prepare-meeting@v1", "VERSION#prepare-meeting@v1")]
-    applied = repo.list_edges("RULE#R-007", "APPLIED_TO")
+    applied = repository.list_edges("RULE#R-007", "APPLIED_TO")
     assert [(row["SK"], row["target"]) for row in applied] == [
         ("APPLIED_TO#VERSION#prepare-meeting@v2", "VERSION#prepare-meeting@v2")]
-    assert repo.get_version("prepare-meeting@v2").rules_applied == ["R-007"]
+    assert repository.get_version("prepare-meeting@v2").rules_applied == ["R-007"]
+
+# 另外三條同檔測試：`get_steps` 能把四步完整還原（00A §3.6 的「寫入端少寫、讀取端算得出來」）、
+# v1 沒有 SUPERSEDES 邊且 `v1.diff` 是 0 位元組、同 plan 第二次呼叫不新增版本也不重建 VERSION
+# item（§8 Boundary）。
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_create_version.py -q
@@ -262,7 +281,7 @@ uv run pytest tests/integration/test_create_version.py -q
 
 預期：FAIL，因為此時只寫了 VERSION item，沒有任何邊。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def _write_edges(plan, content, repository) -> None:
@@ -278,11 +297,11 @@ def _write_edges(plan, content, repository) -> None:
         repository.put_edge(rule_pk(rule_id), "APPLIED_TO", version_key)
 ```
 
-- [ ] **Step 4：確認邊的權威來源與重寫行為**
+- [x] **Step 4：確認邊的權威來源與重寫行為**
 
 `attrs` 只放 `type` 與 `text`：`entity` 是 `put_edge` 自己算的保留屬性，多傳會被丟 `PermanentError`；`tutorial_version`、`number`、`feature_id` 分別由 PK 與 `target` 還原，所以 Phase 08 的 `get_steps` 讀得回完整的 `TutorialStep`。`APPLIED_TO` 只依 `plan.rules_applied` 產生，不從前一版繼承（F29、D17）。邊的內容完全由 plan 與 content 決定，所以重送時重寫同一筆邊是安全的，不需要條件寫入。執行 `uv run pytest tests/integration/test_create_version.py -q`，預期整檔 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/integration/test_create_version.py
@@ -291,26 +310,32 @@ git commit -m "feat(content): 寫出版本的三種關係邊"
 
 ### Task 3：`verify_version_complete` 與部分寫入的保留
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 @pytest.mark.parametrize("break_it", ["delete_md", "delete_diff", "delete_step_edge",
                                       "delete_feature", "delete_supersedes_edge"])
-def test_incomplete_version_is_not_complete(repository, ready_v2, break_it):
+def test_incomplete_version_is_not_complete(ready_v2, break_it):
     getattr(ready_v2, break_it)()
-    assert verify_version_complete("prepare-meeting@v2", repository) is False
+    assert verify_version_complete("prepare-meeting@v2", ready_v2.repository) is False
 
-def test_interrupted_write_keeps_private_artifacts(repository, seeded_feature):
-    repo.fail_next_put_meta()
+def test_interrupted_write_keeps_private_artifacts(seeded_feature):
+    repository = seeded_feature
+    fail_next(repository, "put_meta")
     plan = version_plan("prepare-meeting@v1", number=1, supersedes=None, reason="gap:c12")
     with pytest.raises(TransientError):
         create_version(plan, four_step_content(), repository)
-    assert repo.object_exists("tutorials/prepare-meeting/v1.md")
-    assert repo.get_version("prepare-meeting@v1") is None
+    assert repository.object_exists("tutorials/prepare-meeting/v1.md")
+    assert repository.get_version("prepare-meeting@v1") is None
     assert verify_version_complete("prepare-meeting@v1", repository) is False
+
+# 另外五條同檔測試：未被破壞的 v2 回 `True`；`delete_applied_to_edge`／`delete_tutorial` 兩種
+# 缺漏也回 `False`；一步兩條引用邊回 `False` 且 `create_version` 的訊息含「應恰好一條」
+# （§8 Boundary）；連 VERSION item 都沒有時回 `False`；寫邊中斷後同一份 plan 重送會補齊
+# （`fail_next(repository, "put_edge")`，設計 §8.2 的第三個中斷點）。
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_version_complete.py -q
@@ -318,7 +343,7 @@ uv run pytest tests/integration/test_version_complete.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'verify_version_complete'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def verify_version_complete(version_id: str, repository: Repository) -> bool:
@@ -332,15 +357,17 @@ def _step_edge_problems(version_id, steps, repository) -> list[str]:
         if len(rows) != 1:
             problems.append(f"第 {step.number} 步應恰好一條引用邊，實際 {len(rows)} 條")
             continue
-        target = str(rows[0].get("target", ""))
-        if not target.startswith("FEATURE#") or rows[0].get("SK") != edge_sk("REFERENCES", target):
-            problems.append(f"第 {step.number} 步的 SK 與 target 不一致：{rows[0].get('SK')}")
+        # SK 先收成 str：raw item 的值型別含 bytes，直接 f-string 會被 mypy strict 的
+        # str-bytes-safe 擋下（而本專案不用 `# type: ignore`）。
+        sort_key, target = str(rows[0].get("SK", "")), str(rows[0].get("target", ""))
+        if not target.startswith("FEATURE#") or sort_key != edge_sk("REFERENCES", target):
+            problems.append(f"第 {step.number} 步的 SK 與 target 不一致：{sort_key}")
         elif repository.get_feature(parse_pk(target)[1]) is None:
             problems.append(f"第 {step.number} 步引用的 Feature 不存在：{target}")
     return problems
 ```
 
-- [ ] **Step 4：組出 `_missing_parts` 並跑綠燈**
+- [x] **Step 4：組出 `_missing_parts` 並跑綠燈**
 
 ```python
 def _has_edge(repository, pk: str, relation: str, target_pk: str) -> bool:
@@ -354,7 +381,8 @@ def _missing_parts(version_id: str, repository: Repository) -> list[str]:
     if version is None:
         return [f"找不到 VERSION item {version_id}"]
     slug, number = parse_version_id(version_id)
-    md_key, df_key, version_key = markdown_key(slug, number), diff_key(slug, number), version_pk(version_id)
+    md_key, df_key = markdown_key(slug, number), diff_key(slug, number)
+    version_key = version_pk(version_id)
     problems = [f"找不到 TUTORIAL item {slug}"] if repository.get_tutorial(slug) is None else []
     if version.s3_key != md_key:
         problems.append(f"s3_key 應為 {md_key}，實際 {version.s3_key}")
@@ -375,7 +403,7 @@ def _missing_parts(version_id: str, repository: Repository) -> list[str]:
 
 核對全部用完整 PK 的 `query_pk(..., consistent=True)`，不查 GSI；應有步驟一律以 S3 全文 `parse_markdown().steps` 為準，沒有 `step_count` 可讀。執行 `uv run pytest tests/integration/test_version_complete.py -q`，預期五組破壞參數與中斷案例全部 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/integration/test_version_complete.py
@@ -425,11 +453,11 @@ Rule 原文逐字取自 feature 檔；primary 歸屬依 [00B 需求覆蓋對照]
 
 ## 11. 完成清單
 
-- [ ] 兩個公開函式的簽名符合本文件；寫入順序為 S3 產物 → VERSION → STEP／邊 → 自我核對。
-- [ ] 新版本的 `published_at` 一律是 `None`，`current_version` 不變。
-- [ ] `REFERENCES`、`SUPERSEDES`、`APPLIED_TO` 三種邊都有 `target` 等於 SK 終點的 assertion。
-- [ ] VERSION 與 STEP item 的屬性只有模型欄位加上 `PK`／`SK`／`target`／`entity`／`_revision`，沒有 `step_count`。
-- [ ] 已發布版本不可覆寫；同 plan 重送不新增版本；五種缺漏都讓 `verify_version_complete` 回 `False`。
-- [ ] 中斷後私有 S3 產物仍在，且公開站無任何變化。
-- [ ] 建立教學版本 Rule 3、4、6、8 各有直接 assertion；Rule 5、7、9、10 只標為相關。
-- [ ] 整合測試已實際執行；沒有把綠燈說成 O3 發布 gate 已通過。
+- [x] 兩個公開函式的簽名符合本文件；寫入順序為 S3 產物 → VERSION → STEP／邊 → 自我核對。
+- [x] 新版本的 `published_at` 一律是 `None`，`current_version` 不變。
+- [x] `REFERENCES`、`SUPERSEDES`、`APPLIED_TO` 三種邊都有 `target` 等於 SK 終點的 assertion。
+- [x] VERSION 與 STEP item 的屬性只有模型欄位加上 `PK`／`SK`／`target`／`entity`／`_revision`，沒有 `step_count`。
+- [x] 已發布版本不可覆寫；同 plan 重送不新增版本；五種缺漏都讓 `verify_version_complete` 回 `False`。
+- [x] 中斷後私有 S3 產物仍在，且公開站無任何變化。
+- [x] 建立教學版本 Rule 3、4、6、8 各有直接 assertion；Rule 5、7、9、10 只標為相關。
+- [x] 整合測試已實際執行；沒有把綠燈說成 O3 發布 gate 已通過。
