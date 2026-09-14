@@ -8,6 +8,9 @@ moto 的 PASS 只證明資料形狀與分頁邏輯，**不**證明真實 DynamoD
 
 from datetime import UTC, datetime
 
+import pytest
+
+from training_kb.errors import PermanentError
 from training_kb.keys import feedback_pk, step_pk, ticket_pk, version_pk
 from training_kb.models import Feedback, Ticket
 
@@ -63,3 +66,37 @@ def test_step_edges_are_scanned_with_meta_only_off(repository, paged_repository)
     assert [str(item["PK"]) for item in paged_repository.scan_entity("STEP", meta_only=False)] == [
         pk
     ]
+
+
+def test_list_feedback_of_version_ignores_other_relations(repository) -> None:
+    """GPH Rule 6：以 `REFERS_TO` 反查某版的回饋；同一個終點上的別種邊不入選。"""
+    target = version_pk(VERSION)
+    for feedback_id in ("f_15", "f_12"):
+        repository.put_meta(feedback(feedback_id))
+        repository.put_edge(feedback_pk(feedback_id), "REFERS_TO", target)
+    repository.put_edge(version_pk("prepare-meeting@v2"), "SUPERSEDES", target)
+    repository.put_edge(ticket_pk("t_881"), "ASKS_ABOUT", target)
+    found = repository.list_feedback_of_version(VERSION)
+    assert [item.id for item in found] == ["f_12", "f_15"]
+    assert found[0] == feedback("f_12")
+
+
+def test_by_target_candidates_only_carry_keys(repository, paged_repository) -> None:
+    """GPH Rule 2：候選來自 `by_target`，而且 `KEYS_ONLY` 只投影三個鍵，內容要回基表拿。"""
+    target = version_pk(VERSION)
+    repository.put_meta(feedback("f_12"))
+    repository.put_edge(feedback_pk("f_12"), "REFERS_TO", target)
+    repository.put_edge(version_pk("prepare-meeting@v2"), "SUPERSEDES", target)
+    candidates = paged_repository.query_by_target(target)
+    assert sorted(str(item["PK"]) for item in candidates) == [
+        "FEEDBACK#f_12", "VERSION#prepare-meeting@v2"
+    ]
+    assert all(set(item) == {"PK", "SK", "target"} for item in candidates)
+    assert all(str(item["target"]) == target for item in candidates)
+
+
+def test_candidate_without_base_item_fails_loudly(repository) -> None:
+    """GSI 只會落後基表、不會多出資料，所以候選讀不到本體代表資料不完整，必須明確失敗。"""
+    repository.put_edge(feedback_pk("f_12"), "REFERS_TO", version_pk(VERSION))
+    with pytest.raises(PermanentError, match="has no base item"):
+        repository.list_feedback_of_version(VERSION)
