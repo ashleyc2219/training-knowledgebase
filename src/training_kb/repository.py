@@ -14,10 +14,11 @@ AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**
    `put_meta_item`／`get_meta_item`（服務 `OPS#`／`CONFIG#`／`SEQ#`／`LEASE#`）
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 from typing import Any, TypeVar
 
+from boto3.dynamodb.conditions import ConditionBase, Key
 from botocore.exceptions import ClientError
 
 from training_kb.errors import (
@@ -28,8 +29,10 @@ from training_kb.errors import (
 )
 from training_kb.keys import (
     META,
+    edge_sk,
     feature_pk,
     feedback_pk,
+    parse_edge_sk,
     parse_pk,
     proc_pk,
     release_pk,
@@ -59,6 +62,7 @@ from training_kb.models import (
 type DynamoScalar = str | int | float | bool | None | bytes
 type DynamoValue = DynamoScalar | list[DynamoValue] | dict[str, DynamoValue]
 type DynamoItem = dict[str, DynamoValue]
+type EdgeAttrs = Mapping[str, DynamoValue] | None
 
 T = TypeVar("T", bound=StrictModel)
 
@@ -336,3 +340,64 @@ class Repository:
                 return False
             raise
         return True
+
+    # --- 關係邊 ---
+
+    def put_edge(self, pk: str, relation: str, target_pk: str, attrs: EdgeAttrs = None) -> None:
+        """保存一筆 `PK=起點`、`SK=<關係>#<終點>`、`target=<終點>` 的邊（設計 §9.2）。
+
+        `target` **只能**由 `target_pk` 導出：呼叫端另外傳一個 `target` 會讓同一份資訊有兩份
+        會不一致的副本，所以保留屬性一律拒絕。`entity` 等於起點 PK 的前綴（00A §3.6），
+        Phase 08 的 `scan_entity` 就是靠它篩選。屬性值走與 `put_meta_item` 同一套
+        Decimal codec，整套只有一個地方決定 `float` 怎麼寫進表。
+        """
+        extra = {key: _encode(value) for key, value in dict(attrs or {}).items()}
+        forbidden = sorted(RESERVED_ATTRS.intersection(extra))
+        if forbidden:
+            raise PermanentError(f"edge attributes are reserved: {forbidden}")
+        sort_key = edge_sk(relation, target_pk)
+        if parse_edge_sk(sort_key) != (relation, target_pk):
+            raise PermanentError(f"edge sort key does not round-trip: {sort_key}")
+        self._table.put_item(
+            Item={"PK": pk, "SK": sort_key, "target": target_pk,
+                  "entity": parse_pk(pk)[0], **extra}
+        )
+
+    def _paged(self, operation: Callable[..., Any], **arguments: Any) -> list[DynamoItem]:
+        """反覆呼叫同一個 boto3 操作直到回應沒有 `LastEvaluatedKey`，**空頁不早停**。
+
+        DynamoDB 的一頁可能沒有任何 `Items` 卻仍帶 `LastEvaluatedKey`（被過濾掉或撞到 1 MB
+        上限），看到空頁就 `break` 會靜默漏資料。本 Phase 只有 `list_edges` 用它；
+        Phase 08 會擴充（加 `Limit`）再給三個公開查詢共用，所以留在 `Repository` 內部。
+        """
+        items: list[DynamoItem] = []
+        while True:
+            response = operation(**arguments)
+            items.extend(response.get("Items", []))
+            cursor = response.get("LastEvaluatedKey")
+            if not cursor:
+                return items
+            arguments["ExclusiveStartKey"] = cursor
+
+    def list_edges(self, pk: str, relation: str | None = None) -> list[DynamoItem]:
+        """回某個起點的全部邊（可選擇只要某一種關係）；`META` item 不算邊。
+
+        讀取端也逐筆核對 `SK` 終點與 `target`，因為 backfill（Phase 28）與維護腳本一樣會
+        寫邊，只在寫入端檢查發現不了已經寫壞的資料；不一致就停下來丟 `PermanentError`，
+        **不自動修正**。回的是 raw item，呼叫端要模型一律經 `item_to_model`（00A §3.6）。
+        """
+        condition: ConditionBase = Key("PK").eq(pk)
+        if relation is not None:
+            condition = condition & Key("SK").begins_with(f"{relation}#")
+        edges: list[DynamoItem] = []
+        for item in self._paged(
+            self._table.query, KeyConditionExpression=condition, ConsistentRead=True
+        ):
+            sort_key = str(item["SK"])
+            if sort_key == META:
+                continue
+            if parse_edge_sk(sort_key)[1] != item.get("target"):
+                raise PermanentError(
+                    f"edge target does not match sort key: {str(item['PK'])} {sort_key}")
+            edges.append(item)
+        return edges
