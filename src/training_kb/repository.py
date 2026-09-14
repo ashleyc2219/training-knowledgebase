@@ -15,9 +15,11 @@ AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**
    再往下是 Phase 07 的 S3 物件（`put_object`／`get_object`／`object_exists`）與
    關係邊（`put_edge`／`list_edges`，共用私有的 `_paged`），最後是 Phase 08 的三個公開查詢
    （`query_pk`／`query_by_target`／`scan_entity`）與六個固定讀取（`get_steps` 與五個 `list_*`）
+5. Phase 24 追加的交易寫入（`table_name`／`transact_write`）：唯一走 boto3 **client** 的一段，
+   值仍然是原生 Python 值（resource 的 client 會自己序列化，見 `transact_write` 說明）
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from typing import Any, TypeVar
 
@@ -558,3 +560,46 @@ class Repository:
         """某個 domain＋adapter 的全部既有流程，依 signature 升序；兩個條件都要相等。"""
         return self._scan_models("PROC", ProvenWorkflow, lambda proc: proc.signature,
                                  domain=domain, adapter=adapter)
+
+    # --- 5. 交易寫入（Phase 24 追加） ---
+
+    @property
+    def table_name(self) -> str:
+        """交易 action 的 `TableName`；就是 `self._table.name`（00A §6.7）。"""
+        name: str = self._table.name
+        return name
+
+    def transact_write(self, items: Sequence[Mapping[str, object]]) -> int | None:
+        """一次送出 all-or-nothing 的 `TransactWriteItems`；**全部成功回 `None`**。
+
+        `transact_write_items` 只存在於 **client**，所以這裡經 `self._table.meta.client`
+        取得。**但值一律用原生 Python 值，不是 `{"S": ...}` 低階 AttributeValue**（00A §6.7
+        與 Phase 24 §5 原本寫低階形式，與 boto3 實際行為不符，已在 Phase 24 文件更正）：
+        `boto3.resource("dynamodb")` 會在**它自己的 client** 上註冊
+        `dynamodb-attr-value-input`（`boto3/dynamodb/transform.py`），把所有 `AttributeValue`
+        形狀的參數再序列化一次，所以傳 `{"S": "TUTORIAL#x"}` 會變成
+        `{"M": {"S": {"S": "TUTORIAL#x"}}}`，moto 與真實 DynamoDB 都會拒絕。`self._table`
+        永遠是 resource Table，它的 `meta.client` 永遠帶著這個轉換，所以整個 `Repository`
+        只有一種寫法：原生 Python 值。
+
+        回傳值是「**哪一個 action 的條件不符**」：
+        - 全部成功 -> `None`
+        - 任一 `ConditionalCheckFailed` -> 它在 `items` 裡的 index（`CancellationReasons`
+          依 `TransactItems` 順序回報，取**第一個**不符的）
+        - 其他取消原因（容量不足、同鍵衝突、內部錯誤…）-> `TransientError`，交 ASL Retry
+
+        條件不符不是例外而是回傳值：呼叫端（`Publisher.commit`）要用它換算成「哪一篇、
+        哪一個欄位」的可讀原因，而不是把整次執行變成失敗。真正的 `TransactionCanceledException`
+        以外的 `ClientError` 一律原樣往外丟。
+        """
+        try:
+            self._table.meta.client.transact_write_items(TransactItems=list(items))
+        except ClientError as error:
+            if error.response["Error"]["Code"] != "TransactionCanceledException":
+                raise
+            reasons: Any = error.response.get("CancellationReasons", [])
+            for index, reason in enumerate(reasons):
+                if reason.get("Code") == "ConditionalCheckFailed":
+                    return index
+            raise TransientError(f"transaction cancelled: {reasons}") from error
+        return None
