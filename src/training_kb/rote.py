@@ -16,7 +16,7 @@ GitHub 路徑必須先通過 Phase 30 的 HMAC 驗簽。簽名只是結構索引
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from training_kb.errors import PermanentError
@@ -122,6 +122,33 @@ def replayable(proc: ProvenWorkflow) -> bool:
     「還沒累積到三次」是用 `success_count` 表達，不是另外加一個狀態。
     """
     return proc.status == ProcStatus.ACTIVE and proc.success_count >= PROC_MIN_SUCCESS
+
+
+def _order_key(scored: tuple[float, ProvenWorkflow]) -> tuple[float, float, str]:
+    """決策 F04 的三段排序鍵：分數最高 → `last_used` 最新 → signature 升序。
+
+    第三個鍵不是裝飾：少了它，同分同時間的兩個候選就由 Scan 回來的順序決定勝負，
+    同一份資料換個排列可能得到不同結果。`last_used` 由 Phase 04 保證必填且帶時區，
+    所以可以直接取 `.timestamp()`；本 Phase 不補值、不把 naive 時間當 UTC。
+    """
+    score, proc = scored
+    return (-score, -proc.last_used.timestamp(), proc.signature)
+
+
+def pick_layer2(event: RawEvent, candidates: Sequence[ProvenWorkflow]) -> ProvenWorkflow | None:
+    """第二層：同 domain＋adapter 的可重放候選裡，Jaccard 最高且過門檻的那一個。
+
+    即使 `list_procs` 已依 domain＋adapter 查詢，這裡仍再過濾一次——這個純函式要能
+    單獨測試，也不該倚賴查詢層是否寫對條件（範圍定義見決策 D19）。沒有合格候選回 `None`。
+    """
+    keys = event_stable_keys(event)
+    hits = [
+        (jaccard(keys, frozenset(proc.keys)), proc)
+        for proc in candidates
+        if replayable(proc) and proc.domain == event.domain and proc.adapter == event.adapter
+    ]
+    hits = [pair for pair in hits if pair[0] >= JACCARD_THRESHOLD]
+    return min(hits, key=_order_key)[1] if hits else None
 
 
 # --- 4. PROC 生命週期（Phase 35 追加）-----------------------------------------
