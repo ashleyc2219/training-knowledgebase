@@ -11,6 +11,7 @@ Phase 41（Task 包裝與 handler）會繼續在同一支檔案上追加。
 """
 
 from collections.abc import Iterable
+from datetime import date, timedelta
 
 from training_kb.config import Thresholds
 from training_kb.errors import PermanentError
@@ -109,3 +110,31 @@ def new_cluster_id(existing: Iterable[str]) -> str:
     if candidate in known:
         raise PermanentError(f"新群編號 {candidate} 已存在")
     return candidate
+
+
+# --- 3. Recurring 判定（Task：evaluate_recurring） ---------------------------
+
+RECURRING_DAYS = 14
+"""窗口長度：當日加前 13 個 UTC **日期**，共十四個。
+
+`Thresholds` 刻意**沒有**對應欄位（00A §5.4），所以這份 `14` 就是全套唯一一份；
+不得自創 `Thresholds.recurring_days` 這種新欄位名（D-35）。
+"""
+
+RECURRING_MIN_TICKETS = Thresholds().recurring_tickets
+"""recurring 門檻，`Thresholds.recurring_tickets` 的別名；模組裡不得再出現第二份 `5`。"""
+
+
+def recurring_window(anchor: date, days: int = RECURRING_DAYS) -> frozenset[date]:
+    """回傳 anchor 當日與前 `days - 1` 個 UTC 日期組成的**日期集合**（設計 §7.3、F11）。
+
+    是「日期集合」而不是「時間區間」：同一個 UTC 日不管幾點都落在同一個桶裡，所以
+    `2026-08-31T00:00:00Z` 在窗口內、`2026-08-30T23:59:59Z` 在窗口外。用
+    `now - 14 days` 這種區間算法會讓同一批輸入在不同時刻重跑得到不同答案。
+
+    `days < 1` 是呼叫端的錯，不是資料問題：窗口至少要含 anchor 當日本身，
+    空窗口會讓任何一群都算不出 recurring 而**安靜地**跳過命名。
+    """
+    if days < 1:
+        raise PermanentError(f"recurring 窗口天數至少為 1，收到 {days}")
+    return frozenset(anchor - timedelta(days=offset) for offset in range(days))
