@@ -11,22 +11,37 @@ Phase 41（Task 包裝與 handler）會繼續在同一支檔案上追加。
 """
 
 import json
+import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from pydantic import ValidationError
+
+from training_kb.analytics.status_writer import load_validated_at
 from training_kb.clock import to_iso, utc_date
 from training_kb.config import Thresholds
+from training_kb.content import VersionPlan, allocate_version, create_version, validate_content
 from training_kb.errors import ContentError, PermanentError
 from training_kb.keys import META, feature_pk, operation_ref, ticket_pk
-from training_kb.models import Feature, Ticket, Tutorial, TutorialStatus
+from training_kb.models import (
+    Feature,
+    RuleStatus,
+    StepType,
+    Ticket,
+    Tutorial,
+    TutorialContent,
+    TutorialStatus,
+)
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import DynamoItem, Repository, item_to_model
+from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
 from training_kb.vectors import centroid, cosine
-from training_kb.writing.client import Writer
-from training_kb.writing.prompts import prompt_name_gap
-from training_kb.writing.schemas import GapNaming
+from training_kb.writing.client import Writer, generate_validated_json
+from training_kb.writing.prompts import prompt_name_gap, prompt_write_tutorial
+from training_kb.writing.schemas import GapNaming, TutorialDraft
 from training_kb.writing.validators import BusinessValidator, gap_naming_validator
 
 CLUSTER_COSINE_THRESHOLD = Thresholds().cosine_match
@@ -375,3 +390,183 @@ def _link_tickets(gap: TicketGap, *, repository: Repository) -> None:
             repository.put_meta(ticket.model_copy(update={"feature_ids": [feature_id]}),
                                 create_only=False)
         repository.put_edge(ticket_pk(ticket_id), "ASKS_ABOUT", feature_pk(feature_id))
+
+
+# --- 6. slug 與教學身分 -------------------------------------------------------
+
+_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+"""教學 slug 的唯一形狀：ASCII 小寫字母數字，以單一連字號分段（00A §3.3）。"""
+
+
+def _kebab(raw: str) -> str:
+    """把任意文字折成 ASCII kebab-case；折不出東西就回空字串。"""
+    folded = unicodedata.normalize("NFKD", raw or "").encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")[:60].strip("-")
+
+
+def tutorial_slug(gap: TicketGap, title: str, *, repository: Repository) -> str:
+    """決定這一篇教學的 slug；**模型不產任何穩定 ID**（設計 §7.6）。
+
+    退讓順序固定，所以同一個 operation 重試會得到同一個 slug，不會像「遞增 -2、-3」那樣
+    每次換一個：
+
+    ```text
+    _kebab(content.title) -> 空的就退回 _kebab(feature_id) -> 再空就退回 gap-<cluster_id>
+                          -> 被「別群」佔用就固定改用 <base>-<cluster_id>
+                          -> 仍衝突 -> ContentError（不再往下編號）
+    ```
+
+    「被佔用」只看 `Tutorial.cluster_id`：同一群的既有教學就是上一次重試留下的那一篇，
+    直接沿用（`create_tutorial_identity` 會回傳它）。
+    """
+    base = _kebab(title) or _kebab(gap.feature_id or "") or _kebab(f"gap-{gap.cluster_id}")
+    if not _SLUG_RE.fullmatch(base):
+        raise ContentError(f"slug 必須是 ASCII kebab-case：{base!r}")
+    for candidate in (base, f"{base}-{gap.cluster_id}"):
+        owner = repository.get_tutorial(candidate)
+        if owner is None or owner.cluster_id == gap.cluster_id:
+            return candidate
+    raise ContentError(f"slug {base} 已被其他群佔用")
+
+
+def create_tutorial_identity(gap: TicketGap, *, slug: str, topic: str,
+                             repository: Repository) -> Tutorial:
+    """建立 `TUTORIAL#<slug>` 這筆 metadata；**只有 Ticket Analysis 能做這件事**。
+
+    先 `get_tutorial` 再 `put_meta(create_only=True)` 是刻意的：重試時直接回既有那一篇，
+    只有真正併發撞鍵才會讓 `put_meta` 丟 `CoordinationError`。
+
+    `feature_ids=[gap.feature_id]` **必須**寫進去：Phase 27 的
+    `find_active_tutorial_for_feature` 是用 `feature_id in Tutorial.feature_ids` 找的，
+    漏寫的話下一輪同群工單會再建一篇。`Tutorial` 的七個欄位就是全部，不得多塞第八個
+    （00A D-40）。`current_version=None`、`successor=None`：建立與發布是兩件事（設計 §8.2）。
+    """
+    feature_id = gap.feature_id
+    if feature_id is None:
+        raise ContentError(f"群 {gap.cluster_id} 沒有有效 Feature，不能建立教學身分")
+    existing = repository.get_tutorial(slug)
+    if existing is not None:                     # 同一群重試：沿用既有那一篇，不重寫
+        if existing.cluster_id != gap.cluster_id:
+            raise ContentError(f"教學 {slug} 屬於別群 {existing.cluster_id}")
+        return existing
+    tutorial = Tutorial(slug=slug, topic=topic, status=TutorialStatus.ACTIVE,
+                        current_version=None, feature_ids=[feature_id],
+                        successor=None, cluster_id=gap.cluster_id)
+    repository.put_meta(tutorial, create_only=True)   # 併發撞鍵 -> CoordinationError
+    return tutorial
+
+
+# --- 7. 建立未發布的第一版（Task：create_first_version） ----------------------
+
+ALL_STEP_TYPES: tuple[StepType, ...] = tuple(StepType)
+"""`click_ui`、`input`、`read`（Phase 03 的宣告順序）。
+
+直接由 `tuple(StepType)` 取得，不重打一份字串清單，才不會跟 Phase 03 的列舉成員拼法分岔
+（00A §5.2）。
+"""
+
+
+def _evidence_text(gap: TicketGap, repository: Repository) -> str:
+    """把 gap 診斷與**同群**工單原文串成 Phase 17 要的那**一個**字串。
+
+    只讀 `gap.ticket_ids` 指定的工單：別群的文字不會進 prompt。工單不存在代表上游資料
+    不一致，明確失敗而不是安靜少一筆證據（少的那一筆會讓寫出來的教學不可重現）。
+    轉義與分區標記由 `prompt_write_tutorial` 內部的 `_as_data` 負責（00A D-67），
+    本函式只負責挑對證據。
+    """
+    texts: list[str] = [gap.gap]
+    for ticket_id in gap.ticket_ids:
+        ticket = repository.get_meta(ticket_pk(ticket_id), Ticket)
+        if ticket is None:
+            raise ContentError(f"工單 {ticket_id} 不存在，無法組出寫作證據")
+        texts.append(ticket.text)
+    return "\n".join(texts)
+
+
+def _own_retry_tutorial(gap: TicketGap, *, repository: Repository) -> Tutorial | None:
+    """本群上一次重試留下的那一篇 active 教學；沒有就回 `None`。
+
+    第一次跑完之後，`TUTORIAL#<slug>` 已經是 active，`decide_ticket_action` 會改回 KEEP，
+    中斷後重送因此會撞上 `create_first_version` 的守衛。用 `Tutorial.cluster_id` 分辨兩件事：
+    **同一群**的那一篇就是自己上一次留下的，允許沿用同版號補齊（F36、D26）；**別群**
+    （含 Demo 直接寫入的種子教學）佔住 Feature 就是真正的 KEEP，一律 `PermanentError`。
+    """
+    if gap.feature_id is None:
+        return None
+    existing = _active_tutorial(repository, gap.feature_id)
+    return existing if existing is not None and existing.cluster_id == gap.cluster_id else None
+
+
+def _as_content(payload: dict[str, Any]) -> TutorialContent:
+    """`generate_json` 回的是 `dict`，不是模型；這裡才是唯一的 `model_validate`（D-02）。
+
+    pydantic 的 `ValidationError` 轉成 `ContentError`，修正迴圈（`generate_validated_json`）
+    才攔得到而給模型一次機會。訊息只放欄位數，**不放模型輸出**（00A §3.8）。
+    """
+    try:
+        return TutorialContent.model_validate(payload)
+    except ValidationError as error:
+        raise ContentError(f"tutorial_draft_invalid: {error.error_count()} 個欄位") from error
+
+
+def _tutorial_draft_validator(known_feature_ids: frozenset[str]) -> BusinessValidator:
+    """`TutorialDraft` 的業務檢查：五段齊全、每步恰一個既有 Feature（Phase 21）。
+
+    只是把 Phase 21 的 `validate_content` 包成 `BusinessValidator` 交給
+    `generate_validated_json`；業務判斷本身**一份都不重寫**（00A §6.5）。
+    """
+    def validate(payload: dict[str, Any]) -> None:
+        validate_content(_as_content(payload), known_feature_ids)
+    return validate
+
+
+def create_first_version(gap: TicketGap, *, repository: Repository, writer: Writer,
+                         operations: OperationCoordinator, operation_id: str,
+                         now: datetime) -> VersionPlan:
+    """CREATE：寫出一個**未發布**的 v1，順序不可調換（設計 §7.3、§8.2）。
+
+    ```text
+    1 再判一次 decide_ticket_action -> 不是 CREATE 就 PermanentError
+    2 list_rules(ACTIVE) + load_validated_at -> rules_for_content -> 去重後的 injected 清單
+    3 render_rules_block(injected) 進 prompt -> generate_validated_json(TutorialDraft)
+    4 （驗證在 3 裡面：TutorialContent.model_validate + validate_content）
+    5 tutorial_slug 產生並驗證 kebab-case 與唯一
+    6 create_tutorial_identity（create_only=True、feature_ids=[feature_id]；重試沿用同一篇）
+    7 allocate_version(reason="gap:<cluster_id>", rules_applied=applied_rule_ids)
+    8 create_version -> published_at 仍是 null
+    9 record_decision("CREATE", ...) -> 寫決策紀錄並連工單到 Feature
+    ```
+
+    **先驗內容再建身分**：模型輸出不合法時不留下一個空的 `TUTORIAL#` item。步驟 2 的規則
+    選取是純函式，`list_rules` 與 `load_validated_at` 都由本函式先讀好再傳進 Phase 19；
+    步驟 7 的 `rules_applied` 只放**本次實際注入 prompt** 的 ID，沿用原文不算套用（F29）。
+
+    模型呼叫走 `generate_validated_json`（00A §6.5：schema 後業務驗證＋最多一次修正的
+    唯一合法入口），本函式自己**不重試、不另組修正 prompt**。
+    """
+    if decide_ticket_action(gap, repository=repository) != "CREATE" \
+            and _own_retry_tutorial(gap, repository=repository) is None:
+        raise PermanentError(f"群 {gap.cluster_id} 不是 CREATE，不能建立第一版")
+    rules = repository.list_rules(RuleStatus.ACTIVE)
+    by_type = rules_for_content(rules, ALL_STEP_TYPES, load_validated_at(repository))
+    injected = list({rule.rule_id: rule
+                     for step_type in ALL_STEP_TYPES
+                     for rule in by_type[step_type]}.values())
+    features = known_features(repository)
+    known = frozenset(feature.feature_id for feature in features)
+    system, user = prompt_write_tutorial(_evidence_text(gap, repository),
+                                         [feature.feature_id for feature in features],
+                                         render_rules_block(injected))
+    # node 名固定 "create_v1"：人工驗收靠它在 `CallTrace` 裡數同一個 operation 的 attempt。
+    draft = generate_validated_json(writer, system, user, TutorialDraft,
+                                    _tutorial_draft_validator(known),
+                                    operation_id=operation_id, node="create_v1")
+    content = _as_content(draft)              # draft 是 dict，不是模型
+    slug = tutorial_slug(gap, content.title, repository=repository)
+    create_tutorial_identity(gap, slug=slug, topic=content.title, repository=repository)
+    plan = allocate_version(slug, operation_id, operations, repository=repository,
+                            reason=f"gap:{gap.cluster_id}",
+                            rules_applied=applied_rule_ids(injected))
+    create_version(plan, content, repository)
+    record_decision("CREATE", gap, repository=repository, operation_id=operation_id, now=now)
+    return plan

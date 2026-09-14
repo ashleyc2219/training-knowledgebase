@@ -33,7 +33,19 @@ def _as_data(text: str) -> str:
 
 def prompt_write_tutorial(source_text: str, allowed_features: Sequence[str],
                           rules_block: str) -> tuple[str, str]:
-    """CREATE 的教學寫作（Phase 40 的 `create_v1` 節點）；`allowed_features` 只放裸 ID。"""
+    """CREATE 的教學寫作（Phase 40 的 `create_v1` 節點）；`allowed_features` 只放裸 ID。
+
+    `source_text` 是**一個**字串：Phase 40 的 `_evidence_text` 把 gap 診斷與**同群**工單原文
+    串好再傳進來，別群的文字不會進 prompt。三個參數的順序與型別由 Phase 17 固定，不可改成
+    傳 `Feature` 物件或多加一個參數。
+
+    工單原文與規則文字都是不可信資料，一律經 `_as_data` 包進 `<source_data>`／`<active_rules>`
+    分區當資料、不當指令（00A D-67）；偽造的 `</source_data>` 因此被轉義成
+    `&lt;/source_data&gt;`，關不掉分區。`<active_rules>` 的內容由 Phase 19 的
+    `render_rules_block` 產生，**只放本次實際注入的 active 規則**（沒有就是空字串，F29）。
+    「只能用 allowed_features 內的 feature_id」在 system 說一次，程式端還有 Phase 21 的
+    `validate_content` 再擋一次——prompt 是提醒，驗證才是保證。
+    """
     user = (
         f"<allowed_features>{json.dumps(list(allowed_features), ensure_ascii=False)}"
         "</allowed_features>\n"

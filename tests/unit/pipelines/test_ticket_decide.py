@@ -15,9 +15,19 @@ from typing import Any
 
 import pytest
 
+from training_kb.analytics.status_writer import VALIDATED_AT_KEY
 from training_kb.clock import parse_iso
 from training_kb.errors import ContentError, CoordinationError, ObjectAlreadyExists
-from training_kb.keys import META, edge_sk, feature_pk, parse_pk, ticket_pk, tutorial_pk
+from training_kb.keys import (
+    META,
+    edge_sk,
+    feature_pk,
+    parse_pk,
+    parse_step_pk,
+    ticket_pk,
+    tutorial_pk,
+    version_pk,
+)
 from training_kb.models import (
     AuthoringRule,
     Feature,
@@ -25,6 +35,7 @@ from training_kb.models import (
     Ticket,
     Tutorial,
     TutorialStatus,
+    TutorialStep,
     TutorialVersion,
 )
 from training_kb.operations import OperationRecord
@@ -76,8 +87,6 @@ class FakeRepository:
         return self.get_meta(tutorial_pk(slug), Tutorial)
 
     def get_version(self, version_id: str) -> TutorialVersion | None:
-        from training_kb.keys import version_pk
-
         return self.get_meta(version_pk(version_id), TutorialVersion)
 
     def get_feature(self, feature_id: str) -> Feature | None:
@@ -121,6 +130,17 @@ class FakeRepository:
                     meta_only: bool = True) -> list[dict[str, Any]]:
         rows = [item for _, item in sorted(self.table.items()) if item.get("entity") == entity]
         return [row for row in rows if str(row["SK"]) == META] if meta_only else rows
+
+    def get_steps(self, version_id: str) -> list[TutorialStep]:
+        steps: list[TutorialStep] = []
+        for item in self.scan_entity("STEP", meta_only=False):
+            owner, number = parse_step_pk(str(item["PK"]))
+            if owner != version_id:
+                continue
+            payload = {**item, "tutorial_version": owner, "number": number,
+                       "feature_id": parse_pk(str(item["target"]))[1]}
+            steps.append(item_to_model(payload, TutorialStep))
+        return sorted(steps, key=lambda step: step.number)
 
     def list_rules(self, status: object = None) -> list[AuthoringRule]:
         rules = sorted((item_to_model(row, AuthoringRule) for row in self.scan_entity("RULE")),
@@ -167,8 +187,6 @@ class FakeRepository:
 
     def save_validated_at_file(self, mapping: dict[str, str]) -> None:
         """Phase 55 才會寫的 `operations/rules/validated_at.json`（00A D-28）。"""
-        from training_kb.analytics.status_writer import VALIDATED_AT_KEY
-
         self.objects[VALIDATED_AT_KEY] = json.dumps(mapping).encode("utf-8")
 
     # --- 斷言輔助 ---
