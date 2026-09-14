@@ -39,7 +39,7 @@ from training_kb.content import (
     put_private_artifact,
     render_markdown,
 )
-from training_kb.errors import PublishError
+from training_kb.errors import PublishError, TransientError
 from training_kb.keys import tutorial_pk
 from training_kb.models import (
     Feature,
@@ -378,6 +378,28 @@ def test_commit_records_pending_keys_then_promotes_in_fixed_order(
     assert repo.site_writes == pending["site_keys"] + [
         "site/tutorials/prepare-meeting/index.html",
         "site/tutorials/share-summary/index.html", "site/index.html"]
+
+
+def test_pending_promote_list_exists_when_the_first_restage_breaks(
+        publisher: Publisher, repo: BatchRepository,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """整批切點：交易已成功、**第一次 `_restage` 就中斷** → 待補清單仍然已經寫出去。
+
+    父 operation 依 D-59 不持有版號，所以 `operations/<op>/pending-promote.json` 是 P59
+    復原**整批**的唯一輸入。它排在 N 次 `_restage` 之後的話，這個切點會讓交易已切換、
+    待補清單卻不存在，復原沒有任何輸入可用（Phase 25 review 必修 A1）。
+    """
+    prepared = publisher.prepare(batch_request(), now=NOW)
+
+    def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise TransientError("restage 中斷")
+
+    monkeypatch.setattr(publisher, "_restage", broken)
+    with pytest.raises(PublishError, match="a3_after_first_site_before_second"):
+        publisher.commit(prepared, now=NOW)
+    pending = json.loads(repo.objects[PENDING_KEY])
+    assert pending == {"version_ids": [A3, B2], "site_keys": BATCH_SITE_KEYS}
+    assert site_keys(repo) == []
 
 
 def test_pending_promote_list_stays_in_the_private_prefix(

@@ -561,20 +561,25 @@ class Publisher:
                       now: datetime) -> None:
         """交易成功之後的 S3 階段，五步順序固定，不可對調：
 
-        1. 用已切換好的欄位**重新渲染**每篇的 staging（還是私有前綴，讀者看不到）；
-        2. 把待 promote 的公開 key 清單寫進 `operations/<operation_id>/pending-promote.json`
-           ——它必須在**第一個公開物件出現之前**就存在，Phase 59 才有東西可以精確補齊；
+        1. 把待 promote 的公開 key 清單寫進 `operations/<operation_id>/pending-promote.json`；
+        2. 用已切換好的欄位**重新渲染**每篇的 staging（還是私有前綴，讀者看不到）；
         3. 逐篇 `_promote`（與 `promote_site_objects` 同一段邏輯）搬版本頁與公開 diff 副本；
         4. 依 `version_ids` 首次出現順序重寫每個 slug 的教學索引；
         5. 重寫站台索引（整批只寫一次）。
+
+        **待補清單排第一，排在 N 次 `_restage` 之前**：它是 P59 復原**整批**的唯一輸入
+        （父 operation 依 D-59 不持有版號）。排在重新渲染之後的話，「交易成功、第一次
+        `_restage` 就中斷」這個切點會讓 DynamoDB 已經切換、待補清單卻不存在，復原沒有輸入
+        （Phase 25 review 必修 A1）。提前寫是零風險的：payload 只由 `prepared.version_ids`
+        決定（確定性），只寫私有前綴，而且 `if_none_match=False` 允許同 operation 重送覆寫。
 
         「版本頁 → 教學索引 → 站台索引」的順序讓中斷時公開站最多是「新頁已存在但索引還沒
         指過去」，而不是索引指向不存在的頁。例外轉換在 `_after_transaction`。
         """
         operation_id = prepared.request.operation_id
+        self._record_pending_promote(prepared)
         for version, tutorial in loaded:
             self._restage(version, tutorial, operation_id, now=now)
-        self._record_pending_promote(prepared)
         for version_id in prepared.version_ids:
             self._promote(version_id, operation_id)
         for slug in dict.fromkeys(tutorial.slug for _, tutorial in loaded):
