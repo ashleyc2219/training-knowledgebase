@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "training-kb"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = ["pydantic>=2,<3", "boto3>=1.35,<2"]
+dependencies = ["pydantic>=2,<3", "boto3>=1.35,<2", "jsonschema>=4,<5"]
 
 [dependency-groups]
 dev = [
@@ -17,6 +17,7 @@ dev = [
     "boto3-stubs[dynamodb,s3,bedrock,bedrock-runtime,stepfunctions,sts]>=1.35,<2",
     "aws-cdk-lib>=2,<3",
     "constructs>=10,<11",
+    "types-jsonschema>=4,<5",
 ]
 
 [tool.setuptools.packages.find]
