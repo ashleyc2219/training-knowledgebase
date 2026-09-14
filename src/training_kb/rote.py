@@ -483,6 +483,27 @@ class _Run:
         return self.outputs[-1]
 
 
+def _sub_release_index(step: ProcStep, run: _Run) -> int:
+    """F14 子 Release 序號的取值；規則與 `_Run.run` 完全相同，**不得**直接 `int(...)`。
+
+    `validate_recorded_steps` 允許這個參數是字面序號**或** JSONPath（`is_index_literal`
+    是唯一的字面值例外），所以 `int(step.args[...])` 會在 index 是 JSONPath 時丟**裸的**
+    `ValueError`：`normalize_all` 的 `except PermanentError` 接不到它，PROC 不會累計
+    `fail_count`、也不回退 Agent，handler 直接 5xx。
+
+    參數不存在時預設 `"1"`（單筆就是第 1 筆）。取到的值不是 `int` 就收斂成 `PermanentError`
+    ——「這條 PROC 記錄壞了」與其他重放失敗同一類。`bool` 另外擋掉：它是 `int` 的子類，
+    放行的話 `True` 會變成序號 1，把壞資料當成合法輸入。訊息只放 path 與型別名，
+    **不放解析出來的值**（它可能是事件真值，00A §3.8）。
+    """
+    raw = step.args.get(SUB_RELEASE_INDEX, "1")
+    value: JSONValue = (int(raw) if is_index_literal(step.tool, SUB_RELEASE_INDEX, raw)
+                        else run.value(raw))
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PermanentError(f"子 Release 序號不是整數：{raw} -> {type(value).__name__}")
+    return value
+
+
 @dataclass(frozen=True)
 class NormalizationResult:
     """一次正規化的結果：已驗證的 canonical 物件，加上提交 PROC 需要的全部素材。
@@ -715,7 +736,7 @@ class Rote:
         changes = parsed.get("changes") if isinstance(parsed, dict) else None
         if not isinstance(changes, list) or len(changes) <= 1:
             return single
-        recorded = int(steps[position].args.get(SUB_RELEASE_INDEX, "1"))
+        recorded = _sub_release_index(steps[position], run)
         expanded: list[tuple[tuple[ProcStep, ...], Ticket | Release]] = []
         for index in range(1, len(changes) + 1):
             variant = tuple(

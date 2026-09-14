@@ -9,9 +9,17 @@ from typing import Any
 
 import pytest
 
+from training_kb.adapters import SUB_RELEASE_INDEX, ToolRegistry
 from training_kb.errors import PermanentError
-from training_kb.models import ProcStatus, ProvenWorkflow
-from training_kb.rote import AGENT_MAX_TOOL_CALLS, Rote, structure_signature
+from training_kb.models import ProcStatus, ProcStep, ProvenWorkflow
+from training_kb.rote import (
+    AGENT_MAX_TOOL_CALLS,
+    RELEASE_NORMALIZER,
+    Rote,
+    _Run,
+    _sub_release_index,
+    structure_signature,
+)
 from training_kb.source_ids import github_ticket_id, github_user_id
 
 NEIGHBOUR = "beef000000000001"
@@ -141,3 +149,42 @@ def test_a_transient_replay_failure_is_not_a_proc_failure(rote_deps: Any, active
     assert deps.replay_failures == [] and deps.agent_calls == 0
     stored: ProvenWorkflow | None = deps.repository.get_proc(active_proc().signature)
     assert stored is not None and stored.fail_count == 0
+
+
+# --- F14 子 Release 序號的取值（Phase 37 review 必修 B2）----------------------
+
+
+def index_step(value: str | None) -> ProcStep:
+    """`normalize_release` 那一步；`value` 是 `None` 代表整份序列沒帶 `index` 參數。"""
+    args = {"parsed": "$steps[0]"}
+    return ProcStep(tool=RELEASE_NORMALIZER,
+                    args=args if value is None else {**args, SUB_RELEASE_INDEX: value})
+
+
+def run_over(output: Any, raw_issue: Any) -> _Run:
+    """已經跑完第一步的 `_Run`：`$steps[0]` 指得到 `output`。"""
+    return _Run(raw_issue(), ToolRegistry(tools={}), [output])
+
+
+@pytest.mark.parametrize(("value", "expected"), [("1", 1), ("7", 7), (None, 1)])
+def test_sub_release_index_reads_a_literal(value: str | None, expected: int,
+                                           raw_issue: Any) -> None:
+    """字面序號（含「沒帶參數」時的預設 1）直接轉 int，與 `_Run.run` 同一條判準。"""
+    assert _sub_release_index(index_step(value), run_over({}, raw_issue)) == expected
+
+
+def test_sub_release_index_resolves_a_jsonpath(raw_issue: Any) -> None:
+    """`validate_recorded_steps` 允許 index 是 JSONPath，所以這裡不能直接 `int(...)`。
+
+    直接 `int("$steps[0].k")` 會丟**裸的** `ValueError`：`normalize_all` 的
+    `except PermanentError` 接不到，PROC 不會累計失敗，handler 直接 5xx。
+    """
+    run = run_over({"k": 3}, raw_issue)
+    assert _sub_release_index(index_step("$steps[0].k"), run) == 3
+
+
+@pytest.mark.parametrize("output", [{"k": "3"}, {"k": 1.5}, {"k": True}, {"k": None}])
+def test_sub_release_index_refuses_non_integers(output: Any, raw_issue: Any) -> None:
+    """取到的值不是 int（`bool` 也不算）就收斂成 `PermanentError`，不是裸 `ValueError`。"""
+    with pytest.raises(PermanentError, match="子 Release 序號不是整數"):
+        _sub_release_index(index_step("$steps[0].k"), run_over(output, raw_issue))
