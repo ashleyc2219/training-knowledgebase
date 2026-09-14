@@ -76,7 +76,43 @@ def test_missing_section_is_reported(known_feature_ids: frozenset[str]) -> None:
         validate_content(content, known_feature_ids)
 
 
-def test_non_contiguous_step_numbers_are_rejected(known_feature_ids: frozenset[str]) -> None:
-    content = four_step_content(numbers=[1, 2, 4, 5])
+@pytest.mark.parametrize("numbers", [[1, 2, 4, 5], [1, 1, 2, 3]])
+def test_non_contiguous_step_numbers_are_rejected(numbers: list[int],
+                                                  known_feature_ids: frozenset[str]) -> None:
+    """跳號與重複都會讓兩步共用同一個 `STEP#<version_id>#<i>` 鍵（Phase 05）。"""
+    content = four_step_content(numbers=numbers)
     with pytest.raises(ContentError, match="連續整數"):
+        validate_content(content, known_feature_ids)
+
+
+def test_empty_steps_is_rejected(known_feature_ids: frozenset[str]) -> None:
+    content = four_step_content(numbers=())
+    with pytest.raises(ContentError, match="缺少 Steps"):
+        validate_content(content, known_feature_ids)
+
+
+@pytest.mark.parametrize(
+    ("feature_id", "signal"),
+    [("", "沒有引用 Feature"), ("   ", "沒有引用 Feature"),
+     ("Prepare, Share Summary", "引用了多個 Feature"),
+     ("Prepare、Share Summary", "引用了多個 Feature"),
+     ("Calendar", "引用的 Feature 不存在")],
+)
+def test_step_feature_reference_is_strict(feature_id: str, signal: str,
+                                          known_feature_ids: frozenset[str]) -> None:
+    """零個、多個、不存在一律拒絕；不得自動挑第一個或留空待補（D05）。"""
+    content = four_step_content(step3_feature=feature_id)
+    with pytest.raises(ContentError, match=signal):
+        validate_content(content, known_feature_ids)
+
+
+def test_known_feature_name_with_separator_passes(known_feature_ids: frozenset[str]) -> None:
+    """清單命中優先於分隔符號：`Import/Export` 真的存在時不算「多個 Feature」。"""
+    known = known_feature_ids | {"Import/Export"}
+    validate_content(four_step_content(step3_feature="Import/Export"), known)
+
+
+def test_illegal_step_type_is_rejected(known_feature_ids: frozenset[str]) -> None:
+    content = four_step_content(step3_type="scroll")
+    with pytest.raises(ContentError, match="type 不合法"):
         validate_content(content, known_feature_ids)

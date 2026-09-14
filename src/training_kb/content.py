@@ -217,8 +217,50 @@ def _section_problems(content: TutorialContent) -> list[str]:
     return problems
 
 
+_FEATURE_SPLITTERS = (",", "、", ";", "/", "+", " and ")
+
+
+def _feature_problem(index: int, raw: str, known: frozenset[str]) -> str | None:
+    """一步恰好引用一個既有 Feature（D05）；零個或多個一律拒絕，不自動挑第一個。
+
+    **先比對 `known_feature_ids`，比不到才看分隔符號**：名稱真的含有 `/` 或 `+` 的既有
+    Feature（例如 `Import/Export`）因此仍然通過，只有「查無此 Feature 而且長得像兩個」
+    才報「引用了多個」。分隔符號清單是本 Phase 的選擇、不是規格；日後出現名稱含分隔符號
+    又尚未建立成 Feature 的情況，正確做法是先建立／更名該 Feature，不是在這裡放行。
+    """
+    feature_id = raw.strip()
+    if not feature_id:
+        return f"第 {index} 步沒有引用 Feature"
+    if feature_id in known:
+        return None
+    if any(mark in feature_id for mark in _FEATURE_SPLITTERS):
+        return f"第 {index} 步引用了多個 Feature：{feature_id}"
+    return f"第 {index} 步引用的 Feature 不存在：{feature_id}"
+
+
+def _step_problems(content: TutorialContent, known: frozenset[str]) -> list[str]:
+    """逐步檢查文字、型態與 Feature 引用；訊息只帶步驟編號與 `feature_id`。
+
+    **不帶 `step.text` 全文**：這段訊息會被 Phase 18 原樣送回模型，也會落進操作紀錄，
+    帶上全文等於把使用者原始回饋沿著錯誤路徑外流。
+    """
+    problems: list[str] = []
+    for index, step in enumerate(content.steps, start=1):
+        if not step.text.strip():
+            problems.append(f"第 {index} 步沒有文字")
+        if step.type not in LEGAL_STEP_TYPES:
+            problems.append(f"第 {index} 步的 type 不合法：{step.type}")
+        problem = _feature_problem(index, step.feature_id, known)
+        if problem is not None:
+            problems.append(problem)
+    return problems
+
+
 def validate_content(content: TutorialContent, known_feature_ids: frozenset[str]) -> None:
     """結構可不可以保存；不判斷文字好不好，也不修改任何內容。"""
     problems = _section_problems(content)
+    if problems:
+        raise ContentError("教學內容驗證失敗：" + "；".join(problems))
+    problems = _step_problems(content, known_feature_ids)
     if problems:
         raise ContentError("教學內容驗證失敗：" + "；".join(problems))
