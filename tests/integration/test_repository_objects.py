@@ -10,8 +10,9 @@
 from types import SimpleNamespace
 
 import pytest
+from botocore.exceptions import ClientError
 
-from training_kb.errors import ObjectAlreadyExists, PermanentError
+from training_kb.errors import ObjectAlreadyExists, PermanentError, TransientError
 from training_kb.repository import Repository
 
 PRIVATE_PREFIXES = ("tutorials/", "operations/", "stepfunctions/", "demo/previews/")
@@ -80,3 +81,21 @@ def test_every_written_key_stays_in_a_private_prefix(repository, bucket) -> None
     assert len(keys) == 3
     assert all(key.startswith(PRIVATE_PREFIXES) for key in keys)
     assert not any(key.startswith("site/") for key in keys)
+
+
+def test_conflict_is_transient_and_other_client_errors_are_not_swallowed() -> None:
+    """409 轉 `TransientError` 交 ASL Retry（這裡不自己迴圈）；其餘 `ClientError` 一律往外丟。"""
+    def fail_with(code: str):
+        def put_object(**kwargs: object) -> None:
+            raise ClientError({"Error": {"Code": code, "Message": code}}, "PutObject")
+        return put_object
+
+    conflicted = Repository(table=None, bucket=SimpleNamespace(put_object=fail_with(
+        "ConditionalRequestConflict")))
+    with pytest.raises(TransientError, match="conflicted"):
+        conflicted.put_object("operations/op-1/input.json", b"{}", "application/json",
+                              if_none_match=True)
+    denied = Repository(table=None, bucket=SimpleNamespace(put_object=fail_with("AccessDenied")))
+    with pytest.raises(ClientError):
+        denied.put_object("operations/op-1/input.json", b"{}", "application/json",
+                          if_none_match=True)
