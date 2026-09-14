@@ -10,6 +10,12 @@ status=active           -> 兩行都不輸出
 任何情況               -> 頁面裡找不到 release:<id>、使用者 ID 或回饋原文（設計 §13）
 ```
 
+**同一份退役區塊也出現在 `render_tutorial_index`**（controller 裁決 2026-09-14，出口 c）：
+已發布的版本頁不可覆寫，所以退役之後唯一能重寫、又一定會被讀者經過的公開頁就是教學索引。
+`Tutorial.successor` 進到 renderer 時已經是 P26 `resolve_successor` 四項檢查的**結果**
+（不合法時 `retire_tutorial` 讓它保持 `None`），所以 renderer 只負責輸出、不再判一次，
+兩個頁面的連結也因此逐字相同。
+
 連結是**明確可點的提示**，不做自動跳轉：連續跳轉會把循環藏起來，讀者被推來推去也看不出
 自己在哪一篇。完整的退役頁樣式、版本選擇與 diff 檢視留給 Phase 57。
 """
@@ -138,3 +144,50 @@ def test_retired_page_never_leaks_private_data(
         *fixtures.retired(prerequisites=("已登入工作區",)))
     for secret in (REASON, "r_88", PRIVATE_USER, PRIVATE_COMMENT, "c12", "operations/"):
         assert secret not in page
+
+
+# --- 退役提示也要出現在教學索引頁（controller 裁決 2026-09-14，出口 c）-------
+
+
+def test_tutorial_index_of_a_retired_tutorial_shows_notice_and_successor(
+        renderer: SiteRenderer, fixtures: Fixtures) -> None:
+    """退役教學的版本紀錄頁帶提示與後繼連結，連結與版本頁逐字相同。
+
+    版本頁是一次性產物、不可覆寫，所以退役之後改不動；索引是可重建投影，P52 退役後重寫它
+    就能讓讀者看到提示（Phase 26 review 必修 A5）。
+    """
+    tutorial, version, _, _ = fixtures.retired(successor=SUCCESSOR)
+    page = renderer.render_tutorial_index(tutorial, [version])
+    assert 'class="retired"' in page and RETIRED_NOTICE in page
+    assert f'<a href="../{SUCCESSOR}/index.html">' in page
+    assert SUCCESSOR in page
+    assert REASON not in page and "r_88" not in page
+
+
+def test_tutorial_index_of_an_active_tutorial_shows_neither_line(
+        renderer: SiteRenderer, fixtures: Fixtures) -> None:
+    """還在維護的教學兩行都不輸出，即使它身上已經有 successor。"""
+    tutorial, version, _, _ = fixtures.active(successor=SUCCESSOR)
+    page = renderer.render_tutorial_index(tutorial, [version])
+    assert 'class="retired"' not in page
+    assert 'class="successor"' not in page
+    assert RETIRED_NOTICE not in page
+
+
+def test_tutorial_index_omits_the_link_when_the_successor_was_rejected(
+        renderer: SiteRenderer, fixtures: Fixtures) -> None:
+    """後繼沒通過 P26 四項檢查時 `Tutorial.successor` 是空的：有提示、沒有連結（F19）。"""
+    tutorial, version, _, _ = fixtures.retired(successor=None)
+    page = renderer.render_tutorial_index(tutorial, [version])
+    assert 'class="retired"' in page and RETIRED_NOTICE in page
+    assert 'class="successor"' not in page
+    assert "index.html" not in page
+
+
+def test_tutorial_index_escapes_the_successor_slug(renderer: SiteRenderer) -> None:
+    """與版本頁同一道逃脫：`bare_id` 放行 `<`／`"`，所以 slug 一樣要 escape。"""
+    tutorial, version, _, _ = Fixtures.retired(successor='evil"><b>x')
+    page = renderer.render_tutorial_index(tutorial, [version])
+    assert "<b>x" not in page
+    assert "&lt;b&gt;x" in page
+    assert '"><b>' not in page

@@ -38,6 +38,7 @@ from training_kb.models import (
     TutorialVersion,
 )
 from training_kb.repository import DynamoValue, Repository
+from training_kb.site import SiteRenderer
 
 NOW = datetime(2026, 9, 14, 9, 0, tzinfo=UTC)
 SLUG = "meeting-summary"
@@ -265,6 +266,23 @@ def test_retire_completes_even_when_successor_is_invalid(repo: RecordingReposito
     assert snapshot_versions(repo, SLUG) == before
     assert repo.objects[MARKDOWN_KEY] == before.markdown
     assert repo.versions_written == []
+
+
+@pytest.mark.parametrize(("successor", "linked"), [("not-exists", False), (SUCCESSOR, True)])
+def test_tutorial_index_links_only_the_successor_that_passed_the_four_checks(
+        repo: RecordingRepository, successor: str, linked: bool) -> None:
+    """退役之後的教學索引：提示一定在，連結只有通過 P26 四項檢查時才在（F19）。
+
+    renderer 不重判合法性，它讀的就是 `retire_tutorial` 寫下的 `Tutorial.successor`
+    ——所以這條測試把「四項檢查的結果」與「公開頁看得到什麼」接在一起
+    （controller 裁決 2026-09-14，出口 c）。
+    """
+    retired = retire_tutorial(SLUG, reason=REASON, successor=successor,
+                              repository=repo, now=NOW)
+    page = SiteRenderer().render_tutorial_index(retired, [])
+    assert 'class="retired"' in page
+    assert (f'<a href="../{successor}/index.html">' in page) is linked
+    assert ('class="successor"' in page) is linked
 
 
 def test_retire_writes_a_valid_successor(repo: RecordingRepository) -> None:

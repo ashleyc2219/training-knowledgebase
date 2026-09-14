@@ -5,9 +5,13 @@
 
 ```text
 render_version_page   版本頁     五段內容 + 版號 + 退役提示 + data-published
-render_tutorial_index 教學版本紀錄 只列 published_at 非空的版本，標出 current_version
+render_tutorial_index 教學版本紀錄 只列 published_at 非空的版本，標出 current_version + 退役提示
 render_site_index     站台索引    只列 current_version 非空的 Tutorial
 ```
+
+**退役提示同時出現在版本頁與教學索引**（controller 裁決 2026-09-14）：已發布的版本頁是
+不可覆寫的一次性產物，退役之後改不動它；索引是可重建投影，P52 退役後重寫索引就能讓讀者
+看到提示。兩處共用 `_retired_block`，輸出逐字相同。
 
 **這支檔案不知道 key、不知道 bucket、不知道交易。** 公開 key 由 `training_kb.publishing`
 的三個 helper 決定（D-54），寫入順序由 `Publisher.commit` 決定；renderer 只吃領域物件、
@@ -73,6 +77,20 @@ def _successor_line(successor: str | None) -> str:
             f"{escape(SUCCESSOR_PREFIX)}{slug}</a></p>")
 
 
+def _retired_block(tutorial: Tutorial) -> str:
+    """退役提示＋後繼連結；還在維護（`status != retired`）時回空字串。
+
+    版本頁與教學索引共用這一份輸出，所以兩個頁面的提示與連結逐字相同，改字也只改一處。
+    `tutorial.successor` 進來時已經是 Phase 26 `resolve_successor` 四項檢查的**結果**
+    （不合法時 `retire_tutorial` 讓它保持 `None`），renderer 不再判一次：renderer 不碰
+    儲存層，重判就得多讀一次 DynamoDB，簽名也會被迫改（00A §6.7 明訂不改）。
+    """
+    if tutorial.status != TutorialStatus.RETIRED:
+        return ""
+    return (f'<p class="retired">{escape(RETIRED_NOTICE)}</p>'
+            + _successor_line(tutorial.successor))
+
+
 def _version_number(version_id: str) -> str:
     """`v<n>`；版號一律用 `parse_version_id(version_id)[1]`，不自訂 `version_number`（D-19）。"""
     return f"v{parse_version_id(version_id)[1]}"
@@ -119,18 +137,19 @@ class SiteRenderer:
             f"<ol>{_items([step.text for step in steps])}</ol>"
             f"<h2>{_SECTIONS[3]}</h2><p>{escape(content.expected_outcome)}</p>"
         )
-        if tutorial.status == TutorialStatus.RETIRED:
-            page += f'<p class="retired">{escape(RETIRED_NOTICE)}</p>'
-            page += _successor_line(tutorial.successor)
-        return page + "</article>"
+        return page + _retired_block(tutorial) + "</article>"
 
     def render_tutorial_index(self, tutorial: Tutorial,
                               versions: list[TutorialVersion]) -> str:
-        """一篇教學的版本紀錄；**只列 `published_at` 非空的版本**。
+        """一篇教學的版本紀錄；**只列 `published_at` 非空的版本**，退役時加上退役區塊。
 
         未發布版本出現在公開索引就等於曝光（設計 §9.3、§13），「沒有連結的 URL」不算私有。
         `data-site-version` 是「公開站此刻指向哪一版」的機器可讀標記，Phase 12 的 O3 觀察
         腳本就是讀它；`current_version` 是空的（還沒有任何已發布版本）時它是空字串。
+
+        退役區塊放在版本清單**之後**、`</article>` 之前，與版本頁的位置一致（同一個
+        `_retired_block`）。退役之後真正讓讀者看到提示的是「P52 退役後重寫這一頁」，
+        本模組只負責產生內容，不決定何時寫（那是 `Publisher` 的事）。
         """
         current = tutorial.current_version
         marker = "" if current is None else _version_number(current)
@@ -141,7 +160,8 @@ class SiteRenderer:
         )
         return (f'<article class="tutorial-index" data-site-version="{escape(marker)}"'
                 f' data-slug="{escape(tutorial.slug)}">'
-                f"<h1>{escape(tutorial.topic)}</h1><ul>{rows}</ul></article>")
+                f"<h1>{escape(tutorial.topic)}</h1><ul>{rows}</ul>"
+                f"{_retired_block(tutorial)}</article>")
 
     def render_site_index(self, tutorials: list[Tutorial]) -> str:
         """站台索引；**只列 `current_version` 非空的 Tutorial**（還沒發布過的不上架）。"""
