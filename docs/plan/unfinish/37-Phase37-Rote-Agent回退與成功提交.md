@@ -145,6 +145,10 @@ class Rote:
 - **兩個 `operation_id` 不是同一個值。** 正規化完成前還不知道 canonical ID，所以 `normalize` 收的是本次投遞的 trace 用 ID（本計畫選擇：`op-ingress-<來源投遞識別碼>`，GitHub 取 `X-GitHub-Delivery`，手動匯入取 `<batch_id>-<序號>`），只寫進 `CallTrace` 與模型輸出 ref；`commit_success` 收的是 `accept_*` 回傳的 `Acceptance.operation_id`（`op-<kind>-<canonical_id>`），那才是 `record_proc_sample` 的永久去重鍵。
 - **`AGENT_MAX_TOOL_CALLS = 6` 是 tool loop 的硬上限**（本計畫選擇）：固定序列 `parse_* → normalize_* → validate` 三步，依[設計 §14.3](../../design/training-kb.md)「業務不合法最多修正一次」給兩輪額度，超過即停止並回失敗，不得無限迴圈。
 - **`domain`／`adapter`／`keys` 是給 `commit_success` 用的**：新簽名沒有既有 PROC 時，靠它們組出 `ProvenWorkflow(signature, domain, adapter, steps, keys, success_count=0, fail_count=0, status=active, last_used=now)` 才能交給 Phase 35 的 `on_new_success`。`keys` 來自 `event_stable_keys(event)` 排序後的 tuple。
+- **`normalize_then_accept` 回 `list[Acceptance]`（裁決 D-73，2026-09-14）**：F14 一則事件展開成
+  n 筆子 Release 時每筆各自一個 operation，list 依序列出；單一 Ticket／單一 Release 就是長度 1。
+  Phase 30 的 handler 回應保留 `operation_id`（第一筆）並新增 `operation_ids` 列出全部，
+  00A §6.8 的該列與 §8 的 D-73 已同步更新。
 - **`normalize` 不保存 entity、不啟動 pipeline、不動 `success_count`**；`commit_success` 不接受空 ARN 或 `validated=False`，而且它是 [Phase 35](35-Phase35-PROC成功失敗與退役生命週期.md) Task 3 指定的 PROC **寫入點**：「`get_proc` 讀 → 純函式算 → `update_meta(..., expected_revision=revision_of(pk))` 條件寫」，全新簽名改用 `put_meta(..., create_only=True)`；接到 `CoordinationError` 由呼叫端重讀重算，函式內不自行重試。
 
 ## 6. 固定執行順序
@@ -189,7 +193,7 @@ Agent prompt 只提供來源型別、允許工具 schema 與私有事件 referen
 def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
                           headers: Mapping[str, str],
                           payload: Mapping[str, JSONValue],
-                          deadline: float) -> Acceptance:
+                          deadline: float) -> list[Acceptance]:   # D-73
     assert_time_left(deadline, step="normalize")
     event = RawEvent(domain=domain, adapter=adapter, event_type=event_type,
                      headers=dict(headers), payload=dict(payload))
@@ -204,18 +208,19 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
             rote.commit_success(result, operation_id=acceptance.operation_id,
                                 execution_arn=arn, now=deps.now())
         accepted.append(acceptance)
-    return accepted[0]
+    return accepted                  # D-73：每筆子 Release 各自一個 Acceptance
 ```
 
 - [Phase 30](30-Phase30-GitHub-Webhook原始Body驗簽.md) 只留 stub、[Phase 32](32-Phase32-事件接受去重與流程啟動.md) 補了 accept 半邊（`accept_normalized`），本 Phase 把 `_normalize` 那個接縫換成真的 Rote 三層，整段才完成。`domain`／`adapter`／`event_type`／`headers` 由 handler 依可信入口給（GitHub 路徑：`domain="github.com"`、`event_type` 取 `X-GitHub-Event`、`adapter` 依它對應 `github_issue`／`github_pr`），**不從 payload 反推**。
 - `trace_operation_id(headers)` 產出 §5 說的 `op-ingress-<來源投遞識別碼>`（GitHub 取 `X-GitHub-Delivery`），只給 `CallTrace` 與模型輸出 ref 用；真正的永久去重鍵是 `acceptance.operation_id`。
-- **F14 多個子 Release：** [Phase 36](36-Phase36-JSONPath與白名單Adapter.md) 的 release parser 回 `{"changes": [...]}`，一個 PR 改到 n 個功能就有 n 筆。`normalize_all` 對 `k = 1..n` 各跑一次「`normalize_release`（`index=k`）→ `validate`」（parser 的輸出重用，不重跑 parser），回 n 筆 `NormalizationResult`；`normalize_then_accept` 再對每一筆依序 `accept_release` → `commit_success`，**每筆各自一個 operation**（`op-release-r_gh-acme-app-pr42-1`、`...-2`），但共用同一個 `source_event_id`。Ticket 與只改到一個功能的 PR 都只會回一筆，所以 `normalize(...)` 就是 `normalize_all(...)[0]`，既有呼叫端不用改。回傳值是第一筆的 `Acceptance`；任何一筆失敗都原樣往上拋，已成功的那幾筆靠自己的 operation 紀錄留存，不回頭刪除。
+- **F14 多個子 Release：** [Phase 36](36-Phase36-JSONPath與白名單Adapter.md) 的 release parser 回 `{"changes": [...]}`，一個 PR 改到 n 個功能就有 n 筆。`normalize_all` 對 `k = 1..n` 各跑一次「`normalize_release`（`index=k`）→ `validate`」（parser 的輸出重用，不重跑 parser），回 n 筆 `NormalizationResult`；`normalize_then_accept` 再對每一筆依序 `accept_release` → `commit_success`，**每筆各自一個 operation**（`op-release-r_gh-acme-app-pr42-1`、`...-2`），但共用同一個 `source_event_id`。Ticket 與只改到一個功能的 PR 都只會回一筆，所以 `normalize(...)` 就是 `normalize_all(...)[0]`，既有呼叫端不用改。回傳值是**全部** `Acceptance` 的 list（D-73；Phase 30 的 handler 回應同時給 `operation_id`＝第一筆與
+`operation_ids`＝全部）；任何一筆失敗都原樣往上拋，已成功的那幾筆靠自己的 operation 紀錄留存，不回頭刪除。
 
 ## 7. TDD Tasks
 
 ### Task 1：重放失敗後同次回退 Agent
 
-- [ ] **Step 1：建立可獨立執行的失敗測試**
+- [x] **Step 1：建立可獨立執行的失敗測試**
 
 ```python
 from training_kb.rote import AGENT_MAX_TOOL_CALLS, Rote
@@ -246,9 +251,9 @@ def test_replay_failure_falls_back_to_agent_once(rote_deps, active_proc, raw_iss
 
 本 Task 同時建立 `tests/conftest.py`（放 `tests/` 根目錄，`tests/unit/` 與 `tests/integration/` 都看得到）的三個 fixture：`raw_issue()` 用 `tests/fixtures/github/issue-opened.json` 組出 `RawEvent(domain="github.com", adapter="github_issue", event_type="issues", headers=..., payload=...)`；`active_proc(**overrides)` 回 `status=active`、`success_count=3`、`fail_count=0` 且 `signature == structure_signature(raw_issue())` 的 `ProvenWorkflow`，接受 `status`／`fail_count` 等覆寫（Task 3 用它造 retired 案例）；`rote_deps(**overrides)` 回一個滿足 `RoteDeps` 的 fake，額外記錄 `replay_failures`／`replay_successes`／`agent_calls`／`tool_calls`／`tool_calls_after_start`／`commit_calls`／`started`，並提供 `trace_id`、`deadline`、`execution_arn` 與 `accept(entity)`（包住 Phase 32 的 `accept_ticket`／`accept_release`）。四個旋鈕：`replay_error` 讓重放丟 `IngressError`、`agent_result` 是 Agent 最後產出的 dict、`fail_at` 在 `validate`／`save`／`start_execution` 三個切點丟 `PermanentError`、`repository` 換成真的 moto `Repository`。
 
-- [ ] **Step 2：執行紅燈** — 跑 `uv run pytest tests/unit/rote/test_fallback.py -q`，預期 FAIL，訊號是 `cannot import name 'AGENT_MAX_TOOL_CALLS'`，補上常數後變成 `Rote.normalize` 尚未實作。
+- [x] **Step 2：執行紅燈** — 跑 `uv run pytest tests/unit/rote/test_fallback.py -q`，預期 FAIL，訊號是 `cannot import name 'AGENT_MAX_TOOL_CALLS'`，補上常數後變成 `Rote.normalize` 尚未實作。
 
-- [ ] **Step 3：加入最小分支**
+- [x] **Step 3：加入最小分支**
 
 以下三個都是 `Rote` 的方法，貼進 `src/training_kb/rote.py` 的 `class Rote` 內：
 
@@ -279,9 +284,9 @@ def normalize(self, event: RawEvent, *, operation_id: str, deadline: float) -> N
 
 三件事不可簡化：`_pick_proc` 直接 `import find_replayable`（[Phase 34](34-Phase34-Rote兩層命中與候選排序.md) 已經把「Layer 1 命中還要再經 `replayable`、不成才進 Layer 2」關進那個函式），**不要在本 Phase 重抄一份兩層順序**；`except` 只捕捉 Phase 02 的 `PermanentError` 家族，**`TransientError` 要原樣往上拋**（那是服務故障，不是這條 PROC 壞掉，不能因此累加 `fail_count`）；`_persist` 是條件寫入，`changes` 一律由 [Phase 35](35-Phase35-PROC成功失敗與退役生命週期.md) 的 `proc_changes(proc)` 產生，不各自拼一份。
 
-- [ ] **Step 4：補 layer1、layer2、retired、Agent illegal 四條路徑後跑綠** — 跑 `uv run pytest tests/unit/rote/test_fallback.py -q`，預期 PASS：layer1／layer2 兩條斷言 `deps.agent_calls == 0` 且 writer 完全沒被呼叫，retired 與未命中才是 1；Agent illegal 時 `deps.accept` 未被呼叫、`deps.started == []`、`deps.commit_calls == 0`。
+- [x] **Step 4：補 layer1、layer2、retired、Agent illegal 四條路徑後跑綠** — 跑 `uv run pytest tests/unit/rote/test_fallback.py -q`，預期 PASS：layer1／layer2 兩條斷言 `deps.agent_calls == 0` 且 writer 完全沒被呼叫，retired 與未命中才是 1；Agent illegal 時 `deps.accept` 未被呼叫、`deps.started == []`、`deps.commit_calls == 0`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/unit/rote/test_fallback.py tests/conftest.py
@@ -290,7 +295,7 @@ git commit -m "feat(rote): 回退接入 Agent"
 
 ### Task 2：鎖定 PR／changelog 抽取與 validate
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import json
@@ -328,9 +333,9 @@ def test_extraction_produces_the_four_change_fields(domain, event_type, parser) 
 
 fixture 路徑由 [Phase 13](13-Phase13-O6來源ID與穩定使用者契約.md) 核定紀錄的 `SourceApproval.fixture` 提供（相對 `tests/fixtures/`），裡面**只有原始 payload、沒有 expected 區塊**；期望 ID 一律由 Phase 13 的函式對 fixture 值計算，不手寫第二套字串，「是否核定」查同一筆紀錄的 `approved_by`（空字串＝blocked）。工具參數的鍵名照 [Phase 36](36-Phase36-JSONPath與白名單Adapter.md) 的固定慣例：parser 收 `payload`、normalizer 收 `parsed`、`validate` 收 `candidate`。
 
-- [ ] **Step 2：執行紅燈** — 跑 `uv run pytest tests/integration/test_release_extraction.py -q`，預期 FAIL，訊號是 `cannot import name 'default_registry'`，或 O6 未核定時的 `O6 gate：...` 明確失敗訊息。
+- [x] **Step 2：執行紅燈** — 跑 `uv run pytest tests/integration/test_release_extraction.py -q`，預期 FAIL，訊號是 `cannot import name 'default_registry'`，或 O6 未核定時的 `O6 gate：...` 明確失敗訊息。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 本 Task 不新增產品工具（八個工具都屬 Phase 36），只補「validate 失敗時換一個沒試過的 parser」這條 Agent 分支：
 
@@ -343,9 +348,9 @@ def _next_parser(self, tried: set[str]) -> str | None:
 
 `sorted` 讓同一份事件每次挑到同一個 parser，重跑結果才穩定。換 parser 的次數一樣算進 `AGENT_MAX_TOOL_CALLS`；最終 `validate` 仍失敗就回來源失敗，不建立 Release、不寫 PROC。
 
-- [ ] **Step 4：跑完整檔案確認綠燈** — 跑 `uv run pytest tests/integration/test_release_extraction.py -q`，預期兩個參數化案例 PASS，`feature`／`kind`／`old_name`／`new_name` 四欄都被直接斷言；O6 尚未核定時整支以 gate failure 結束，不能把 Phase 31 的欄位 validator 當成抽取通過。
+- [x] **Step 4：跑完整檔案確認綠燈** — 跑 `uv run pytest tests/integration/test_release_extraction.py -q`，預期兩個參數化案例 PASS，`feature`／`kind`／`old_name`／`new_name` 四欄都被直接斷言；O6 尚未核定時整支以 gate failure 結束，不能把 Phase 31 的欄位 validator 當成抽取通過。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/integration/test_release_extraction.py
@@ -354,7 +359,7 @@ git commit -m "test(rote): 驗證改版資訊抽取"
 
 ### Task 3：只有完整成功才提交 PROC
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -410,9 +415,9 @@ def test_retired_signature_is_not_overwritten(
 
 `repository` 是 [Phase 06](06-Phase06-Repository-Metadata與實體讀寫.md) 的 moto 建表 fixture，名稱不另外取；`deps.accept` 與 `deps.started` 讓測試看得到 Phase 32 的 `accept_*` 實際啟動了哪一條 state machine，`tool_calls_after_start` 證明 Agent 的工具自由度只出現在接入層。三個 `fail_at` 切點在 fake 裡都丟 `PermanentError`，所以斷言用單一例外型別。
 
-- [ ] **Step 2：執行紅燈** — 跑 `uv run pytest tests/integration/test_rote_commit.py -q`，預期 FAIL，訊號包含 `AttributeError: 'Rote' object has no attribute 'commit_success'`。
+- [x] **Step 2：執行紅燈** — 跑 `uv run pytest tests/integration/test_rote_commit.py -q`，預期 FAIL，訊號包含 `AttributeError: 'Rote' object has no attribute 'commit_success'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def commit_success(self, result, *, operation_id, execution_arn, now):
@@ -438,9 +443,9 @@ def commit_success(self, result, *, operation_id, execution_arn, now):
 
 分支條件看的是 `result.route` 而不是 `replayed_proc_signature`：`agent_after_replay_failure` 也會保留原簽名供 audit，但它**不是**一次重放成功，**不得**呼叫 `on_replay_success`。`_persist` 沿用 Task 1 建立的版本；`on_new_success` 內部先向 `record_proc_sample` 要永久證據，回 `False` 就原樣回傳，所以同一個 operation 重送不會加第二次。
 
-- [ ] **Step 4：補重送與 replay 成功兩條路徑後跑綠** — replay 成功走 `on_replay_success`（`fail_count` 歸零、`success_count` 不變），replay 失敗後被 Agent 救回時原 `fail_count` 保留。跑 `uv run pytest tests/integration/test_rote_commit.py -q`，預期只有 validate、canonical save、StartExecution 三者依序成功的全新事件增加一個樣本，失敗與重送都不增加。
+- [x] **Step 4：補重送與 replay 成功兩條路徑後跑綠** — replay 成功走 `on_replay_success`（`fail_count` 歸零、`success_count` 不變），replay 失敗後被 Agent 救回時原 `fail_count` 保留。跑 `uv run pytest tests/integration/test_rote_commit.py -q`，預期只有 validate、canonical save、StartExecution 三者依序成功的全新事件增加一個樣本，失敗與重送都不增加。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py src/training_kb/ingress.py tests/integration/test_rote_commit.py
@@ -497,12 +502,35 @@ Rule 原文逐字取自 `.feature` 原檔；primary 歸屬依 [00B 需求覆蓋�
 
 ## 11. 完成清單
 
-- [ ] `NormalizationResult` 九個欄位（含 `domain`／`adapter`／`keys`）與 owner 固定。
-- [ ] `normalize_then_accept` 是 D-60 的六個 keyword 參數，整段「Rote 正規化 → `accept_normalized` → `commit_success`」只寫在這一個函式裡。
-- [ ] F14 的多筆子 Release 走 `normalize_all`，每筆各自 accept 一次、共用 `source_event_id`。
-- [ ] layer1、layer2、agent 與 fallback route 全有 assertion；Agent 只用 `default_registry()`，工具呼叫數不超過 `AGENT_MAX_TOOL_CALLS`。
-- [ ] `validate_recorded_steps` 在 `commit_success` 之前被呼叫，最後一步是通過的 `validate`；PR／changelog 抽取由 O6 核定紀錄的 fixture 加 Phase 13 的 ID 函式證明，沒有第二套手寫期望值。
-- [ ] 保存與啟動走 Phase 32 的 `accept_*`，拿到非空 `execution_arn` 才提交 PROC，且 PROC 寫入走「讀 → 算 → 條件寫」。
-- [ ] 重送不增加成功樣本（duplicate 不進 commit；`record_proc_sample` 第二次回 `False`）；replay failure 即使被 Agent 救回仍保留失敗，`TransientError` 不累加 `fail_count`。
-- [ ] retired PROC 不自動覆寫或 reset，`commit_success` 回 `None`；核心 pipeline 仍實際啟動，`deps.started` 只出現三條固定 state machine 之一。
-- [ ] 未把 FakeWriter 或本機 integration 結果描述成 Bedrock／AWS 已通過；O6 未核對時 Task 2 維持 gate failure。
+- [x] `NormalizationResult` 九個欄位（含 `domain`／`adapter`／`keys`）與 owner 固定。
+- [x] `normalize_then_accept` 是 D-60 的六個 keyword 參數，整段「Rote 正規化 → `accept_normalized` → `commit_success`」只寫在這一個函式裡。
+- [x] F14 的多筆子 Release 走 `normalize_all`，每筆各自 accept 一次、共用 `source_event_id`。
+- [x] layer1、layer2、agent 與 fallback route 全有 assertion；Agent 只用 `default_registry()`，工具呼叫數不超過 `AGENT_MAX_TOOL_CALLS`。
+- [x] `validate_recorded_steps` 在 `commit_success` 之前被呼叫，最後一步是通過的 `validate`；PR／changelog 抽取由 O6 核定紀錄的 fixture 加 Phase 13 的 ID 函式證明，沒有第二套手寫期望值。
+- [x] 保存與啟動走 Phase 32 的 `accept_*`，拿到非空 `execution_arn` 才提交 PROC，且 PROC 寫入走「讀 → 算 → 條件寫」。
+- [x] 重送不增加成功樣本（duplicate 不進 commit；`record_proc_sample` 第二次回 `False`）；replay failure 即使被 Agent 救回仍保留失敗，`TransientError` 不累加 `fail_count`。
+- [x] retired PROC 不自動覆寫或 reset，`commit_success` 回 `None`；核心 pipeline 仍實際啟動，`deps.started` 只出現三條固定 state machine 之一。
+- [x] 未把 FakeWriter 或本機 integration 結果描述成 Bedrock／AWS 已通過；O6 未核對時 Task 2 維持 gate failure。
+
+## 12. 實作偏差紀錄（2026-09-14）
+
+實作完成後回填；每一條都是「原稿寫 A、實際落地 B」，並附理由。名稱與簽名仍逐字採用
+[00A §6.8](00A-共用契約與名詞.md)，唯一改動的 00A 是 `normalize_then_accept` 那一列（D-73）。
+
+| # | 原稿 | 實際落地 | 理由 |
+|---|---|---|---|
+| 1 | Task 1 Step 2 的紅燈訊號 `cannot import name 'AGENT_MAX_TOOL_CALLS'` | **逐字相同** | — |
+| 2 | Task 2 Step 2 的紅燈訊號 `cannot import name 'default_registry'` | 實際是 `AssertionError: O6 gate：(changelog.local, manual_batch) 尚未核定…`（三個案例全紅） | `default_registry` 在 Phase 36 就建立了，所以紅燈只可能來自另一個預期訊號——O6 gate。 |
+| 3 | Task 3 Step 2 的紅燈訊號 `AttributeError: 'Rote' object has no attribute 'commit_success'` | 實際是 `ValueError: Invalid endpoint: https://bedrock-runtime..amazonaws.com`（接線點測試在 `_rote_deps` 還沒被注入時打到真實 Bedrock） | `commit_success` 在 Task 1 就必須存在：`rote_deps` fixture 要 monkeypatch 它來數 `commit_calls`，而那個計數是 Task 1 Step 4「Agent illegal 時 `commit_calls == 0`」的斷言對象。 |
+| 4 | §5「最後一律做正規化驗證（`validate_ticket`／`validate_release`）」 | 驗證**由序列最後一步的 `validate` 工具執行**（Phase 36 的 `adapters.validate` 內部就是呼叫這兩個函式，且 `validate_recorded_steps` 保證最後一步一定是它）；`rote._validated_entity` 只把已驗證的 `model_dump(mode="json")` 還原成模型物件 | 再驗一次**會失敗**：dump 帶著 `cluster_id`／`feature_ids`／`embedding`，而 `validate_ticket` 刻意拒絕預填分析欄位的 payload（Phase 36 報告第 7 節第 1 點說「冪等」是不準確的）。`ValidationError` 仍收斂成 `IngressError`，不外洩給只認 `IngressError` 的 handler。 |
+| 5 | `RoteDeps` 五個可寫屬性 | 宣告成**唯讀** `@property` | 可寫變數的 Protocol 讓 `frozen=True` 的 dataclass（`ingress.RoteWiring`）過不了 mypy strict；唯讀版更寬鬆，普通屬性、`@property` 與 bound method 三種形狀都滿足。 |
+| 6 | Task 1 Step 3 的 `normalize` 直接分支 | 分支搬到 `normalize_all`，`normalize` 就是 `normalize_all(...)[0]`（00A §6.8 原文） | F14 要回多筆，兩個入口只能有一份三層順序。 |
+| 7 | §6「`normalize_all` 對 `k = 1..n` 各跑一次」只描述 Agent 路徑 | **重放與 Agent 兩條路都展開**（`Rote._sub_releases`），而且展開是確定性後處理、**不算進 `AGENT_MAX_TOOL_CALLS`** | 重放一個改到 n 個功能的 PR 時只回第 1 筆會漏掉其餘子 Release；`index` 是位置資訊不是事件真值（00A §6.8），換 `k` 重跑同一條已驗證序列仍在契約內。已記錄的 `index`（預設 1）那一筆直接重用，不重跑。 |
+| 8 | `record_proc_sample` 併發時回 `False` | 併發下也可能丟 `CoordinationError`；**提交端把它視為「別人已經算過」**（回既有 PROC、不重試、不當失敗） | controller 裁決 2026-09-14（Phase 35 報告第 9 節第 4 點把這一點留給 P37）。`_persist` 自己的 `CoordinationError` 仍原樣往上拋，由呼叫端重讀重算。 |
+| 9 | Task 2 Step 3 新增 `_next_parser` | Task 1 就一併實作（Task 2 沒有新增任何產品程式） | Agent 的 tool loop 在 Task 1 就需要「validate 失敗換 parser」這條分支才停得下來。 |
+| 10 | Task 2 的測試片段只驗 `index=1` | 擴成逐筆 `k = 1..n` 都驗，並斷言「至少一筆 `renamed` 且 `old_name`／`new_name` 非空」；另加 `test_pr_sub_release_order_matches_phase13` 交叉比對 `sub_release_ids` | PR fixture 依 `feature` 升序後 `k=1` 是 `removed`，原片段的 `if kind == "renamed"` 分支永遠不會執行，REL Rule 1 的 `old_name`／`new_name` 就沒有被真的斷言。交叉比對是 Phase 36 報告第 9 節第 4 點指名要補的。 |
+| 11 | 未核定來源「以明確 gate failure 結束」 | 用 `pytest.mark.xfail(strict=True)` 收尾（與 Phase 36、Phase 31 同一種表達） | 斷言照跑、逐列印出 `O6 尚未核定 …`、不是 skip，而且補臨時 mapping 讓它通過會 XPASS 被判成紅燈；同時滿足 COMMON.md「自己的檔案全綠」。 |
+| 12 | §6 的 `trace_operation_id(headers)` 沒有定義找不到識別碼時的行為 | 依序看 `x-github-delivery`、`x-tkb-delivery`（P42 手動匯入用），都沒有就回固定的 `op-ingress-unknown` | trace 的用途是對回來源那一次投遞，**不得**自己造隨機值（那會讓 trace 對不回去）。 |
+| 13 | §6 只說「`deps = _rote_deps()`」 | `ingress` 新增 `RoteWiring`／`_rote_deps`／`_reset_rote_deps`／`_build_rote_deps` 四個內部名稱，與 Phase 32 的 `_wiring` 同一種形狀 | `adapters` 與 `writing` 一律在 `_build_rote_deps` **函式內** import：Phase 36 的 `adapters.validate` 反向 import `ingress`，`ingress` 模組層 import `adapters` 會變成循環 import（controller 2026-09-14）。`rote.py` 則是模組層 import `ingress`，所以 `normalize_then_accept` 內也用函式內 import 取得 `Rote`。 |
+| 14 | §7 的 `rote_deps` 四個旋鈕 | `replay_error` 的落地方式是「**第一次** `validate` 丟 `IngressError`」——第一次 validate 就是重放那一次，接著的 Agent 照常 | fake 看不到「現在是哪一條路」，用呼叫次序表達最小且可預測。另外 `replay_failures`／`replay_successes`／`commit_calls` 由 monkeypatch 包住 `on_replay_failure`／`on_replay_success`／`Rote.commit_success` 取得，記到的是真的被呼叫幾次，不是測試自己推論。 |
+| 15 | 未提及 Phase 30／32 既有測試 | 一併更新 `tests/integration/test_github_webhook_handler.py`（回應多了 `operation_ids`、接線點不再是 stub）與 `tests/unit/test_ingress_acceptance.py`（`_normalize` 已不存在） | D-73 與「接線點接上」都會改到這兩支的斷言；controller 明確授權更新 handler 的消費端與其測試。 |
