@@ -1,5 +1,6 @@
 """TrainingKbDataStack 的 Template 斷言：鎖定單表、唯一索引、私有 bucket 與最小 IAM。"""
 
+import json
 import sys
 from pathlib import Path
 
@@ -13,7 +14,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from infra.training_kb_data_stack import TrainingKbDataStack  # noqa: E402
+from infra.training_kb_data_stack import (  # noqa: E402
+    PRIVATE_PREFIXES,
+    TrainingKbDataStack,
+)
 
 
 def synth() -> Template:
@@ -43,3 +47,57 @@ FORBIDDEN = ["AWS::RDS::DBInstance", "AWS::OpenSearchService::Domain",
 @pytest.mark.parametrize("resource_type", FORBIDDEN)
 def test_no_extra_datastore_or_pipeline_is_declared(resource_type: str) -> None:
     synth().resource_count_is(resource_type, 0)
+
+
+def test_bucket_blocks_all_public_access() -> None:
+    template = synth()
+    template.resource_count_is("AWS::S3::Bucket", 1)
+    template.has_resource_properties("AWS::S3::Bucket", Match.object_like({
+        "PublicAccessBlockConfiguration": {
+            "BlockPublicAcls": True, "BlockPublicPolicy": True,
+            "IgnorePublicAcls": True, "RestrictPublicBuckets": True,
+        },
+    }))
+
+
+def test_data_role_has_no_wildcard_action_or_resource() -> None:
+    # 只檢查 IAM Policy；enforce_ssl 產生的 bucket policy 是 Deny s3:*，屬於額外限制。
+    for policy in synth().find_resources("AWS::IAM::Policy").values():
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]:
+            actions = statement["Action"]
+            for action in actions if isinstance(actions, list) else [actions]:
+                assert action != "*" and not action.endswith(":*")
+            assert '"*"' not in json.dumps(statement["Resource"])
+
+
+def test_s3_statement_covers_every_private_prefix_and_never_site() -> None:
+    statements = [
+        statement
+        for policy in synth().find_resources("AWS::IAM::Policy").values()
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+        if "s3:GetObject" in statement["Action"]
+    ]
+    assert len(statements) == 1
+    rendered = json.dumps(statements[0]["Resource"])
+    assert len(statements[0]["Resource"]) == len(PRIVATE_PREFIXES) == 4
+    for prefix in PRIVATE_PREFIXES:
+        assert f"/{prefix}*" in rendered
+    assert "site/" not in rendered
+
+
+def test_list_bucket_is_limited_to_the_private_prefixes() -> None:
+    statements = [
+        statement
+        for policy in synth().find_resources("AWS::IAM::Policy").values()
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+        if "s3:ListBucket" in statement["Action"]
+    ]
+    assert len(statements) == 1
+    prefixes = statements[0]["Condition"]["StringLike"]["s3:prefix"]
+    assert prefixes == [f"{prefix}*" for prefix in PRIVATE_PREFIXES]
+    assert "site/" not in json.dumps(prefixes)
+
+
+def test_outputs_expose_the_three_names() -> None:
+    assert set(synth().find_outputs("*")) == {
+        "TrainingKbTableName", "TrainingKbBucketName", "TrainingKbDataRoleArn"}
