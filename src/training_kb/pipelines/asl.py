@@ -8,12 +8,17 @@
 **尚未雲端實證**：Python Lambda 未處理例外在 Step Functions 看到的 `errorType` 是不是
 類別名（也就是第一條 retrier 的 `"TransientError"` 會不會命中），由 Phase 41 用
 `get-execution-history` 實測；在那之前這裡只是靜態產生與檢查。
+
+部署前的版本化快照也在這裡：本地定義檔 `ASL_LOCAL_PATH` 與 S3 私有快照
+`ASL_SNAPSHOT_KEY` 是**同一份 bytes**，用條件寫入保存，事後才追溯得到當時跑的是哪一版。
 """
 
+import json
 from collections.abc import Iterable, Mapping
 
-from training_kb.errors import PermanentError
-from training_kb.pipelines.common import JSONValue
+from training_kb.errors import ObjectAlreadyExists, PermanentError
+from training_kb.pipelines.common import PIPELINE_NAMES, JSONValue, PipelineName
+from training_kb.repository import Repository
 
 # --- 1. 固定常數 -------------------------------------------------------------
 
@@ -126,3 +131,36 @@ def _check_task(state: Mapping[str, JSONValue], states: Mapping[str, JSONValue],
     destination = states.get(target) if isinstance(target, str) else None
     if not isinstance(destination, dict) or destination.get("Type") != "Fail":
         raise PermanentError(f"Catch 沒有導向同層的 Fail state：{where} -> {target}")
+
+
+# --- 4. 版本化快照 -----------------------------------------------------------
+
+ASL_LOCAL_PATH = "infra/stepfunctions/{pipeline}/v{number}.json"
+"""本地定義檔；三份實際定義由 Phase 41／48／52 各自建立，本模組只給路徑樣板。"""
+
+ASL_SNAPSHOT_KEY = "stepfunctions/{pipeline}/v{number}.json"
+"""S3 私有快照（00A §3.4）。`<pipeline>.asl.json` 那種單檔佈局已作廢。"""
+
+
+def canonical_json(definition: dict[str, JSONValue]) -> bytes:
+    """固定序列化方式，讓同一份定義每次產出相同 bytes。"""
+    return json.dumps(definition, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+
+
+def save_asl_snapshot(repository: Repository, pipeline: PipelineName,
+                      number: int, body: bytes) -> str:
+    """把定義存成 `stepfunctions/<pipeline>/v<n>.json`，回傳 key。
+
+    條件寫入（`if_none_match=True`）撞到同一個 key 時**先核對 bytes**：完全相同代表
+    同一次部署重送，視為冪等；不同就是有人想改掉既有版本的歷史，一律 `PermanentError`，
+    既有快照保持原樣。版本號與教學版本無關，由部署者遞增。
+    """
+    if pipeline not in PIPELINE_NAMES:
+        raise PermanentError(f"unknown pipeline: {pipeline}")
+    key = ASL_SNAPSHOT_KEY.format(pipeline=pipeline, number=number)
+    try:
+        repository.put_object(key, body, "application/json", if_none_match=True)
+    except ObjectAlreadyExists:
+        if repository.get_object(key) != body:
+            raise PermanentError(f"ASL 快照已存在且內容不同：{key}") from None
+    return key
