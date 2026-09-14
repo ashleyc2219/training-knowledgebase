@@ -12,6 +12,7 @@ ledger 用 moto 表上的**真正** `OperationCoordinator`；Step Functions 用 
 邏輯，**不是 O2 gate 證據**：lease 不等於接受順序、TTL 不是準時解鎖。
 """
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Any
@@ -21,7 +22,7 @@ import pytest
 from botocore.exceptions import ClientError, ConnectTimeoutError
 
 from training_kb import ingress
-from training_kb.config import load_settings
+from training_kb.config import Settings, load_settings
 from training_kb.errors import CoordinationError, TransientError
 from training_kb.ingress import Wiring, accept_ticket, execution_name, operation_id_for
 from training_kb.keys import operation_ref
@@ -101,6 +102,19 @@ class Harness:
         """模擬程序重啟：全新的 client、全新的 coordinator，只剩持久 ledger。"""
         self.sfn = self.new_client()
         return BotoPipelineStarter(self.sfn, ARNS, OperationCoordinator(self.repository))
+
+
+@pytest.fixture(autouse=True)
+def never_touch_real_aws(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """清掉模組層的 `Wiring` 快取，並讓真正的建構器當場失敗（同 unit 檔的守門員）。"""
+    ingress._reset_wiring()
+    monkeypatch.setattr(ingress, "_build_wiring", _forbidden_wiring)
+    yield
+    ingress._reset_wiring()
+
+
+def _forbidden_wiring(settings: Settings) -> Wiring:
+    raise AssertionError(f"測試忘了注入 _wiring，差點連上真的 AWS：{settings.table_name}")
 
 
 @pytest.fixture

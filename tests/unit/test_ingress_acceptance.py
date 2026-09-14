@@ -7,7 +7,7 @@
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from time import monotonic
 from typing import cast
 
@@ -15,7 +15,7 @@ import pytest
 
 from training_kb import ingress
 from training_kb.clock import now_utc
-from training_kb.config import DEFAULT_PROJECT_ID, load_settings
+from training_kb.config import DEFAULT_PROJECT_ID, Settings, load_settings
 from training_kb.errors import (
     CoordinationError,
     ObjectAlreadyExists,
@@ -205,6 +205,23 @@ def build_harness(monkeypatch: pytest.MonkeyPatch, *,
     return built
 
 
+@pytest.fixture(autouse=True)
+def never_touch_real_aws(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """每個測試前後都清掉模組層的 `Wiring` 快取，並讓真正的建構器當場失敗。
+
+    忘了注入 fake 的測試會在 `_build_wiring` 就爆掉（訊息說得出是哪個測試漏了），
+    而不是安靜地去打 STS／DynamoDB／Step Functions。
+    """
+    ingress._reset_wiring()
+    monkeypatch.setattr(ingress, "_build_wiring", _forbidden_wiring)
+    yield
+    ingress._reset_wiring()
+
+
+def _forbidden_wiring(settings: Settings) -> Wiring:
+    raise AssertionError(f"測試忘了注入 _wiring，差點連上真的 AWS：{settings.table_name}")
+
+
 @pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch) -> Harness:
     return build_harness(monkeypatch)
@@ -389,3 +406,9 @@ def test_the_asl_input_project_id_follows_the_ledger(monkeypatch: pytest.MonkeyP
     assert resumed.status == "duplicate"
     assert resumed.record.project_id == "demo"
     assert later.starter.last_input["project_id"] == "demo"
+
+
+def test_a_test_that_forgets_to_inject_never_reaches_aws() -> None:
+    """守門員自己的測試：沒有 `harness` 就沒有 `_wiring`，一定當場失敗。"""
+    with pytest.raises(AssertionError, match="忘了注入"):
+        accept_ticket(TICKET, deadline=monotonic() + WEBHOOK_DEADLINE_SECONDS)

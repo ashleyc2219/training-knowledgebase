@@ -297,6 +297,17 @@ def _wiring() -> Wiring:
     return _WIRING
 
 
+def _reset_wiring() -> None:
+    """丟掉快取的 `Wiring`，下一次 `_wiring()` 會重建。
+
+    給測試用：`_WIRING` 是模組層快取，一個忘了 monkeypatch 的測試會把**真的**連到 AWS
+    的 wiring 留在那裡，後面的測試就算有 monkeypatch 也可能先讀到它。正式程式不呼叫
+    （Lambda 的相依在容器生命週期內不會變）。
+    """
+    global _WIRING
+    _WIRING = None
+
+
 def _build_wiring(settings: Settings) -> Wiring:
     """建立連真實 AWS 的四個相依；**只有第一次呼叫 `_wiring()` 時執行**。
 
