@@ -4,12 +4,15 @@
 測試全部是本機契約，不碰任何 AWS 資源，也不宣稱實表 CRUD 已驗證。
 """
 
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from training_kb.keys import (
+    META,
     edge_sk,
     feature_pk,
     feedback_pk,
@@ -27,6 +30,7 @@ from training_kb.keys import (
 )
 
 VIEW_TS = datetime(2026, 8, 20, tzinfo=UTC)
+DECISION = Path(__file__).resolve().parents[2] / "docs/decisions/O1-metadata-sort-key.md"
 
 
 def _step_builder(value: str) -> str:
@@ -170,3 +174,27 @@ def test_parse_step_pk_rejects_shapes_that_are_not_a_step() -> None:
     for bad in not_steps:
         with pytest.raises(ValueError, match="invalid step primary key"):
             parse_step_pk(bad)
+
+
+def test_metadata_sort_key_matches_the_recorded_o1_decision() -> None:
+    text = DECISION.read_text(encoding="utf-8")
+    status = re.search(r"^Status: (accepted|rejected)$", text, re.M)
+    approver = re.search(r"^Approver: \S.*$", text, re.M)
+    decided_on = re.search(r"^Date: \d{4}-\d{2}-\d{2}$", text, re.M)
+    sort_key = re.search(r"^Sort-Key: (\S+)$", text, re.M)
+    assert status is not None, "O1 尚未核定：Status 必須是 accepted 或 rejected"
+    assert approver is not None, "O1 決策紀錄缺核定者"
+    assert decided_on is not None, "O1 決策紀錄缺決策日期"
+    assert sort_key is not None, "O1 決策紀錄缺最終 metadata sort key"
+    assert META == sort_key.group(1)
+
+
+def test_step_items_use_an_edge_sort_key_instead_of_meta() -> None:
+    step = step_pk("prepare-meeting@v2", 3)
+    sort_key = edge_sk("REFERENCES", feature_pk("Prepare"))
+    assert parse_pk(step)[0] == "STEP"
+    assert sort_key != META
+    assert not sort_key.startswith(META)
+    assert parse_edge_sk(sort_key)[1] == feature_pk("Prepare")
+    with pytest.raises(ValueError, match="invalid edge sort key"):
+        parse_edge_sk(META)

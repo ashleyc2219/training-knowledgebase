@@ -20,6 +20,10 @@ from training_kb.clock import to_iso
 
 # --- 1. 常數 -----------------------------------------------------------------
 
+META = "META"
+"""十實體 metadata item 的固定 sort key；值必須等於 docs/decisions/O1-metadata-sort-key.md
+的 `Sort-Key`（O1 gate）。STEP 沒有 metadata item，它的 SK 是 `REFERENCES#<FEATURE PK>`。"""
+
 RELATIONS = frozenset({"REFERENCES", "SUPERSEDES", "APPLIED_TO", "ASKS_ABOUT", "REFERS_TO"})
 """設計 §9.2 的五種關係；`keys.py` 內部白名單，其他模組不 import。"""
 
