@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
 
+import boto3
 from pydantic import ValidationError
 
 from training_kb.clock import now_utc, parse_iso
@@ -36,7 +37,11 @@ from training_kb.errors import (
 from training_kb.keys import operation_ref
 from training_kb.models import Release, ReleaseKind, ReleaseSource, Ticket, TicketSource
 from training_kb.operations import Acceptance, AcceptOperation, OperationCoordinator, OperationKind
-from training_kb.pipeline_starter import PipelineStarter
+from training_kb.pipeline_starter import (
+    BotoPipelineStarter,
+    PipelineStarter,
+    state_machine_arns,
+)
 from training_kb.pipelines.common import JSONValue, PipelineName
 from training_kb.repository import Repository
 
@@ -274,8 +279,24 @@ def _wiring() -> Wiring:
 
 
 def _build_wiring(settings: Settings) -> Wiring:
-    """（Task 3 接上 boto3 adapter 之前的暫用實作）"""
-    raise PermanentError(f"接受路徑尚未接線：{settings.table_name}")
+    """建立連真實 AWS 的四個相依；**只有第一次呼叫 `_wiring()` 時執行**。
+
+    client 一律在這裡才建立，模組 import 時不碰網路。帳號由 STS 現查、Region 由 client
+    自己回報，所以程式裡沒有寫死的帳號，也不必新增環境變數（00A §3.5 的 `TKB_` 清單裡
+    沒有帳號）。**真正的雲端接線、IAM 與 state machine ARN 由 Phase 41 驗收**，
+    本批（離線開發）只在測試裡覆寫 `_wiring`，不跑這條路徑。
+    """
+    dynamodb = boto3.resource("dynamodb", region_name=settings.aws_region)
+    s3 = boto3.resource("s3", region_name=settings.aws_region)
+    repository = Repository(dynamodb.Table(settings.table_name),
+                            s3.Bucket(settings.content_bucket))
+    operations = OperationCoordinator(repository)
+    client = boto3.client("stepfunctions", region_name=settings.aws_region)
+    identity = boto3.client("sts", region_name=settings.aws_region).get_caller_identity()
+    arns = state_machine_arns(region=str(client.meta.region_name),
+                              account_id=identity["Account"])
+    return Wiring(operations=operations, starter=BotoPipelineStarter(client, arns, operations),
+                  repository=repository, settings=settings)
 
 
 def accept_ticket(ticket: Ticket, *, deadline: float) -> Acceptance:
