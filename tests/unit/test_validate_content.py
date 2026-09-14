@@ -116,3 +116,29 @@ def test_illegal_step_type_is_rejected(known_feature_ids: frozenset[str]) -> Non
     content = four_step_content(step3_type="scroll")
     with pytest.raises(ContentError, match="type 不合法"):
         validate_content(content, known_feature_ids)
+
+
+def test_all_problems_are_reported_in_one_error(known_feature_ids: frozenset[str]) -> None:
+    """Phase 18 只允許一次修正（設計 §14.3）：一次沒列完，那次機會就被浪費掉了。"""
+    content = four_step_content(
+        problem="  ", step2_feature="", step3_feature="Prepare, Share Summary",
+        step4_feature="Calendar",
+    )
+    with pytest.raises(ContentError) as caught:
+        validate_content(content, known_feature_ids)
+    message = str(caught.value)
+    for signal in ("缺少 Problem", "第 2 步沒有引用", "第 3 步引用了多個",
+                   "第 4 步引用的 Feature 不存在"):
+        assert signal in message
+
+
+def test_error_message_does_not_leak_step_text(known_feature_ids: frozenset[str]) -> None:
+    """訊息只含段落名稱、步驟編號與 `feature_id`：它會被原樣送回模型並落進操作紀錄。"""
+    secret = "使用者 u_7788 回報：找不到右上角的分享鍵。"
+    content = four_step_content(step3_feature="Calendar", step3_text=secret)
+    with pytest.raises(ContentError) as caught:
+        validate_content(content, known_feature_ids)
+    message = str(caught.value)
+    assert "第 3 步引用的 Feature 不存在：Calendar" in message
+    assert secret not in message
+    assert "u_7788" not in message

@@ -257,10 +257,20 @@ def _step_problems(content: TutorialContent, known: frozenset[str]) -> list[str]
 
 
 def validate_content(content: TutorialContent, known_feature_ids: frozenset[str]) -> None:
-    """結構可不可以保存；不判斷文字好不好，也不修改任何內容。"""
+    """結構可不可以保存（F48）；回 `None` 代表可保存，不合格一次丟出全部問題。
+
+    **不判斷文字好不好，也不修改任何內容**：驗證器不是修正器，缺 Feature 不會自動補、
+    多引用不會自動取第一個（D05）。`known_feature_ids` 由呼叫端先查好傳進來（裡面是裸 ID，
+    不是 `FEATURE#Prepare`），本函式不讀 DynamoDB、不呼叫模型、不寫任何檔案。
+
+    **兩組問題一起收集再丟。** Phase 18 只允許一次修正（設計 §14.3）：五段有問題就先丟出，
+    那唯一一次機會會被浪費在最前面的小問題上，步驟引用的問題要等下一輪才看得到，而下一輪
+    不存在。唯一的提早收斂在 `_section_problems`（`steps` 為空）。
+
+    丟出的是 `ContentError`（`PermanentError` 子類）：這是資料不合法、不是服務暫時故障，
+    不進 ASL Task Retry，重試上限由 Phase 18 管。
+    """
     problems = _section_problems(content)
-    if problems:
-        raise ContentError("教學內容驗證失敗：" + "；".join(problems))
-    problems = _step_problems(content, known_feature_ids)
+    problems.extend(_step_problems(content, known_feature_ids))
     if problems:
         raise ContentError("教學內容驗證失敗：" + "；".join(problems))
