@@ -245,3 +245,60 @@ def test_relation_edges_are_never_mistaken_for_versions(repo) -> None:
     """D29：`entity` 等於 PK 前綴，所以 `SUPERSEDES` 邊也被掃到；`SK != META` 要先濾掉。"""
     repo.add_edge(version_pk(V2), "SUPERSEDES", version_pk(V1))
     assert [version.version_id for version in repo.list_versions_of_tutorial(SLUG)] == [V1, V2]
+
+
+# --- Task 2：只回傳目前已發布版本的引用步驟 ---------------------------------
+
+
+def test_referencing_steps_exclude_history_and_unpublished(repo) -> None:
+    """GPH Rule 2、F17：歷史版與未發布的草稿版都只供追溯，不得被當成目前版。"""
+    steps = repo.find_current_published_steps_referencing("Prepare")
+    assert [(step.tutorial_version, step.number) for step in steps] == [("prepare-meeting@v2", 3)]
+
+
+def test_referencing_steps_survive_stale_gsi(repo) -> None:
+    """設計 §10：GSI 還沒傳播這筆邊時，基表一致讀取仍然要回傳它（否則會誤 KEEP）。"""
+    repo.gsi_hide("STEP#prepare-meeting@v2#3")
+    steps = repo.find_current_published_steps_referencing("Prepare")
+    assert [(step.tutorial_version, step.number) for step in steps] == [("prepare-meeting@v2", 3)]
+
+
+def test_referencing_steps_ignore_other_relations(repo) -> None:
+    """設計 §9.2：同一個終點上還有 TICKET 的 `ASKS_ABOUT`，它不是引用步驟。"""
+    repo.add_edge("TICKET#t_881", "ASKS_ABOUT", "FEATURE#Prepare")
+    assert all(step.tutorial_version.startswith("prepare-meeting") for step in
+               repo.find_current_published_steps_referencing("Prepare"))
+
+
+def test_referencing_steps_are_sorted_by_version_then_number(repo) -> None:
+    """跨教學的命中依 `(version_sort_key, number)` 升序；`@v10` 不會排在 `@v2` 前面。"""
+    repo.add_version(V10, published=True)
+    repo.set_current_version(SLUG, V10)
+    repo.add_step(V10, 2)
+    repo.add_step(V10, 1)
+    repo.set_current_version(OTHER_SLUG, DRAFT)
+    repo.add_version(DRAFT, published=True)
+    assert [(step.tutorial_version, step.number) for step in
+            repo.find_current_published_steps_referencing(FEATURE)] == [
+        (V10, 1), (V10, 2), (DRAFT, 1)]
+
+
+def test_candidate_without_base_step_fails_loudly(repo) -> None:
+    """GSI 有、基表沒有：代表基表資料不完整，明確失敗，不靜默跳過也不在查詢裡補邊。"""
+    repo.gsi_only_edge(step_pk(V2, 7), "REFERENCES", feature_pk(FEATURE))
+    with pytest.raises(PermanentError, match=r"STEP#prepare-meeting@v2#7"):
+        repo.find_current_published_steps_referencing(FEATURE)
+
+
+def test_candidate_on_a_history_version_is_not_an_error(repo) -> None:
+    """同樣是「GSI 有、基表沒有」，但不是目前已發布版時只跳過：那是正常的歷史殘留。"""
+    repo.gsi_only_edge(step_pk(V1, 9), "REFERENCES", feature_pk(FEATURE))
+    repo.gsi_only_edge(step_pk(DRAFT, 9), "REFERENCES", feature_pk(FEATURE))
+    steps = repo.find_current_published_steps_referencing(FEATURE)
+    assert [(step.tutorial_version, step.number) for step in steps] == [(V2, 3)]
+
+
+def test_current_version_without_published_at_is_not_current_published(repo) -> None:
+    """`current_version` 與 `published_at` 必須同時成立；只切了指標不算已發布。"""
+    repo.set_current_version(SLUG, DRAFT)
+    assert repo.find_current_published_steps_referencing(FEATURE) == []

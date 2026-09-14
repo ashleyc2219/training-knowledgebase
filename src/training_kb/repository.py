@@ -668,3 +668,60 @@ class Repository:
         versions = self._meta_models("VERSION", TutorialVersion)
         chosen = [version for version in versions if version.slug == slug]
         return sorted(chosen, key=lambda version: version_sort_key(version.version_id))
+
+    def _is_current_published(self, version_id: str) -> bool:
+        """這一版是不是「目前已發布版」：`current_version` 與 `published_at` 必須同時成立。
+
+        只比 `current_version` 會把還沒發布的草稿當成目前版（設計 §7.4 的改版會寫到看不見的
+        內容上）；只比 `published_at` 則會把歷史版一起算進來，改版就會分岔。兩個條件都用
+        基表一致讀取取得，所以不受 GSI 落後影響。
+        """
+        slug, _ = version_sort_key(version_id)
+        tutorial = self.get_tutorial(slug)
+        if tutorial is None or tutorial.current_version != version_id:
+            return False
+        version = self.get_version(version_id)
+        return version is not None and version.published_at is not None
+
+    def find_current_published_steps_referencing(self, feature_id: str) -> list[TutorialStep]:
+        """誰引用這個 Feature（設計 §10 六問之一）：**只回目前已發布版本的步驟**。
+
+        兩條資料來源聯集，順序是「先基表、後 GSI」：
+
+        - **B（基表，決定結果集合）**：`scan_entity("TUTORIAL")` 一致讀取每篇教學，取
+          `current_version` 且 `published_at` 非空的那一版，再 `get_steps` 篩
+          `feature_id`。這是設計 §10 要求的「改版前以基表一致讀取核對目前版的完整引用集合」，
+          代價是每個目前已發布版各一次 `get_steps`。
+        - **A（GSI，只補候選）**：`query_by_target` 的候選只留 `REFERENCES` 且起點是 `STEP#`
+          的邊（排除 TICKET 的 `ASKS_ABOUT` 等別種關係），不是目前已發布版就跳過。
+
+        為什麼要聯集：GSI 只有最終一致，剛寫入的邊可能還沒出現，只用 A 會錯判「沒有教學引用
+        這個功能」而誤 KEEP。設計 §9.1 把步驟與引用放在同一筆 item，所以資料正常時 A 必然是
+        B 的子集合，聯集不會多出東西；**A 多出 B 沒有的一筆就代表基表資料不完整**（例如邊少了
+        `entity` 屬性而被 `scan_entity` 漏掉），照 Phase 08 的規則丟 `PermanentError`，
+        不靜默跳過，也不在查詢裡順手補寫——補寫是 Phase 28 的事。
+
+        基表核對只在本案「少量資料＋序列化教學寫入」的範圍內成立，**不是**跨併發寫入的快照，
+        也不是大型站點的查詢設計（設計 §10 明載此取捨）。
+        """
+        target = feature_pk(feature_id)
+        found: dict[tuple[str, int], TutorialStep] = {}
+        for item in self.scan_entity("TUTORIAL"):
+            if str(item["SK"]) != META:
+                continue
+            current = item_to_model(item, Tutorial).current_version
+            if current is None or not self._is_current_published(current):
+                continue
+            for step in self.get_steps(current):
+                if step.feature_id == feature_id:
+                    found[(current, step.number)] = step
+        for edge in self.query_by_target(target):
+            pk = str(edge["PK"])
+            relation, endpoint = parse_edge_sk(str(edge["SK"]))
+            if relation != "REFERENCES" or parse_pk(pk)[0] != "STEP" or endpoint != target:
+                continue
+            version_id, number = parse_step_pk(pk)
+            if (version_id, number) in found or not self._is_current_published(version_id):
+                continue
+            raise PermanentError(f"GSI 候選在基表讀不到對應步驟：{pk}")
+        return [found[key] for key in sorted(found, key=lambda k: (version_sort_key(k[0]), k[1]))]
