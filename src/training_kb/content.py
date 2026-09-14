@@ -126,10 +126,18 @@ def _replay_plan(version_id: str, tutorial_id: str, operation_id: str, repositor
     紀錄的版號屬於別篇教學代表呼叫端把兩次邏輯操作混成同一個 `operation_id`
     （`OperationRecord.version_id` 是單值，一個 operation 只對應一篇教學的一個版本，
     D-59），這是協調錯誤，不是內容錯誤，所以丟 `CoordinationError` 並在訊息帶兩個 slug。
+
+    VERSION item 已經寫出來時，`supersedes`／`reason`／`rules_applied` 一律以**表裡那筆**
+    為準：重試不得用新參數改寫已保存的內容（設計 §14.2）。這裡也**不**擋已發布的版本——
+    「已發布不可覆寫」是 Phase 23 `create_version` 的關卡，本函式只決定版號。
     """
     slug, _ = parse_version_id(version_id)
     if slug != tutorial_id:
         raise CoordinationError(f"操作 {operation_id} 已配給 {slug}，不能改用 {tutorial_id}")
+    existing = repository.get_version(version_id)
+    if existing is not None:
+        return _plan(version_id, existing.supersedes, existing.reason,
+                     existing.rules_applied, operation_id)
     supersedes = _base_version(repository, tutorial_id)[0]
     return _plan(version_id, supersedes, reason, rules_applied, operation_id)
 

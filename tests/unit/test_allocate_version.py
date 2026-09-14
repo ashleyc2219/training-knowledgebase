@@ -10,7 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from training_kb.content import allocate_version, make_version_id, parse_version_id
+from training_kb.content import (
+    VersionPlan,
+    allocate_version,
+    make_version_id,
+    parse_version_id,
+)
 from training_kb.errors import ContentError, CoordinationError
 from training_kb.models import Tutorial, TutorialStatus, TutorialVersion
 
@@ -135,3 +140,21 @@ def test_allocate_version_rejects_bad_input(fake_repo: FakeRepository, fake_ops:
         allocate_version("prepare-meeting", operation_id, fake_ops,
                          repository=fake_repo, reason=reason, rules_applied=[])
     assert fake_ops.writes == []
+
+
+def test_replay_reuses_recorded_version_and_base(fake_repo: FakeRepository,
+                                                 fake_ops: FakeOperations) -> None:
+    """已寫進 DynamoDB 的版本必須原樣沿用：重試不得改寫已保存的內容（設計 §14.2）。"""
+    fake_repo.put_tutorial("prepare-meeting", current_version="prepare-meeting@v1")
+    fake_ops.accepted("op-refine-1")
+    def call(reason: str, rules: list[str]) -> VersionPlan:
+        return allocate_version("prepare-meeting", "op-refine-1", fake_ops,
+                                repository=fake_repo, reason=reason, rules_applied=rules)
+
+    first = call("feedback:8 則 找不到按鈕", ["R-007"])
+    fake_repo.put_unpublished_version(first.version_id, supersedes=first.supersedes,
+                                      reason=first.reason, rules_applied=first.rules_applied)
+    second = call("feedback:9 則 找不到按鈕", ["R-012"])
+    assert second.version_id == first.version_id == "prepare-meeting@v2"
+    assert (second.supersedes, second.rules_applied) == ("prepare-meeting@v1", ("R-007",))
+    assert (second.reason, len(fake_ops.writes)) == ("feedback:8 則 找不到按鈕", 1)
