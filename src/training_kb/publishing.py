@@ -666,22 +666,24 @@ class Publisher:
     def _write_tutorial_index(self, slug: str) -> None:
         """重建一篇教學的版本紀錄頁；只列已發布版本，版號大的在前。
 
+        版本清單一律取自 Phase 27 的 `list_versions_of_tutorial`（它已經用
+        `version_sort_key` 排成**升序**，反轉就是「版號大的在前」），本模組不再自己掃一次
+        `VERSION` 也不自己排一次序：兩份排序邏輯遲早會分岔。
+
         索引是**可重建的投影**（內容完全由 DynamoDB 決定），所以允許重寫
         （`if_none_match=False`）；版本頁與 diff 副本才是不可覆寫的一次性產物。
         """
         tutorial = self._repository.get_tutorial(slug)
         if tutorial is None:
             raise PublishError(f"找不到 TUTORIAL item {slug}")
-        versions = sorted(
-            (row for row in self._models("VERSION", TutorialVersion)
-             if row.slug == slug and row.published_at is not None),
-            key=lambda row: parse_version_id(row.version_id)[1], reverse=True)
+        versions = [row for row in self._repository.list_versions_of_tutorial(slug)
+                    if row.published_at is not None][::-1]
         self._put_index(tutorial_index_key(slug),
                         self._renderer.render_tutorial_index(tutorial, versions))
 
     def _write_site_index(self) -> None:
         """重建站台索引；整批只寫**一次**，而且一定在所有教學索引之後。"""
-        tutorials = sorted(self._models("TUTORIAL", Tutorial), key=lambda row: row.slug)
+        tutorials = sorted(self._tutorials(), key=lambda row: row.slug)
         self._put_index(site_index_key(), self._renderer.render_site_index(tutorials))
 
     def _put_index(self, relative: str, page: str) -> None:
@@ -689,9 +691,12 @@ class Publisher:
         _put_public_object(self._repository, relative, page.encode("utf-8"),
                            SITE_PAGE_CONTENT_TYPE, if_none_match=False)
 
-    def _models[M: TutorialVersion | Tutorial](self, entity: str,
-                                               model: type[M]) -> list[M]:
-        """整表掃某一種 metadata item。Phase 27 的 `list_versions_of_tutorial` 還不存在，
-        索引頁又必須看到全部已發布版本，所以先走 `scan_entity`（設計 §10 已接受 MVP 的
-        基表 Scan 取捨）；Phase 27 之後可以換掉這一個私有 helper，公開行為不變。"""
-        return [item_to_model(row, model) for row in self._repository.scan_entity(entity)]
+    def _tutorials(self) -> list[Tutorial]:
+        """站台索引要看到**全部** `TUTORIAL` item，所以走基表 `scan_entity`
+        （設計 §10 已接受 MVP 的 Scan 取捨）；Phase 27 沒有對應的固定查詢。
+
+        版本清單不再經過這裡：`_write_tutorial_index` 改用
+        `Repository.list_versions_of_tutorial`（見該方法說明）。
+        """
+        return [item_to_model(row, Tutorial)
+                for row in self._repository.scan_entity("TUTORIAL")]

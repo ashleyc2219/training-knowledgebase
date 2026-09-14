@@ -299,6 +299,30 @@ def test_commit_writes_public_page_and_diff_copy_and_indexes(
         assert repo.get_object(staged) == repo.get_object(public)
 
 
+def test_tutorial_index_is_built_from_the_phase_27_version_query(
+        publisher: Publisher, repo: RecordingRepository,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """教學索引的版本清單來自 P27 `list_versions_of_tutorial`，不再自己整表掃一次 VERSION。
+
+    P27 回**升序**，反轉之後與原本「版號大的在前」逐字相同，所以順序也一起鎖住
+    （Phase 24 review 必修 A2）。
+    """
+    calls: list[str] = []
+    original = repo.list_versions_of_tutorial
+
+    def spy(slug: str) -> list[TutorialVersion]:
+        calls.append(slug)
+        return original(slug)
+
+    monkeypatch.setattr(repo, "list_versions_of_tutorial", spy)
+    publisher.commit(publisher.prepare(request_v2(), now=NOW), now=NOW)
+    assert calls == [SLUG]
+    page = repo.get_object("site/tutorials/prepare-meeting/index.html")
+    assert page is not None
+    body = page.decode("utf-8")
+    assert body.index(V2) < body.index(V1)
+
+
 def test_commit_never_exposes_unpublished_pages(
         publisher: Publisher, repo: RecordingRepository) -> None:
     """00A §3.8：`data-published="false"` 不得進 `site/`；交易後重新渲染才 promote。"""
