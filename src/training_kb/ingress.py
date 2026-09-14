@@ -36,7 +36,13 @@ from training_kb.errors import (
 )
 from training_kb.keys import operation_ref
 from training_kb.models import Release, ReleaseKind, ReleaseSource, Ticket, TicketSource
-from training_kb.operations import Acceptance, AcceptOperation, OperationCoordinator, OperationKind
+from training_kb.operations import (
+    KINDS,
+    Acceptance,
+    AcceptOperation,
+    OperationCoordinator,
+    OperationKind,
+)
 from training_kb.pipeline_starter import (
     BotoPipelineStarter,
     PipelineStarter,
@@ -208,10 +214,23 @@ def validate_release(payload: Mapping[str, object]) -> Release:
 
 # --- 4. 接受與啟動（Phase 32）-------------------------------------------------
 
-SAFE_EXECUTION_NAME = re.compile(r"[A-Za-z0-9_-]{1,80}\Z")
+MAX_EXECUTION_NAME = 80
+"""Step Functions 執行名稱的長度上限（00A §3.3）。"""
+
+SAFE_EXECUTION_NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{MAX_EXECUTION_NAME}}}\Z")
 _ALLOWED = frozenset(string.ascii_letters + string.digits + "_-")
-_NAME_HEAD = 15
-"""`15 + 1 + 64 = 80`：截取後的前綴、連字號與整段 SHA-256 剛好填滿長度上限。"""
+_NAME_HEAD = len("op-") + max(len(kind) for kind in KINDS) + len("-")
+"""最長的 `op-<kind>-` 前綴要留得住：`feedback-review`／`ticket-analysis` 各 15 字，所以是 19。
+
+長度由 `OperationKind` 自己導出，之後多一種 kind 也不會悄悄把前綴切掉。
+"""
+
+_DIGEST_LENGTH = MAX_EXECUTION_NAME - _NAME_HEAD - 1
+"""`19 + 1 + 60 = 80`：前綴、連字號與雜湊剛好填滿上限。
+
+60 個十六進位字元＝240 bits，遠超過撞名需要的強度；**長度是算出來的，不是猜的**，
+所以前綴變長時雜湊會跟著縮，不會出現「超過 80 字被 AWS 拒絕」這種只在雲端才炸的錯。
+"""
 
 
 def operation_id_for(kind: OperationKind, canonical_id: str) -> str:
@@ -227,15 +246,15 @@ def execution_name(operation_id: str) -> str:
     """Step Functions 的執行名稱：必須符合 `[A-Za-z0-9_-]{1,80}`，而且同輸入永遠同輸出。
 
     冪等只對「同名、同 input、仍在執行」成立，所以名稱一定要由 `operation_id` 決定：
-    **不得追加時間戳、隨機字尾或新的 operation ID**（設計 §14.2）。不合規時取固定的
-    UTF-8 SHA-256 全長 64 個十六進位字元，前面保留可讀的 `op-<kind>-` 前綴；雜湊不截短到
-    沒有測試根據的長度。
+    **不得追加時間戳、隨機字尾或新的 operation ID**（設計 §14.2）。不合規（超長或含非 ASCII）
+    時取固定的 UTF-8 SHA-256，前面保留完整的 `op-<kind>-` 前綴，長度由 `_NAME_HEAD` 與
+    `_DIGEST_LENGTH` 算出來剛好填滿 80。
     """
     if SAFE_EXECUTION_NAME.match(operation_id):
         return operation_id
     digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
-    head = "".join(ch for ch in operation_id if ch in _ALLOWED)[:_NAME_HEAD]
-    return f"{head}-{digest}"
+    head = "".join(ch for ch in operation_id if ch in _ALLOWED)[:_NAME_HEAD].rstrip("-")
+    return f"{head}-{digest[:_DIGEST_LENGTH]}"
 
 
 PIPELINE_FOR_KIND: dict[OperationKind, PipelineName] = {

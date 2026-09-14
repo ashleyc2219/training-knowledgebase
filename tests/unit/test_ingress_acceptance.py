@@ -24,6 +24,7 @@ from training_kb.errors import (
 )
 from training_kb.handlers.github_webhook import WEBHOOK_DEADLINE_SECONDS
 from training_kb.ingress import (
+    MAX_EXECUTION_NAME,
     Wiring,
     accept_normalized,
     accept_release,
@@ -358,3 +359,21 @@ def test_the_deadline_stops_before_touching_s3(harness: Harness) -> None:
         accept_ticket(TICKET, deadline=harness.expired_deadline)
     assert harness.repository.put_object_calls == 0
     assert harness.starter.calls == 0
+
+
+@pytest.mark.parametrize("kind", ["ticket", "release", "feedback-review", "ticket-analysis"])
+def test_execution_name_keeps_the_whole_kind_prefix(kind: str) -> None:
+    """最長的 `op-feedback-review-` 是 19 字；雜湊要跟著縮，前綴不能被切掉。"""
+    long_id = "會前摘要-" + "9" * 200
+    name = execution_name(operation_id_for(cast(OperationKind, kind), long_id))
+    assert name.startswith(f"op-{kind}-")
+    assert len(name) <= MAX_EXECUTION_NAME
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", name)
+
+
+def test_long_names_under_the_same_kind_stay_distinct() -> None:
+    """截取後前綴一樣，靠雜湊分辨；同輸入仍然同輸出。"""
+    first = execution_name(operation_id_for("feedback-review", "demo-會前摘要-" + "1" * 90))
+    second = execution_name(operation_id_for("feedback-review", "demo-會前摘要-" + "2" * 90))
+    assert first != second
+    assert first == execution_name(operation_id_for("feedback-review", "demo-會前摘要-" + "1" * 90))
