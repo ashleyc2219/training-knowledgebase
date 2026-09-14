@@ -125,7 +125,7 @@ hashlib.sha1(...).hexdigest()[:16]  ->  "d1ad3cfd19a24c4d"  ->  PROC#d1ad3cfd19a
 
 ### Task 1：建立 `RawEvent` 與未核定來源的拒絕
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -144,7 +144,7 @@ def test_untrusted_context_is_rejected() -> None:
         structure_signature(event)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_signature.py -q
@@ -152,7 +152,7 @@ uv run pytest tests/unit/rote/test_signature.py -q
 
 預期：FAIL，訊號包含 `ModuleNotFoundError: No module named 'training_kb.rote'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from collections.abc import Mapping
@@ -189,7 +189,7 @@ def structure_signature(event: RawEvent) -> str:
     return ""  # Task 2 換成主來源的雜湊公式
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_signature.py -q
@@ -197,7 +197,7 @@ uv run pytest tests/unit/rote/test_signature.py -q
 
 預期：`2 passed`；空 domain、空 adapter、未核定事件型別都明確失敗，沒有分支回 fallback signature。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/unit/rote/test_signature.py
@@ -206,7 +206,7 @@ git commit -m "feat(rote): 定義來源結構事件"
 
 ### Task 2：以 canonical shape 計算 signature
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from dataclasses import replace
@@ -243,7 +243,7 @@ def test_missing_approved_key_changes_signature(issue_event: RawEvent) -> None:
     assert structure_signature(replace(issue_event, payload=trimmed)) != structure_signature(issue_event)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_signature.py -q
@@ -251,7 +251,7 @@ uv run pytest tests/unit/rote/test_signature.py -q
 
 預期：FAIL，訊號是 `test_signature_is_sixteen_lowercase_hex` 的 `assert 0 == 16`（Task 1 的 `structure_signature` 還回空字串）。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 import hashlib
@@ -268,15 +268,16 @@ def structure_signature(event: RawEvent) -> str:
     return hashlib.sha1(json.dumps(shape, sort_keys=True).encode()).hexdigest()[:16]
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_signature.py -q
 ```
 
 預期：`7 passed`；插入順序、大小寫、header 值、未核定欄位都不改結果，少一個已核定 key 才改結果。
+（上面 Step 1 的 `parametrize` 清單在實際檔案裡依 `ruff` 的 `line-length = 100` 換行，斷言內容不變。）
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/unit/rote/test_signature.py
@@ -285,7 +286,7 @@ git commit -m "feat(rote): 計算無事件值結構簽名"
 
 ### Task 3：逐來源核對 O6 核定紀錄
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import json
@@ -298,7 +299,8 @@ from training_kb.errors import PermanentError
 from training_kb.rote import STABLE_KEYS, RawEvent, signature_shape, structure_signature
 from training_kb.source_ids import SourceApproval, approved_stable_keys, load_source_approvals
 
-FIXTURE_ROOT = Path("tests/fixtures")          # uv run pytest 一律從 repo 根目錄執行
+REPO_ROOT = Path(__file__).resolve().parents[2]   # 與 P13 的整合測試同一種路徑推導
+FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures"
 APPROVALS = load_source_approvals(FIXTURE_ROOT / "o6/approved-sources.json")
 APPROVED = [row for row in APPROVALS if row.approved_by]
 
@@ -333,15 +335,20 @@ def test_every_source_row_is_approved() -> None:
     assert [f"{row.domain}:{row.event_type}" for row in APPROVALS if not row.approved_by] == []
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_o6_stable_keys.py -q
 ```
 
-預期：FAIL，訊號包含 `cannot import name 'approved_stable_keys'` 或核定紀錄檔不存在，而不是 fixture 未定義。
+原本預期的紅燈訊號是 `cannot import name 'approved_stable_keys'` 或核定紀錄檔不存在。但 Phase 13
+已交付 `approved_stable_keys` 與 `tests/fixtures/o6/approved-sources.json`，而 Task 1 Step 3 抄進
+`STABLE_KEYS` 的那一列就是本 Task 要的最終內容，所以這個檔一寫完就是綠燈。改以「證明它會紅」取代：
+暫時把 `("github.com", "issues")` 少抄一個 key、並多抄一列未核定的 `pull_request`，重跑應看到
+`test_stable_keys_matches_the_approval_record` 與 `test_pending_sources_stay_blocked` 兩個 FAIL
+（後者是 `DID NOT RAISE`），再把 `STABLE_KEYS` 還原成逐列相等的版本。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 把 `STABLE_KEYS` 改成逐條抄寫核定紀錄中 `approved_by` 非空的列；正式程式不讀 `tests/` 路徑，抄錯由 `test_stable_keys_matches_the_approval_record` 擋下來。
 
@@ -353,7 +360,7 @@ STABLE_KEYS: Mapping[tuple[str, str], frozenset[str]] = {
 }
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_signature.py tests/integration/test_o6_stable_keys.py -q
@@ -361,7 +368,7 @@ uv run pytest tests/unit/rote/test_signature.py tests/integration/test_o6_stable
 
 預期：核對、blocked 與已核定列的參數化案例 PASS，`test_every_source_row_is_approved` 顯示 `xfailed`；核定紀錄全部填完後它會變成 `XPASS(strict)` 而讓測試失敗，那是提醒你移除 marker 並更新 O6 狀態的訊號。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/integration/test_o6_stable_keys.py
@@ -405,10 +412,10 @@ git commit -m "test(rote): 核對 O6 來源清單"
 
 ## 12. 完成清單
 
-- [ ] `RawEvent` 的 `domain`／`adapter` 只來自可信入口設定，沒有任何分支從 payload 推導。
-- [ ] GitHub Issue 的核定 keys 精確是 `action, issue, repository, sender` 四個。
-- [ ] 其他 `(domain, event_type)` 在核定前呼叫會拋 `PermanentError`，而不是回 fallback signature。
-- [ ] signature shape 只含 domain、已核定 key 名稱，與經小寫、去重、排序且只保留三個指定前綴的 header 名稱；序列化結果搜不到任何事件值。
-- [ ] `structure_signature` 回可重現的 16 個小寫 hex 字元，公式與設計 §7.2 逐字相同。
-- [ ] `STABLE_KEYS` 與核定紀錄逐列相等，且正式程式不讀 `tests/` 路徑。
-- [ ] 文件與程式註解都沒有把 SHA-1 描述成安全驗簽，O6 仍標為未完成。
+- [x] `RawEvent` 的 `domain`／`adapter` 只來自可信入口設定，沒有任何分支從 payload 推導。
+- [x] GitHub Issue 的核定 keys 精確是 `action, issue, repository, sender` 四個。
+- [x] 其他 `(domain, event_type)` 在核定前呼叫會拋 `PermanentError`，而不是回 fallback signature。
+- [x] signature shape 只含 domain、已核定 key 名稱，與經小寫、去重、排序且只保留三個指定前綴的 header 名稱；序列化結果搜不到任何事件值。
+- [x] `structure_signature` 回可重現的 16 個小寫 hex 字元，公式與設計 §7.2 逐字相同。
+- [x] `STABLE_KEYS` 與核定紀錄逐列相等，且正式程式不讀 `tests/` 路徑。
+- [x] 文件與程式註解都沒有把 SHA-1 描述成安全驗簽，O6 仍標為未完成。
