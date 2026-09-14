@@ -12,7 +12,7 @@ import pytest
 
 from training_kb.errors import PermanentError
 from training_kb.models import ProcStatus, ProcStep, ProvenWorkflow
-from training_kb.rote import on_new_success
+from training_kb.rote import on_new_success, on_replay_failure, on_replay_success
 
 NOW = datetime(2026, 9, 13, 0, 0, tzinfo=UTC)
 LATER = datetime(2026, 9, 13, 1, 0, tzinfo=UTC)
@@ -59,3 +59,29 @@ def test_duplicate_operation_does_not_add_sample() -> None:
 def test_retired_proc_needs_manual_reset() -> None:
     with pytest.raises(PermanentError, match="人工"):
         on_new_success(proc(status=ProcStatus.RETIRED), "op-ticket-t_999", FakeOperations(), NOW)
+
+
+# --- 連續重放失敗與成功歸零（Task 2）-----------------------------------------
+
+
+def test_replay_failure_keeps_last_used() -> None:
+    failed = on_replay_failure(proc(success_count=3), LATER)
+    assert (failed.fail_count, failed.status, failed.last_used) == (1, ProcStatus.ACTIVE, NOW)
+
+
+def test_replay_success_resets_streak_and_updates_last_used() -> None:
+    current = on_replay_failure(on_replay_failure(proc(success_count=3), LATER), LATER)
+    recovered = on_replay_success(current, LATER)
+    assert (recovered.fail_count, recovered.success_count, recovered.last_used) == (0, 3, LATER)
+    again = on_replay_failure(recovered, LATER)
+    assert (again.fail_count, again.status) == (1, ProcStatus.ACTIVE)
+
+
+def test_third_consecutive_failure_retires() -> None:
+    current = proc(success_count=3)
+    for count in (1, 2, 3):
+        current = on_replay_failure(current, LATER)
+        assert current.fail_count == count
+    assert current.status == ProcStatus.RETIRED
+    with pytest.raises(PermanentError, match="人工"):
+        on_replay_failure(current, LATER)

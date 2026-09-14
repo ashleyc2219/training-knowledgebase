@@ -206,5 +206,28 @@ def on_new_success(proc: ProvenWorkflow, operation_id: str,
     return proc.model_copy(update={"success_count": proc.success_count + 1, "last_used": now})
 
 
+def on_replay_success(proc: ProvenWorkflow, now: datetime) -> ProvenWorkflow:
+    """一次重放成功：連敗歸零並更新 `last_used`，**不加 `success_count`**。
+
+    重放走的是同一份已驗證序列，不是新的驗證樣本（決策 F05）；只有 `on_new_success`
+    才能讓計數往前。`last_used` 更新是決策 F04 要的「最近一次成功使用」。
+    """
+    _reject_retired(proc)
+    return proc.model_copy(update={"fail_count": 0, "last_used": now})
+
+
+def on_replay_failure(proc: ProvenWorkflow, now: datetime) -> ProvenWorkflow:
+    """一次重放失敗：`fail_count + 1`，累到 `PROC_MAX_CONSECUTIVE_FAIL` 就 retired。
+
+    `fail_count` 是**連續**失敗次數（決策 D20），中間出現一次 `on_replay_success` 就歸零，
+    不是歷史總失敗數。`now` 在簽名裡只為了三個轉移函式的形狀一致，**實作刻意不使用它**：
+    失敗也更新 `last_used` 會讓連敗中的 PROC 在 Phase 34 的平手排序裡排到最前面（F04）。
+    """
+    _reject_retired(proc)
+    failures = proc.fail_count + 1
+    status = ProcStatus.RETIRED if failures >= PROC_MAX_CONSECUTIVE_FAIL else proc.status
+    return proc.model_copy(update={"fail_count": failures, "status": status})
+
+
 # --- 5. 記錄步驟的驗證與執行（Phase 36 追加）----------------------------------
 # --- 6. 三層 normalize 與成功提交（Phase 37 追加）-----------------------------
