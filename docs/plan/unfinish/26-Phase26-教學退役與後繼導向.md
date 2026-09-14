@@ -16,7 +16,7 @@
 - 資料狀態只使用 `retired`；`obsolete` 只是顯示用語，不得寫進資料。
 - successor **由維護者選定既有 Tutorial**；來源事件（Release payload、模型輸出）不得直接指定後繼。
 - 找不到合法後繼時保持空值，**不能阻擋退役**；也不做連續自動跳轉。
-- O1–O7 gate 狀態：本 Phase 不依賴 O3，也**不宣稱** O3 已通過；退役本身不發布新版本，也**不寫任何 `site/` 物件**——退役頁要真的出現在公開站，仍得經 [Phase 24](./24-Phase24-單篇教學發布提交.md)／[Phase 25](./25-Phase25-多篇教學整批發布.md) 的「私有 staging → 交易 → 逐篇寫 `site/`」機制重寫一次，由 [Phase 52](./52-Phase52-Release-RETIRE與流程驗收.md) 決定何時觸發（O3 仍是 FAIL，controller 2026-09-14 裁決：離線開發照常，真實切點驗證延後）。O1 的 `META` 仍是待確認值，`update_meta` 的鍵沿用 [Phase 05](./05-Phase05-單表鍵與關係邊契約.md) 的決定。
+- O1–O7 gate 狀態：本 Phase 不依賴 O3，也**不宣稱** O3 已通過；退役本身不發布新版本，也**不寫任何 `site/` 物件**。**公開面的落點是教學索引頁，不是版本頁**（00A **D-83**，2026-09-14 最終 review 後的 controller 裁決）：協定 A 下**已發布的版本頁是不可覆寫的**（`Publisher` 的 `_version_problems` 擋已發布版、`_put_public_object` 會比對 bytes），所以掛在既有版本頁上的 `RETIRED_NOTICE` 永遠寫不出去；退役提示與後繼連結要改由 `render_tutorial_index` 輸出在**可覆寫的** `tutorial_index_key(slug)` 上，**版本頁維持不變**。真的出現在公開站，仍得由 [Phase 52](./52-Phase52-Release-RETIRE與流程驗收.md) 在退役之後呼叫 [Phase 24](./24-Phase24-單篇教學發布提交.md)／[Phase 25](./25-Phase25-多篇教學整批發布.md) 的 `Publisher` **重寫該篇的教學索引頁**（只有索引頁，不重發版本頁）。**本 Phase 交件時的實作把提示放在 `render_version_page`，那是待修正項**，屬 P52／P57 的範圍（O3 仍是 FAIL，controller 2026-09-14 裁決：離線開發照常，真實切點驗證延後）。O1 的 `META` 仍是待確認值，`update_meta` 的鍵沿用 [Phase 05](./05-Phase05-單表鍵與關係邊契約.md) 的決定。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
