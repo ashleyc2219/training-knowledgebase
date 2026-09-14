@@ -11,8 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from training_kb.errors import PermanentError
 from training_kb.keys import (
     META,
+    RELATIONS,
     edge_sk,
     feature_pk,
     feedback_pk,
@@ -137,6 +139,7 @@ def test_unknown_relation_is_rejected() -> None:
 
 
 def test_edge_sk_covers_exactly_the_five_design_relations() -> None:
+    assert len(RELATIONS) == 5
     assert edge_sk("SUPERSEDES", version_pk("prepare-meeting@v2")) == (
         "SUPERSEDES#VERSION#prepare-meeting@v2"
     )
@@ -165,15 +168,44 @@ def test_parse_pk_rejects_strings_without_a_prefix() -> None:
             parse_pk(bad)
 
 
-def test_parse_step_pk_rejects_shapes_that_are_not_a_step() -> None:
-    not_steps = (
-        "STEP#prepare-meeting@v2",
-        "STEP#prepare-meeting@v2#x",
-        "VERSION#prepare-meeting@v2#3",
-    )
-    for bad in not_steps:
-        with pytest.raises(ValueError, match="invalid step primary key"):
-            parse_step_pk(bad)
+MALFORMED_STEP_PKS = (
+    "STEP#prepare-meeting@v2",       # 沒有步驟號
+    "STEP#prepare-meeting@v2#x",     # 步驟號不是數字
+    "VERSION#prepare-meeting@v2#3",  # 前綴不是 STEP
+    "STEP##3",                       # 版本 ID 空白
+    "STEP#prepare-meeting@v2#",      # 步驟號空白
+    "STEP#prepare-meeting@v2#03",    # 前導零，組回去不是原字串
+    "STEP#prepare-meeting@v2#\uff13",   # 全形數字，int() 會過但組不回原字串
+    "STEP#prepare-meeting@v2#\u00b3",   # 上標數字，isdigit() 會過但 isdecimal() 不過
+)
+
+
+@pytest.mark.parametrize("bad", MALFORMED_STEP_PKS)
+def test_parse_step_pk_rejects_shapes_that_are_not_a_step(bad: str) -> None:
+    with pytest.raises(ValueError, match="invalid step primary key"):
+        parse_step_pk(bad)
+
+
+@pytest.mark.parametrize("number", [1, 3, 10, 42])
+def test_parse_step_pk_round_trip_is_closed(number: int) -> None:
+    value = step_pk("prepare-meeting@v2", number)
+    assert step_pk(*parse_step_pk(value)) == value
+
+
+def test_builders_reject_padded_identifiers() -> None:
+    with pytest.raises(ValueError, match="bare identifier"):
+        feature_pk(" Prepare ")
+    with pytest.raises(ValueError, match="bare identifier"):
+        version_pk("prepare-meeting@v2\n")
+    with pytest.raises(ValueError, match="bare identifier"):
+        step_pk(" prepare-meeting@v2", 3)
+
+
+def test_view_pk_rejects_naive_and_sub_second_timestamps() -> None:
+    with pytest.raises(ValueError, match="timezone"):
+        view_pk("prepare-meeting@v2", "u_01", datetime(2026, 8, 20))
+    with pytest.raises(PermanentError, match="whole seconds"):
+        view_pk("prepare-meeting@v2", "u_01", VIEW_TS.replace(microsecond=1))
 
 
 def test_metadata_sort_key_matches_the_recorded_o1_decision() -> None:

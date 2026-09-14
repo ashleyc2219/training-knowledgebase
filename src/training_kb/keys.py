@@ -32,8 +32,12 @@ RELATIONS = frozenset({"REFERENCES", "SUPERSEDES", "APPLIED_TO", "ASKS_ABOUT", "
 
 
 def _bare(value: str) -> str:
-    """十個 builder 的唯一入口檢查：必須是非空、不含 `#` 的裸 ID，避免重複加前綴。"""
-    if not isinstance(value, str) or not value or "#" in value:
+    """十個 builder 共用的裸 ID 檢查：非空、無前後空白、不含 `#`，避免重複加前綴。
+
+    前後空白的規則與 `models.bare_id` 對齊：`" Prepare "` 與 `"Prepare"` 若都能建鍵，
+    同一個 Feature 會得到兩把不同的 PK。
+    """
+    if not isinstance(value, str) or not value or value != value.strip() or "#" in value:
         raise ValueError(f"key input must be a non-empty bare identifier: {value!r}")
     return value
 
@@ -106,10 +110,22 @@ def parse_pk(value: str) -> tuple[str, str]:
 
 
 def parse_step_pk(value: str) -> tuple[str, int]:
-    """`step_pk` 的反函式；用 `rpartition` 從右邊切，版本 ID 自己長得像 `slug@v2`。"""
+    """`step_pk` 的反函式；用 `rpartition` 從右邊切，版本 ID 自己長得像 `slug@v2`。
+
+    只接受 `step_pk` 產得出來的字串，也就是 `step_pk(*parse_step_pk(pk)) == pk` 必須成立：
+    版本 ID 不得為空（`STEP##3`）；步驟號用 `isdecimal()` 擋掉 `³` 這種 `isdigit()` 會放行、
+    `int()` 卻要丟自己的 `ValueError` 的字元；再用 `str(int(number)) == number` 擋掉前導零
+    （`03`）與全形數字（`３`）——它們 `int()` 得到同一個值，組回去卻不是原本那把鍵。
+    """
     kind, identifier = parse_pk(value)
     version_id, separator, number = identifier.rpartition("#")
-    if kind != "STEP" or not separator or not number.isdigit():
+    if (
+        kind != "STEP"
+        or not separator
+        or not version_id
+        or not number.isdecimal()
+        or str(int(number)) != number
+    ):
         raise ValueError(f"invalid step primary key: {value!r}")
     return version_id, int(number)
 
