@@ -123,9 +123,15 @@ verify_version_complete == True -> 交給 Phase 24；False -> ContentError，不
 
 **`published_at` 一律不寫。** D25 規定未發布就是 `published_at=None`；只有 publish 成功才有值（F37）。因此 `create_version` 永遠不碰這個欄位，也不碰 `Tutorial.current_version`。
 
-**重試要冪等。** `create_version` 先讀 `repository.get_version(plan.version_id)`：已存在且 `published_at` 非 `None` 就丟 `ContentError`（已發布不可覆寫）；已存在且未發布則跳過 `put_meta`（Phase 06 的 `create_only=True` 會拒絕重複建立），只補寫產物與邊。S3 那一段由 Phase 22 的條件寫入保證同內容冪等、不同內容失敗。
+**重試要冪等，但只對同一份 plan 冪等。** `create_version` 先讀 `repository.get_version(plan.version_id)`：已存在且 `published_at` 非 `None` 就丟 `ContentError`（已發布不可覆寫）；已存在且未發布則跳過 `put_meta`（Phase 06 的 `create_only=True` 會拒絕重複建立），只補寫產物與邊。S3 那一段由 Phase 22 的條件寫入保證同內容冪等、不同內容失敗。
 
-**核對只用基表。** GSI `by_target` 是最終一致，剛寫入的邊可能還讀不到；用它核對會誤判「關係不完整」或更糟地誤判「完整」。所以 `_missing_parts` 一律用完整 PK 的 `query_pk(..., consistent=True)`，並以 S3 全文 `parse_markdown` 得到的步驟清單當作應有步驟的權威（設計 §10）。
+**重送也要守門內容（修正回合 1）。** 沿用既有 item 之前，必須先把 plan 組出來的 `TutorialVersion` 與既有那筆**逐欄比對**（`version_id`／`slug`／`supersedes`／`reason`／`rules_applied`／`s3_key`，不比 `published_at`），不同就丟 `ContentError`——這與 `put_private_artifact` 比對 bytes 是同一個作法：同一個版號只能有一種內容。少了這一關，同版號換 `reason`／`rules_applied` 重送會靜默成功、回傳舊的 `rules_applied=[]`，卻照新 plan 寫出 `RULE#R-007 APPLIED_TO` 邊，核對還會通過。順帶在 `_planned_version` 檢查 plan 自洽（`make_version_id(slug, number) == version_id`），否則會寫出「item 說自己是 v1、全文卻放在 `v2.md`」的版本。兩道關卡都在任何寫入之前，被拒的重送不留下半筆產物或邊。
+
+**核對只用基表。** GSI `by_target` 是最終一致，剛寫入的邊可能還讀不到；用它核對會誤判「關係不完整」或更糟地誤判「完整」。所以 `_missing_parts` 一律用完整 PK 的 `query_pk(..., consistent=True)`（或基表一致的 `scan_entity`），並以 S3 全文 `parse_markdown` 得到的步驟清單當作應有步驟的權威（設計 §10）。
+
+**「不缺」與「不多」都要驗（修正回合 1）。** 只驗缺漏會放行三種矛盾：全文只有四步、基表卻多一個 `STEP#…#5`（上一版留下的殘骸會跟著發布）；`rules_applied` 是空的、卻有 `RULE#R-999 APPLIED_TO#VERSION#…` 指向本版（權威欄位與邊互相矛盾，D17）；同一版兩條 `SUPERSEDES`（版本鏈分岔）。所以 `_extra_step_problems` 比對 `get_steps` 的編號集合與全文步數、`_exact_edge_problems` 要求 `SUPERSEDES` 邊集合恰等於 `[supersedes]`（沒有前版就是空集合）、`_applied_to_problems` 用基表一致 `scan_entity("RULE", meta_only=False)` 找出所有指向本版的 `APPLIED_TO` 邊，集合必須恰等於 `rules_applied`——只查 `rules_applied` 那幾個 `RULE#` 起點驗得出「不缺」、驗不出「不多」。
+
+**核對是關卡，不是程式錯誤回報點（修正回合 1）。** 手改出來的損壞邊（例如 `target="FEATURE#"`）會讓 `edge_sk`／`parse_pk` 丟 `ValueError`；一律經 `_expected_sk` 與 `_missing_parts` 的 `except ValueError` 收斂成一條「問題」，讓 `verify_version_complete` 回 `False`，不得把例外炸給 Phase 24（那會讓「不可發布」變成「發布流程當掉」）。`PermanentError` 類的程式錯誤不吞。
 
 **item 上不可以有模型以外的屬性。** DynamoDB item 的屬性只有兩類：模型欄位與保留屬性 `PK`／`SK`／`target`／`entity`／`_revision`。VERSION item 不得為了省一次 S3 讀取而加 `step_count`，STEP 邊也不得加 `retired_at`；要保存的執行資訊一律寫進 operation 紀錄。這正是「應有步驟數只能由 S3 全文推得」的原因。
 
@@ -401,7 +407,9 @@ def _missing_parts(version_id: str, repository: Repository) -> list[str]:
     return problems
 ```
 
-核對全部用完整 PK 的 `query_pk(..., consistent=True)`，不查 GSI；應有步驟一律以 S3 全文 `parse_markdown().steps` 為準，沒有 `step_count` 可讀。執行 `uv run pytest tests/integration/test_version_complete.py -q`，預期五組破壞參數與中斷案例全部 PASS。
+核對全部用完整 PK 的 `query_pk(..., consistent=True)`（`APPLIED_TO` 是基表一致的 `scan_entity("RULE", meta_only=False)`），不查 GSI；應有步驟一律以 S3 全文 `parse_markdown().steps` 為準，沒有 `step_count` 可讀。執行 `uv run pytest tests/integration/test_version_complete.py -q`，預期五組破壞參數與中斷案例全部 PASS。
+
+修正回合 1 依 review 把 `_has_edge` 換成 `_exact_edge_problems`（缺的與多的都是問題），並追加 `_extra_step_problems`、`_applied_to_problems`、`_expected_sk` 與 `_missing_parts` 的 `except ValueError` 護欄；同檔追加四條測試：多塞 STEP／多塞 `APPLIED_TO`／多塞 `SUPERSEDES` 三組 parametrize 都回 `False`，損壞的 `target` 回 `False` 而不是丟例外。`create_version` 端追加 `_planned_version`／`_reject_changed_version` 與兩條測試（同 plan 重送 OK；換 `reason`／`rules_applied` 重送丟 `ContentError` 且不寫任何邊；`version_id` 與 `slug`／`number` 不自洽丟 `ContentError`）。
 
 - [x] **Step 5：提交**
 
@@ -434,6 +442,9 @@ git commit -m "feat(content): 核對版本與關係是否齊全"
 | `rules_applied` 從前一版複製 | 沿用原文也算套用 | 只寫本次 plan 的 ID；沿用不計（F29）。 |
 | `put_edge` 丟 `PermanentError: edge attributes are reserved` | `attrs` 傳了 `entity`／`target`／`SK` | 保留屬性由 Phase 07 自己算；`attrs` 只放 `type` 與 `text`。 |
 | 在 VERSION item 加 `step_count` 讓核對變快 | 想省一次 S3 讀取 | 停止：strict 模型會拒絕多餘屬性；應有步驟只能由 S3 全文推得。 |
+| 核對回 `True`，但這一版多一個 `STEP#…#5`／多一條 `APPLIED_TO`／兩條 `SUPERSEDES` | 只驗「不缺」沒驗「不多」 | 步驟編號集合、`APPLIED_TO` 規則集合、`SUPERSEDES` 終點集合都要**恰等於**權威來源。 |
+| 同版號換 `reason` 重送靜默成功、回傳舊值卻寫出新邊 | `existing is not None` 就直接沿用，沒比對內容 | 逐欄比對 plan 與既有 item，不同就 `ContentError`；比對放在任何寫入之前。 |
+| `verify_version_complete` 丟 `ValueError` 把 Phase 24 打斷 | 損壞的 `target` 直接餵給 `edge_sk`／`parse_pk` | 經 `_expected_sk` 與 `except ValueError` 收斂成問題；關卡只回齊全／不齊全。 |
 
 ## 10. 來源與 Rule 對照
 
@@ -461,3 +472,6 @@ Rule 原文逐字取自 feature 檔；primary 歸屬依 [00B 需求覆蓋對照]
 - [x] 中斷後私有 S3 產物仍在，且公開站無任何變化。
 - [x] 建立教學版本 Rule 3、4、6、8 各有直接 assertion；Rule 5、7、9、10 只標為相關。
 - [x] 整合測試已實際執行；沒有把綠燈說成 O3 發布 gate 已通過。
+- [x] 核對同時驗「不缺」與「不多」：多出來的 STEP item、`APPLIED_TO` 邊、`SUPERSEDES` 邊都讓 `verify_version_complete` 回 `False`（修正回合 1）。
+- [x] 同版號換內容重送一律 `ContentError` 且不留下任何產物或邊；plan 的 `version_id` 與 `slug`／`number` 必須自洽（修正回合 1）。
+- [x] 損壞的關係資料收斂成問題清單，`verify_version_complete` 不丟 `ValueError`（修正回合 1）。
