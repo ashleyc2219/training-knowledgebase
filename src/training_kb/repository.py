@@ -6,7 +6,7 @@
 AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**不是** `TransientError`，
 呼叫端不得自動重試）。
 
-檔案分成六段，後來的 Phase 直接接在後面，不必改動前面幾段：
+檔案分成七段，後來的 Phase 直接接在後面，不必改動前面幾段：
 1. 型別別名與保留屬性
 2. 實體 → PK 的分派
 3. Decimal codec 與 `item_to_model`（DynamoDB 只收 `Decimal`，不收 `float`）
@@ -20,9 +20,14 @@ AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**
 6. Phase 27 追加的固定圖譜查詢（五個具名方法，與 Phase 08 的 `list_feedback_of_version`
    合為設計 §10 的六種固定查詢）與排序用的模組函式 `version_sort_key`；全部只讀、不接
    `Writer`，所以正常關係遍歷不可能呼叫模型
+7. Phase 28 追加的維護批次：`delete_edge`／`backfill_references`／`rebuild_rule_projection`
+   三個方法在 class 尾端，模組級的 `DELETABLE_RELATIONS`／`BackfillReport` 則放在第 3 段
+   之後、`Repository` 之前——方法的型別註解在 class body 求值時就要看得到它們。
+   這一段同樣不接 `Writer`（D-46），維護批次不呼叫模型
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypeVar
 
@@ -46,6 +51,7 @@ from training_kb.keys import (
     proc_pk,
     release_pk,
     rule_pk,
+    step_pk,
     ticket_pk,
     tutorial_pk,
     version_pk,
@@ -172,6 +178,45 @@ def version_sort_key(version_id: str) -> tuple[str, int]:
     if not slug or not marker or number < 1 or f"{slug}@v{number}" != version_id:
         raise PermanentError(f"不是合法的 version_id：{version_id}")
     return slug, number
+
+
+# --- 第 7 段的模組級契約（Phase 28 追加；必須在 class 之前求值）---------------
+
+DELETABLE_RELATIONS = frozenset({"APPLIED_TO"})
+"""維護批次**唯一**刪得掉的關係（00A §3.3、§6.3）。
+
+`REFERENCES`／`SUPERSEDES` 描述的是已發布版本的歷史事實，錯了也不能由程式片面改寫
+（F40）；`APPLIED_TO` 則是 `VERSION.rules_applied` 的投影（D17），留著多餘的邊會讓
+設計 §12.1 的「規則套用次數」多計，所以它必須刪得掉。這道白名單就是「不替換錯邊」的
+程式保險絲：backfill 就算寫錯也刪不掉引用邊。`keys.RELATIONS` 是 `keys.py` 的內部白名單、
+外部模組一律不 import（00A §6.3），所以這裡自帶一份，而且刻意只有一個值。
+"""
+
+
+@dataclass(frozen=True)
+class BackfillReport:
+    """`backfill_references` 的結果；三個欄位都是**步驟 PK 字串**的 tuple（00A §6.3）。
+
+    - `added`：本次依 S3 全文補寫的缺邊。
+    - `conflicts`：該步已有指向**別的** Feature 的邊；只記錄，不替換也不追加第二條（D05、F40）。
+    - `unresolved`：全文的 `feature=` 在基表找不到對應 Feature，程式不敢自己決定（設計 §10）。
+
+    三個 tuple 都去重並依 `(version_id, number)` 升序，所以兩次執行的結果可以直接比對。
+    """
+
+    added: tuple[str, ...]
+    conflicts: tuple[str, ...]
+    unresolved: tuple[str, ...]
+
+
+def _sorted_step_pks(values: Sequence[str]) -> tuple[str, ...]:
+    """步驟 PK 去重 + 依 `(version_id, number)` 升序。
+
+    排序鍵用 `parse_step_pk` 而不是字串本身：字典序會把 `STEP#a@v2#10` 排到 `#3` 前面，
+    與 `version_sort_key` 擋掉的是同一個坑。去重是防禦性的——`TutorialContent` 已經保證
+    步驟編號從 1 連號且唯一，同一個 PK 不可能出現兩次。
+    """
+    return tuple(sorted(set(values), key=parse_step_pk))
 
 
 # --- 4. Repository -----------------------------------------------------------
@@ -758,3 +803,125 @@ class Repository:
                   if tutorial.status == TutorialStatus.ACTIVE
                   and feature_id in tutorial.feature_ids]
         return min(active, key=lambda tutorial: tutorial.slug) if active else None
+
+    # --- 7. 維護批次（Phase 28 追加） ---
+
+    def delete_edge(self, pk: str, relation: str, target_pk: str) -> None:
+        """`put_edge` 的反向操作，**只允許刪 `DELETABLE_RELATIONS`（就是 `APPLIED_TO`）**。
+
+        本 Phase 只在 `rebuild_rule_projection` 內用它。刪不存在的邊是 no-op
+        （DynamoDB `DeleteItem` 本來就冪等），所以重跑安全；`edge_sk` 會順便把
+        `target_pk` 不是合法 PK 的呼叫擋成 `ValueError`。
+
+        **IAM 相依：** Phase 09 的真實資料角色刻意沒有 `dynamodb:DeleteItem`，所以這個
+        方法在雲端還不能用；controller 2026-09-14 裁決本 Phase 照 00A 實作，授權留到
+        P41／P57 修 CDK 時以「只對 `SK begins_with APPLIED_TO#`」的條件補上。
+        """
+        if relation not in DELETABLE_RELATIONS:
+            raise PermanentError(f"不允許刪除 {relation} 邊；只有 APPLIED_TO 是可重建的投影")
+        self._table.delete_item(Key={"PK": pk, "SK": edge_sk(relation, target_pk)})
+
+    def backfill_references(self, version_id: str) -> BackfillReport:
+        """依已發布版的 S3 全文補上缺少的 `REFERENCES` 邊；**只補缺**（設計 §10、F40）。
+
+        `parse_markdown` 在函式內 import：相依方向是 `content` 呼叫 `repository`
+        （設計 §5），module 層反向 import 會循環。`adapters.py` 對 `ingress` 也是這樣處理。
+
+        只吃**已發布**版本：`published_at is None` 的版本可能正在 Phase 23 的建版途中，
+        補寫會把半成品補成「看起來完整」，所以和「版本不存在」「沒有全文」一樣丟
+        `PermanentError`（三者都是「確定不該補」，不是暫時性故障）。
+
+        設計 §9.1 把步驟與它的引用放在**同一筆** item（`SK=REFERENCES#FEATURE#…`），
+        所以「缺邊」就等於「缺整個 STEP item」，不是兩種情況；判斷一律用
+        `list_edges(step_pk(...), "REFERENCES")`（完整 PK、一致讀取、讀完分頁），
+        **不查最終一致的 `by_target`**，也不先用 `get_steps` 問「有沒有 STEP item」——
+        那樣第一關就會把缺邊案例吃成 `unresolved`。
+
+        四條分支與設計 §10 逐字對應：
+
+        - 已有邊且 `target` 相同 -> 什麼都不做（冪等，連 item 都不重寫）
+        - 已有邊但 `target` 不同 -> 記 `conflicts`；不替換、不追加第二條（D05、F40）
+        - 沒有邊、`feature_id` 有既有 Feature -> `put_edge` 補一筆 -> `added`
+        - 沒有邊、`feature_id` 查不到 Feature -> `unresolved`（**不建立 Feature**）
+
+        補出來的 item 與 Phase 23 `_write_edges` 寫的完全一樣：`attrs` **只帶 `type` 與
+        `text`**，`target`／`entity` 由 `put_edge` 自己導出（保留屬性傳進去會
+        `PermanentError`），`tutorial_version`／`number` 由 PK 還原、`feature_id` 由
+        `target` 還原（00A §3.6）。Phase 文件原本寫 `attrs` 還要帶 `tutorial_version`
+        與 `number`，那會讓同一份資訊在 item 上多出一份會不一致的副本，已依 00A 更正。
+
+        **不改歷史**：不寫 `VERSION`、不改既有步驟文字、不碰 S3、不產生新版本、
+        不動 `published_at`／`current_version`，也**不呼叫模型**（D-46）。
+        """
+        from training_kb.content import parse_markdown
+
+        version = self.get_version(version_id)
+        if version is None or version.published_at is None:
+            raise PermanentError(f"{version_id} 不是已發布版本，不在 backfill 範圍")
+        body = self.get_object(version.s3_key)
+        if body is None:
+            raise PermanentError(f"{version_id} 缺少可比對的全文")
+        added: list[str] = []
+        conflicts: list[str] = []
+        unresolved: list[str] = []
+        for draft in parse_markdown(body.decode("utf-8")).steps:
+            pk = step_pk(version_id, draft.number)
+            target = feature_pk(draft.feature_id)
+            existing = [str(edge["target"]) for edge in self.list_edges(pk, "REFERENCES")]
+            if target in existing:
+                continue
+            if existing:
+                conflicts.append(pk)
+                continue
+            if self.get_feature(draft.feature_id) is None:
+                unresolved.append(pk)
+                continue
+            self.put_edge(pk, "REFERENCES", target,
+                          {"type": str(draft.type), "text": draft.text})
+            added.append(pk)
+        return BackfillReport(_sorted_step_pks(added), _sorted_step_pks(conflicts),
+                              _sorted_step_pks(unresolved))
+
+    def rebuild_rule_projection(self, rule_id: str) -> list[str]:
+        """以 `VERSION.rules_applied` 為唯一權威重建 `applied_to` 與 `APPLIED_TO` 邊（D17）。
+
+        `applied_to` 與 `APPLIED_TO` 邊都是投影，不是三個獨立權威，所以這裡是真正的
+        **重建**（補缺邊、刪多餘邊、改寫欄位），與只補不刪的 `backfill_references` 相反。
+        多餘的邊會讓設計 §12.1 的「規則套用次數 = 去重且核對過的 `applied_to` 長度」多計，
+        直接影響 Phase 54 的指標；Phase 23 修正後的 `verify_version_complete` 也會把
+        多出來的 `APPLIED_TO` 邊當成問題，所以刪邊與改寫欄位必須一起做。
+
+        `scan_entity("VERSION")` 的掃描範圍同時涵蓋 VERSION 本體與它的 `SUPERSEDES` 邊
+        （`entity` 等於 PK 前綴，00A §3.6）；預設的 `meta_only=True` 已經濾過一次，這裡
+        仍然明確再濾一次 `SK != META` 才交給 `item_to_model`（D29）——直接
+        `TutorialVersion.model_validate(item)` 會被 strict 模型拒絕。Scan 讀完分頁由
+        `_paged` 保證，空的一頁不等於沒有下一頁。
+
+        **先確認規則存在再動任何一筆邊**：規則不存在時（只剩孤兒邊）立刻
+        `PermanentError`，不留下「邊改了一半、欄位沒改」的中間狀態。
+
+        `applied_to` 的改寫走 Phase 06 的 compare-and-swap，`expected_revision` 由
+        `revision_of` 取得（D27；領域模型不帶 `_revision`）。revision 不符代表這兩個呼叫
+        之間有人改了這條規則：`update_meta` 丟的 `CoordinationError` **不攔截、不重試、
+        不靜默覆蓋**，由維護批次記錄後下一輪重跑。本方法也**不寫 `RULE.status`**——
+        只有 Analytics 能寫驗證後狀態（設計 §7.6、§12.2），而且**完全不寫 `VERSION` item**。
+        """
+        versions = [item_to_model(item, TutorialVersion)
+                    for item in self.scan_entity("VERSION") if str(item["SK"]) == META]
+        expected = sorted({version.version_id for version in versions
+                           if rule_id in version.rules_applied}, key=version_sort_key)
+        pk = rule_pk(rule_id)
+        rule = self.get_meta(pk, AuthoringRule)
+        if rule is None:
+            raise PermanentError(f"找不到規則 {rule_id}")
+        wanted = {version_pk(version_id) for version_id in expected}
+        current = {str(edge["target"]) for edge in self.list_edges(pk, "APPLIED_TO")}
+        for target in sorted(wanted - current):
+            self.put_edge(pk, "APPLIED_TO", target)
+        for target in sorted(current - wanted):
+            self.delete_edge(pk, "APPLIED_TO", target)
+        if rule.applied_to != expected:
+            applied: list[DynamoValue] = list(expected)
+            self.update_meta(pk, {"applied_to": applied},
+                             expected_revision=self.revision_of(pk))
+        return expected
