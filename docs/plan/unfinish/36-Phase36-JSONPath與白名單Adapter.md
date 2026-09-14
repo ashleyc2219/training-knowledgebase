@@ -116,6 +116,26 @@ def execute_recorded_steps(event: RawEvent, steps: Sequence[ProcStep],
 - **F14 多個子 Release：** 兩個 release parser（`parse_pr_diff`、`parse_changelog`）一律回 `{"kind": "release", "changes": [...]}`，`changes` 是**清單**，一個功能變更一筆（各自有 `feature`／`kind`／`old_name`／`new_name`），只改到一個功能時長度就是 1。`normalize_release` 收 `{"parsed": ..., "index": k}`，`k` 從 **1** 起算，取 `parsed["changes"][k-1]` 產出第 k 筆子 Release：`id` 用 `github_release_id(owner, repo, pr_number, k)`、`source_event_id` 用 `github_source_event_id(owner, repo, pr_number)`（同一個 PR 的每一筆都一樣）。`index` 省略時當成 1，`k` 超出 `changes` 長度丟 `PermanentError`。對每一筆 change 重跑一次 `normalize_release → validate` 是 [Phase 37](./37-Phase37-Rote-Agent回退與成功提交.md) 的事，本 Phase 只提供單筆的工具。
 - **`index` 是唯一允許的非 JSONPath 參數。** `ProcStep.args` 的值原則上都是 JSONPath 字串；例外只有一個：`normalize_release` 的 `index` 可以是十進位字面值（例如 `"1"`），因為它是「這條序列的第幾筆」這個位置，不是事件真值（不含 ID、文字、使用者或時間）。`is_index_literal(tool, name, value)` 是這條例外的唯一判斷處：`tool == "normalize_release"`、`name == SUB_RELEASE_INDEX` 且 `value` 符合 `[1-9][0-9]*` 三個條件同時成立才算數，其餘任何不以 `$event`／`$steps` 開頭的參數值一律 `PermanentError`。
 
+### 實作時補齊的四個細節（原稿未指定，已落地）
+
+1. **parser 多帶一個 `encoding`**（`"github"`／`"file"`）：對應 O6 核定紀錄的 `id_encoder` 欄
+   （`github_ticket_id`／`github_release_id` vs 「檔案提供」）。normalizer 靠它決定「ID 與穩定 user
+   由 Phase 13 的編碼函式算」還是「檔案自己帶」，parser 本身仍**不產生 ID 或 user**。
+2. **`validate` 用 `source` 分派，不是用 `kind`**：canonical `Release` 的 `kind` 已經是
+   `renamed`／`changed`／`removed`（Phase 31 的必填欄位），不能同時兼任「ticket 還是 release」的
+   判別欄位。`TicketSource`（`github_issue`／`discord`／`email`）與 `ReleaseSource`
+   （`github_pr`／`changelog`）的值互斥，所以 `validate` 讀 `candidate["source"]` 即可分派；
+   兩者都不是就丟 `PermanentError`。**`kind` 仍然是 parser 輸出的判別欄位**（§5 的
+   `PARSER_KIND` 契約不變），normalizer 的 `_require_kind` 照原稿在 `validate` 之前擋下錯配。
+3. **`changes` 依 `feature` 升序**：Phase 13 的 `sub_release_ids` 是「依 Feature 名稱升序配 `k`」，
+   若 `parse_pr_diff` 照 body 條列順序回傳，同一個 PR 換個條列順序就會得到不同的 `r_` ID。
+   parser 排序後 `changes[k-1]` 與 `github_release_id(..., k)` 就與 Phase 13 完全對齊
+   （PR fixture：`k=1` 是 `Legacy Export`、`k=2` 是 `Prepare`）。
+4. **`validate` 內對 `ingress` 用函式內 import**：`adapters.py` 需要 Phase 31 的
+   `validate_ticket`／`validate_release`，但 Phase 37 很可能讓 `ingress._normalize` 反向 import
+   `rote`，那會形成 `ingress → rote → adapters → ingress` 的循環。延後到呼叫時才載入，
+   讓 `rote.py → adapters.py` 的單向相依（00A §6.8）在兩個方向都成立。
+
 ## 6. 安全 JSONPath 文法
 
 ```text
@@ -130,7 +150,7 @@ $steps [<非負整數>] [.<field>] ...                 前面每一步的輸出�
 
 ### Task 1：建立安全 JSONPath resolver
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -158,9 +178,9 @@ def test_rejects_unsafe_or_missing_paths(path: str) -> None:
         resolve_jsonpath(ROOT, path)
 ```
 
-- [ ] **Step 2：執行並確認紅燈** — 跑 `uv run pytest tests/unit/rote/test_jsonpath.py -q`，預期 FAIL，訊號包含 `cannot import name 'resolve_jsonpath' from 'training_kb.adapters'`。
+- [x] **Step 2：執行並確認紅燈** — 跑 `uv run pytest tests/unit/rote/test_jsonpath.py -q`，預期 FAIL。實際訊號是 `ModuleNotFoundError: No module named 'training_kb.adapters'`：`adapters.py` 在 Task 1 才建立，整支模組都還不存在，所以 Python 報的是「找不到模組」而不是「找不到名字」。模組建立之後才會出現原稿寫的 `cannot import name 'resolve_jsonpath'`（Task 2 的紅燈就是這種形狀）。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 import re
@@ -201,13 +221,13 @@ def resolve_jsonpath(root: JSONValue, path: str) -> JSONValue:
     return value
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈** — 跑 `uv run pytest tests/unit/rote/test_jsonpath.py -q`，預期 PASS；十二個非法 path 全部是 `PermanentError`，沒有任何一個靜默回 `None`。
+- [x] **Step 4：跑完整檔案確認綠燈** — 跑 `uv run pytest tests/unit/rote/test_jsonpath.py -q`，預期 PASS；十二個非法 path 全部是 `PermanentError`，沒有任何一個靜默回 `None`。
 
-- [ ] **Step 5：提交** — `git add src/training_kb/adapters.py tests/unit/rote/test_jsonpath.py && git commit -m "feat(rote): 限制可重放 JSONPath"`
+- [x] **Step 5：提交** — `git add src/training_kb/adapters.py tests/unit/rote/test_jsonpath.py && git commit -m "feat(rote): 限制可重放 JSONPath"`
 
 ### Task 2：鎖定工具白名單與記錄格式
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -285,9 +305,9 @@ def test_only_the_sub_release_index_may_be_a_literal() -> None:
                                  ProcStep(tool="validate", args={"c": "$steps[0]"})])
 ```
 
-- [ ] **Step 2：執行並確認紅燈** — 跑 `uv run pytest tests/unit/rote/test_tool_registry.py -q`，預期 FAIL，訊號包含 `cannot import name 'validate_recorded_steps' from 'training_kb.rote'`。
+- [x] **Step 2：執行並確認紅燈** — 跑 `uv run pytest tests/unit/rote/test_tool_registry.py -q`，預期 FAIL。實際訊號是 `cannot import name 'TOOL_NAMES' from 'training_kb.adapters'`：Python 只報 import 清單裡**第一個**解析失敗的名字，而 `from training_kb.adapters import TOOL_NAMES, ToolRegistry` 在 `from training_kb.rote import ... validate_recorded_steps` 上面一行。兩者都是「名字還沒實作」的同一個紅燈。
 
-- [ ] **Step 3：建立最小實作**（加在 `src/training_kb/rote.py`）
+- [x] **Step 3：建立最小實作**（加在 `src/training_kb/rote.py`）
 
 ```python
 from collections.abc import Sequence
@@ -332,35 +352,59 @@ def execute_recorded_steps(event: RawEvent, steps: Sequence[ProcStep],
 
 `ToolRegistry` 在 `adapters.py` 用 `__post_init__` 檢查 `set(self.tools) - TOOL_NAMES` 是否為空，`run()` 對未註冊名稱丟 `PermanentError`；兩處訊息都含「白名單」三個字，測試才抓得到。`is_index_literal` 也放 `adapters.py`（`tool == "normalize_release" and name == SUB_RELEASE_INDEX and re.fullmatch(r"[1-9][0-9]*", value) is not None`），讓「唯一的字面值例外」只有一份判斷，`rote.py` 兩個函式都 import 它。
 
-- [ ] **Step 4：跑完整檔案確認綠燈** — 跑 `uv run pytest tests/unit/rote/test_tool_registry.py -q`，預期 PASS；白名單、真值排除、最後一步 validate 與「執行時才解析值」四組斷言全綠。
+- [x] **Step 4：跑完整檔案確認綠燈** — 跑 `uv run pytest tests/unit/rote/test_tool_registry.py -q`，預期 PASS；白名單、真值排除、最後一步 validate 與「執行時才解析值」四組斷言全綠。
 
-- [ ] **Step 5：提交** — `git add src/training_kb/adapters.py src/training_kb/rote.py tests/unit/rote/test_tool_registry.py && git commit -m "feat(rote): 建立接入工具白名單"`
+- [x] **Step 5：提交** — `git add src/training_kb/adapters.py src/training_kb/rote.py tests/unit/rote/test_tool_registry.py && git commit -m "feat(rote): 建立接入工具白名單"`
 
 ### Task 3：以 O6 核定紀錄驗證每個 adapter
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
+"""Phase 36 Task 3：用 Phase 13 的核定紀錄與 fixture 驗證每一個 adapter。
+
+三件事：每個**已核定**來源都能從原始事件走到 canonical 物件（ING Rule 12／13）、
+已記錄的 `ProcStep` 裡搜不到任何事件真值，以及 F14 的子 Release 由 `index` 挑出。
+未核定的來源維持 gate failure：那幾列以 `xfail(strict=True)` 收尾，**不得**補臨時 mapping
+讓它變綠——真的補了就會 XPASS，strict 會把它變成紅燈（設計 §18 O6、決策 F02）。
+
+本檔不連 AWS、不呼叫模型、不連 GitHub，所以不標 `aws` marker（00A §3.2）。
+"""
+
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from training_kb.adapters import PARSER_KIND, default_registry
+from training_kb.adapters import FINAL_TOOL, PARSER_KIND, default_registry
 from training_kb.errors import PermanentError
 from training_kb.models import ProcStep
+from training_kb.pipelines.common import JSONValue
 from training_kb.rote import RawEvent, execute_recorded_steps
-from training_kb.source_ids import load_source_approvals
+from training_kb.source_ids import SourceApproval, load_source_approvals
 
-FIXTURES = Path("tests/fixtures")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FIXTURES = REPO_ROOT / "tests" / "fixtures"
 NORMALIZER = {"ticket": "normalize_ticket", "release": "normalize_release"}
 PARSER_OF_ADAPTER = {"github_issue": "parse_github_issue", "github_pr": "parse_pr_diff",
                      "discord_manual": "parse_discord_message",
                      "email_manual": "parse_support_email", "changelog_manual": "parse_changelog"}
 APPROVALS = load_source_approvals(FIXTURES / "o6" / "approved-sources.json")
+APPROVAL_PARAMS = [
+    pytest.param(row, id=f"{row.domain}:{row.event_type}",
+                 marks=() if row.approved else pytest.mark.xfail(
+                     strict=True, reason=f"O6 尚未核定 {row.domain}/{row.event_type}"))
+    for row in APPROVALS
+]
+PR_APPROVED = any(
+    row.approved and (row.domain, row.event_type) == ("github.com", "pull_request")
+    for row in APPROVALS
+)
 
 
-def leaf_strings(value):   # 走訪 fixture 所有葉節點字串，證明 PROC 不含事件真值
+def leaf_strings(value: JSONValue) -> Iterator[str]:
+    """走訪 fixture 所有葉節點字串，證明 PROC 不含事件真值。"""
     if isinstance(value, dict):
         value = list(value.values())
     if isinstance(value, list):
@@ -381,11 +425,13 @@ def event_of(domain: str, adapter: str, event_type: str, fixture: str) -> RawEve
                     payload=json.loads((FIXTURES / fixture).read_text("utf-8")))
 
 
-@pytest.mark.parametrize("row", APPROVALS, ids=lambda row: f"{row.domain}:{row.event_type}")
-def test_each_source_reaches_canonical_without_storing_values(row) -> None:
-    assert row.approved_by, f"O6 未核定 {row.domain}/{row.event_type}：保持 blocked，不得補臨時 mapping"
+@pytest.mark.parametrize("row", APPROVAL_PARAMS)
+def test_each_source_reaches_canonical_without_storing_values(row: SourceApproval) -> None:
+    assert row.approved_by, (
+        f"O6 未核定 {row.domain}/{row.event_type}：保持 blocked，不得補臨時 mapping")
     parser = PARSER_OF_ADAPTER[row.adapter]
     steps = steps_for(parser)
+    assert steps[-1].tool == FINAL_TOOL          # ING Rule 13：最後一個工具恰為 validate
     event = event_of(row.domain, row.adapter, row.event_type, row.fixture)
     canonical = execute_recorded_steps(event, steps, default_registry())
     assert canonical["id"].startswith("t_" if PARSER_KIND[parser] == "ticket" else "r_")
@@ -394,6 +440,7 @@ def test_each_source_reaches_canonical_without_storing_values(row) -> None:
 
 
 def test_wrong_parser_normalizer_pair_fails_before_validate() -> None:
+    """配對錯誤是**拒絕**斷言，與 O6 是否核定無關，所以不掛 gate 標記。"""
     event = event_of("github.com", "github_pr", "pull_request", "github/pull-request-merged.json")
     steps = steps_for("parse_pr_diff")
     steps[1] = ProcStep(tool="normalize_ticket", args={"parsed": "$steps[0]"})
@@ -401,6 +448,7 @@ def test_wrong_parser_normalizer_pair_fails_before_validate() -> None:
         execute_recorded_steps(event, steps, default_registry())
 
 
+@pytest.mark.xfail(not PR_APPROVED, strict=True, reason="O6 尚未核定 github.com/pull_request")
 def test_release_parser_returns_changes_and_index_picks_one() -> None:
     row = {(r.domain, r.event_type): r for r in APPROVALS}[("github.com", "pull_request")]
     assert row.approved_by, "O6 未核定 github.com/pull_request：保持 blocked，不得補臨時 mapping"
@@ -417,9 +465,25 @@ def test_release_parser_returns_changes_and_index_picks_one() -> None:
         registry.run("normalize_release", {"parsed": parsed, "index": len(subs) + 1})
 ```
 
-- [ ] **Step 2：執行並確認紅燈** — 跑 `uv run pytest tests/integration/test_adapter_fixtures.py -q`，預期 FAIL；`default_registry` 尚未建立，且未核定來源以斷言失敗印出 blocked 訊息，不是 skip。
+與原稿的三處差異（實際落地版本如上）：
 
-- [ ] **Step 3：建立最小實作**
+1. **`FIXTURES` 改用 `REPO_ROOT`**：原稿的 `Path("tests/fixtures")` 是相對路徑，CWD 不是 repo
+   根目錄時會讀不到 fixture。改成 `Path(__file__).resolve().parents[2]`，與 repo 既有的
+   `test_o6_github_mapping.py`／`test_proc_concurrency.py` 同一個寫法。
+2. **未核定來源用 `xfail(strict=True)` 收尾**：gate 的要求是「以明確 gate failure 結束、不得用臨時
+   mapping 讓它變綠、不是 skip」。`pytest.param(..., marks=pytest.mark.xfail(strict=True, reason=...))`
+   同時滿足三件事——測試報告逐列印出 `XFAIL ... O6 尚未核定 <domain>/<event_type>`（不是 skip）、
+   斷言真的執行並失敗、而且一旦有人補臨時 mapping 讓它通過就會 `XPASS` 被 strict 判成紅燈。
+   這也是 Phase 31 `test_o6_github_mapping.py` 已經在用的同一個前例（`not PR_APPROVED` 那三行）。
+3. **多一行 `assert steps[-1].tool == FINAL_TOOL`**：00B ING Rule 13 指定的可執行斷言就落在本檔，
+   原稿只靠 `execute_recorded_steps` 內部的 `validate_recorded_steps` 間接涵蓋，補一行直接斷言。
+   另外補上型別註記（`leaf_strings(value: JSONValue)`、`row: SourceApproval`）與一處換行，
+   讓 `uv run ruff check tests` 的 100 字元上限通過。
+
+
+- [x] **Step 2：執行並確認紅燈** — 跑 `uv run pytest tests/integration/test_adapter_fixtures.py -q`，預期 FAIL；`default_registry` 尚未建立，且未核定來源以斷言失敗印出 blocked 訊息，不是 skip。
+
+- [x] **Step 3：建立最小實作**
 
 ```python
 def parse_github_issue(arguments: Mapping[str, JSONValue]) -> JSONValue:
@@ -442,7 +506,7 @@ def default_registry() -> ToolRegistry:
 
 兩個 release parser 多一步：先把 diff 或 changelog 拆成 `changes` 清單（一個功能變更一筆），`normalize_release` 再用 `index`（省略時為 1）挑出第 k 筆、用 `github_release_id(owner, repo, pr_number, k)` 算 `id`，`source_event_id` 對同一個 PR 永遠相同；`k` 超出清單長度丟 `PermanentError`，**不**回一個猜出來的空 Release。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote tests/integration/test_adapter_fixtures.py -q
@@ -451,7 +515,9 @@ uv run ruff check src/training_kb/adapters.py src/training_kb/rote.py tests/unit
 
 預期：已核定來源 PASS；未核定來源停在明確 gate failure，不能用臨時值讓它變綠。
 
-- [ ] **Step 5：提交** — `git add src/training_kb/adapters.py tests/integration/test_adapter_fixtures.py && git commit -m "test(rote): 驗證核定來源 adapter"`
+實際結果：`2 passed, 5 xfailed`——PASS 的是 `github.com:issues`（唯一核定列）與「配對錯誤要被擋下」那條；5 個 XFAIL 是四列未核定來源加上 `github.com/pull_request` 的 F14 測試，每一列都印出 `O6 尚未核定 <domain>/<event_type>`。五個 adapter 的程式碼本身都已實作完成（手動驗證過 PR fixture 會產出 `r_gh-acme-copilot-pr42-1`／`-2`、共用 `gh-acme-copilot-pr42`），**擋住它們的只有 O6 gate，不是實作缺口**；核定紀錄補上 `approved_by`／`approved_at` 之後，strict xfail 會變成 XPASS 紅燈，提醒把標記拿掉。
+
+- [x] **Step 5：提交** — `git add src/training_kb/adapters.py tests/integration/test_adapter_fixtures.py && git commit -m "test(rote): 驗證核定來源 adapter"`
 
 ## 8. 驗收矩陣
 
@@ -487,11 +553,11 @@ uv run ruff check src/training_kb/adapters.py src/training_kb/rote.py tests/unit
 
 ## 11. 完成清單
 
-- [ ] resolver 只接受兩個根節點、欄位與非負 index，根節點後至少一個 token；wildcard、filter、slice、recursive、引號 key、函式與負 index 全被拒絕，缺欄位不回 `None`。
-- [ ] registry 恰含核定的八個接入工具名稱、不接受執行期動態註冊；PROC 只保存 tool 名稱與 JSONPath，fixture 長字串值在序列化結果中零筆。
-- [ ] 最後一步必須是 validate，中途出現 validate 會被拒絕。
-- [ ] release parser 回 `{"changes": [...]}`、`normalize_release` 以 `index`（從 1）取第 k 筆子 Release，子 Release 共用 `source_event_id`。
-- [ ] `index` 是唯一允許的字面值參數（只在 `normalize_release`、只接受 `[1-9][0-9]*`），其他參數一律 JSONPath。
-- [ ] parser 與 normalizer 的 `kind` 配對在 validate 之前就擋下。
-- [ ] `validate` 工具只呼叫 Phase 31 的 `validate_ticket`／`validate_release`，`project_id` 取 Phase 02 的 `DEFAULT_PROJECT_ID`，缺欄位由 `IngressError` 指出，本 Phase 不自寫欄位檢查。
-- [ ] `JSONValue` 從 Phase 29 import（沒有第二份定義），未核定來源維持 gate failure，且沒有把計畫或 fixture 測試描述成 AWS 已部署。
+- [x] resolver 只接受兩個根節點、欄位與非負 index，根節點後至少一個 token；wildcard、filter、slice、recursive、引號 key、函式與負 index 全被拒絕，缺欄位不回 `None`。
+- [x] registry 恰含核定的八個接入工具名稱、不接受執行期動態註冊；PROC 只保存 tool 名稱與 JSONPath，fixture 長字串值在序列化結果中零筆。
+- [x] 最後一步必須是 validate，中途出現 validate 會被拒絕。
+- [x] release parser 回 `{"changes": [...]}`、`normalize_release` 以 `index`（從 1）取第 k 筆子 Release，子 Release 共用 `source_event_id`。
+- [x] `index` 是唯一允許的字面值參數（只在 `normalize_release`、只接受 `[1-9][0-9]*`），其他參數一律 JSONPath。
+- [x] parser 與 normalizer 的 `kind` 配對在 validate 之前就擋下。
+- [x] `validate` 工具只呼叫 Phase 31 的 `validate_ticket`／`validate_release`，`project_id` 取 Phase 02 的 `DEFAULT_PROJECT_ID`，缺欄位由 `IngressError` 指出，本 Phase 不自寫欄位檢查。
+- [x] `JSONValue` 從 Phase 29 import（沒有第二份定義），未核定來源維持 gate failure，且沒有把計畫或 fixture 測試描述成 AWS 已部署。
