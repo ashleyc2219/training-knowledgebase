@@ -49,9 +49,9 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from training_kb.errors import ContentError, CoordinationError, ObjectAlreadyExists
-from training_kb.models import StepDraft, StepType, TutorialContent
+from training_kb.models import Feature, StepDraft, StepType, TutorialContent, TutorialVersion
 from training_kb.operations import OperationCoordinator
-from training_kb.repository import Repository
+from training_kb.repository import Repository, item_to_model
 
 # --- 1. 版本 ID 編碼 ---------------------------------------------------------
 
@@ -505,3 +505,110 @@ def put_private_artifact(repository: Repository, key: str, text: str,
     except ObjectAlreadyExists:
         if repository.get_object(key) != body:
             raise ContentError(f"S3 已有同一個 key 但內容不同，不覆寫：{key}") from None
+
+
+# --- 8. 未發布版本與關係完整寫入 --------------------------------------------
+
+MARKDOWN_CONTENT_TYPE = "text/markdown; charset=utf-8"
+"""`tutorials/<slug>/v<n>.md` 的 content type；Phase 22 只建議、沒有定名，這裡定成常數。"""
+
+DIFF_CONTENT_TYPE = "text/plain; charset=utf-8"
+"""`tutorials/<slug>/v<n>.diff` 的 content type；v1 的空 diff 也用同一個值。"""
+
+
+def _previous_markdown(plan: VersionPlan, repository: Repository) -> tuple[str | None, str]:
+    """前一版的全文與它的 key；沒有前一版時回 `(None, "")`，`make_diff` 會回空字串。
+
+    前一版存在卻讀不回全文是**內容問題**（00A §4.1 把「版本全文讀不回來」歸在
+    `ContentError`），不是暫時故障：重試同樣讀不到，交給 ASL Retry 只會白跑三次。
+    """
+    if plan.supersedes is None:
+        return None, ""
+    previous = repository.get_version(plan.supersedes)
+    if previous is None:
+        raise ContentError(f"找不到前一版 {plan.supersedes}，無法產生 diff")
+    body = repository.get_object(previous.s3_key)
+    if body is None:
+        raise ContentError(f"前一版 {plan.supersedes} 缺少 S3 全文 {previous.s3_key}")
+    return body.decode("utf-8"), previous.s3_key
+
+
+def _verified(version_id: str, repository: Repository) -> TutorialVersion:
+    """自我核對後回傳 VERSION item；有缺漏就丟 `ContentError`，**不刪任何已寫入的產物**。
+
+    「寫入沒丟例外」不等於完整（設計 §8.2）：邊是逐筆寫的，中間當機時前幾筆已經落地。
+    失敗時保留私有 S3 產物，重送才沿用得到同版號與同產物（F36）。
+    """
+    problems = _missing_parts(version_id, repository)
+    if problems:
+        raise ContentError("版本核對失敗：" + "；".join(problems))
+    version = repository.get_version(version_id)
+    assert version is not None  # _missing_parts 已確認它存在
+    return version
+
+
+def create_version(plan: VersionPlan, content: TutorialContent,
+                   repository: Repository) -> TutorialVersion:
+    """寫出一個 `published_at=None` 的完整版本，順序固定，最後自己核對一次。
+
+    ```text
+    已發布就拒絕 -> validate_content -> S3 .md -> S3 .diff -> VERSION META
+                 -> STEP／SUPERSEDES／APPLIED_TO 邊 -> verify
+    ```
+
+    **`published_at` 一律不寫、`Tutorial.current_version` 一律不碰**（D25、F37）：建立與發布
+    是兩件事，只有 Phase 24 的 publish 成功才會填值與切換。
+
+    **重送要冪等。** 先讀 `get_version`：已發布就丟 `ContentError`（不可覆寫）；已存在但
+    未發布代表上一次寫到一半，跳過 `put_meta`（Phase 06 的 `create_only=True` 會拒絕重複
+    建立）只補寫產物與邊。S3 那一段的冪等由 `put_private_artifact` 的條件寫入保證；邊的
+    內容完全由 `plan` 與 `content` 決定，所以重寫同一筆邊是安全的，不需要條件寫入。
+
+    既有 Feature 由 `scan_entity("FEATURE")` 取得，每一筆都經 `item_to_model`（00A §3.6）：
+    strict 模型不接受 `PK`／`SK`／`entity`／`_revision`，直接 `Feature.model_validate(item)`
+    會整筆 `ValidationError`。
+    """
+    existing = repository.get_version(plan.version_id)
+    if existing is not None and existing.published_at is not None:
+        raise ContentError(f"版本 {plan.version_id} 已發布，不可覆寫")
+    known = frozenset(item_to_model(item, Feature).feature_id
+                      for item in repository.scan_entity("FEATURE"))
+    validate_content(content, known)
+    md_key = markdown_key(plan.slug, plan.number)
+    current_md = render_markdown(content)
+    previous_md, previous_name = _previous_markdown(plan, repository)
+    put_private_artifact(repository, md_key, current_md, MARKDOWN_CONTENT_TYPE)
+    put_private_artifact(
+        repository, diff_key(plan.slug, plan.number),
+        make_diff(previous_md, current_md, previous_name=previous_name, current_name=md_key),
+        DIFF_CONTENT_TYPE,
+    )
+    if existing is None:
+        repository.put_meta(TutorialVersion(
+            version_id=plan.version_id, slug=plan.slug, supersedes=plan.supersedes,
+            reason=plan.reason, rules_applied=list(plan.rules_applied),
+            s3_key=md_key, published_at=None))
+    _write_edges(plan, content, repository)
+    return _verified(plan.version_id, repository)
+
+
+def _write_edges(plan: VersionPlan, content: TutorialContent, repository: Repository) -> None:
+    """三種關係邊；Task 2 才真的寫出來。"""
+
+
+def _missing_parts(version_id: str, repository: Repository) -> list[str]:
+    """回缺漏明細（空 list 代表完整）；module-private，不是跨模組 public API。"""
+    version = repository.get_version(version_id)
+    if version is None:
+        return [f"找不到 VERSION item {version_id}"]
+    slug, number = parse_version_id(version_id)
+    md_key, df_key = markdown_key(slug, number), diff_key(slug, number)
+    problems = [f"找不到 TUTORIAL item {slug}"] if repository.get_tutorial(slug) is None else []
+    if version.s3_key != md_key:
+        problems.append(f"s3_key 應為 {md_key}，實際 {version.s3_key}")
+    body = repository.get_object(md_key)
+    if body is None:
+        return problems + [f"缺少 S3 全文 {md_key}"]
+    if not repository.object_exists(df_key):
+        problems.append(f"缺少 S3 差異檔 {df_key}")
+    return problems
