@@ -7,6 +7,7 @@ SDK 也關掉自動重試，讓「只有一層管理重試」成立。
 """
 
 import json
+import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
@@ -25,6 +26,9 @@ TRACE_OUTCOMES = frozenset({"success", "transient_error", "permanent_error"})
 # 設計 §14.3 的判斷類起點：只設 maxTokens 與低 temperature，不同時調 topP。
 # 教學寫作的 2048 與依節點選 profile 由 Phase 18 的 inference_config(schema) 取代。
 JUDGEMENT_INFERENCE_CONFIG: dict[str, object] = {"maxTokens": 512, "temperature": 0.1}
+
+# 「向量幾維」這個數字的唯一一份（00A §5.4）：送出的 body 與收回的回應都拿它比。
+TITAN_DIMENSIONS = 1024
 
 TIMEOUT_ERRORS = (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError)
 TRANSIENT_ERROR_CODES = frozenset({
@@ -87,6 +91,23 @@ def _error_code(error: BaseException) -> str:
     return str(body.get("Code", "")) if isinstance(body, Mapping) else ""
 
 
+def _validated_embedding(value: object) -> list[float]:
+    """Titan 回應的唯一出口檢查：長度必須是 1024，每個元素必須是有限的 int／float。
+
+    `bool` 要先擋：`True` 是 `int` 的子型別，`isinstance(True, (int, float))` 與
+    `math.isfinite(True)` 都成立。`NaN` 更要擋——它不會讓程式爆炸，只會讓 Phase 38 的
+    `>= 0.85` 永遠 `False`，安靜地多開一個 cluster。
+    """
+    if not isinstance(value, list) or len(value) != TITAN_DIMENSIONS:
+        raise PermanentError(f"Titan embedding must contain {TITAN_DIMENSIONS} values")
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise PermanentError(f"Titan embedding contains a non-numeric value: {item!r}")
+        if not math.isfinite(item):
+            raise PermanentError(f"Titan embedding contains a non-finite value: {item!r}")
+    return [float(item) for item in value]
+
+
 class BedrockWriter:
     """`Writer` 的正式實作：只封裝 Bedrock 請求與解析，不碰 DynamoDB、S3 或發布。"""
 
@@ -119,6 +140,23 @@ class BedrockWriter:
             raise raise_as(code or type(exc).__name__) from exc
         self.trace.add({**row, "outcome": "success"})
         return response
+
+    def embed(self, text: str, *, operation_id: str, node: str) -> list[float]:
+        """Titan V2 走 `invoke_model`：body 只有三個業務鍵，沒有任何生成參數（設計 §14.3）。
+
+        空白文字在送出之前就擋掉，所以不產生 attempt：Titan 也會回 `ValidationException`，
+        但先擋可以少一次計費請求，錯誤訊息也指向真正的欄位。
+        """
+        if not text.strip():
+            raise PermanentError("embedding input must not be blank")
+        body = json.dumps({"inputText": text, "dimensions": TITAN_DIMENSIONS,
+                           "normalize": True})
+        response = self._request_once(
+            lambda: self.client.invoke_model(modelId=self._embed_id, body=body),
+            model=self._embed_id, operation_id=operation_id, node=node, kind="embedding")
+        # invoke_model 的 body 是 StreamingBody，不是 dict，而且只能讀一次。
+        payload = json.loads(response["body"].read())
+        return _validated_embedding(payload.get("embedding"))
 
     def _converse(self, *, model: str, system: str, messages: Sequence[Mapping[str, Any]],
                   extra: Mapping[str, Any], operation_id: str, node: str, kind: str) -> Any:
