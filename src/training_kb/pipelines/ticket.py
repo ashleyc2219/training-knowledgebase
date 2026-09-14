@@ -10,17 +10,23 @@
 Phase 41（Task 包裝與 handler）會繼續在同一支檔案上追加。
 """
 
+import json
 from collections.abc import Iterable
 from datetime import date, timedelta
+from typing import Any
 
 from training_kb.clock import utc_date
 from training_kb.config import Thresholds
-from training_kb.errors import PermanentError
-from training_kb.keys import ticket_pk
-from training_kb.models import Ticket
-from training_kb.repository import Repository
+from training_kb.errors import ContentError, PermanentError
+from training_kb.keys import META, operation_ref, ticket_pk
+from training_kb.models import Feature, Ticket
+from training_kb.operations import OperationCoordinator
+from training_kb.repository import DynamoItem, Repository, item_to_model
 from training_kb.vectors import centroid, cosine
 from training_kb.writing.client import Writer
+from training_kb.writing.prompts import prompt_name_gap
+from training_kb.writing.schemas import GapNaming
+from training_kb.writing.validators import BusinessValidator, gap_naming_validator
 
 CLUSTER_COSINE_THRESHOLD = Thresholds().cosine_match
 """同群判定線，`Thresholds.cosine_match` 的別名；要調門檻只改 P02 那個欄位的預設值。"""
@@ -165,3 +171,95 @@ def is_recurring(ticket: Ticket, *, repository: Repository) -> bool:
     }
     seen.add(ticket.id)
     return len(seen) >= RECURRING_MIN_TICKETS
+
+
+# --- 4. Knowledge Gap 命名（Task：name_gap） ---------------------------------
+
+
+def _meta_rows(repository: Repository, entity: str) -> list[DynamoItem]:
+    """`scan_entity` 的結果再濾一次 `SK == META` 才轉模型（沿用 Phase 27 的做法）。
+
+    Phase 08 的 `scan_entity` **預設 `meta_only=True`**，已經先濾過一次；這裡是第二道
+    保險：`entity` 等於**起點** PK 的前綴（Phase 07 `put_edge`），所以 Phase 40 之後掛在
+    `TICKET#<id>` 上的 `ASKS_ABOUT#FEATURE#<id>` 邊與 TICKET 本體同前綴。呼叫端哪天改傳
+    `meta_only=False`，邊也不會被丟進 `item_to_model` 而整筆 `ValidationError`。
+    不改 Phase 08 的簽名。
+    """
+    return [row for row in repository.scan_entity(entity) if str(row["SK"]) == META]
+
+
+def known_features(repository: Repository) -> tuple["Feature", ...]:
+    """目前存在的全部 Feature，依 `feature_id` 升序（Phase 08 **沒有** `list_features`）。
+
+    順序固定才讓 prompt 的 `allowed_features` 與重跑結果可重現；Phase 40 重用同一份清單。
+    """
+    features = (item_to_model(row, Feature) for row in _meta_rows(repository, "FEATURE"))
+    return tuple(sorted(features, key=lambda feature: feature.feature_id))
+
+
+def _validated_naming(payload: dict[str, Any], validate: BusinessValidator) -> dict[str, object]:
+    """只做兩件事：`gap` 去頭尾後非空，然後交給 Phase 18 的 `gap_naming_validator`。
+
+    「Feature 存不存在」這條規則全系統只有 Phase 18 那一份（Phase 18 §5、00A §6.5），
+    本函式**只是包裝**，不得改用 `get_feature` 再判一次。`gap` 非空是 schema 的
+    `minLength: 1` 蓋不到的部分——全空白字串在形狀上合法，在業務上是空診斷。
+    """
+    if not str(payload["gap"]).strip():
+        raise ContentError("gap_empty: gap")
+    validate(payload)
+    return payload
+
+
+def name_gap(cluster_id: str, *, repository: Repository, writer: Writer,
+             operation_id: str, operations: OperationCoordinator) -> dict[str, object]:
+    """替一個 recurring 群命名 Knowledge Gap；模型**最多呼叫一次**（設計 §7.3、§14.2）。
+
+    回傳的是 `generate_json` 吐出的 `dict`（`gap` 與 `feature_id`），不是 pydantic 模型：
+    `GapNaming` 是 Phase 17 的 **JSON schema 字典**，呼叫端用 `naming["feature_id"]`
+    取值（00A D-02）。
+
+    固定順序與兩道守衛：
+
+    1. 先 `get_object(ref)`。去重的判準是**物件本身**而不是 operation 紀錄的 ref 清單：
+       先寫物件、再記 ref，中間失敗時紀錄裡沒有 ref 但物件已存在；只看 `operations.load`
+       會再呼叫一次模型，而且 `put_object(if_none_match=True)` 還會撞
+       `ObjectAlreadyExists`。先讀物件同時蓋掉這兩個洞，`record_model_output` 仍照補，
+       讓 Phase 41 與指標看得到這次輸出。
+    2. 再數群成員。任何十四天窗口都不可能從不到五筆的群裡湊出五筆，所以群總數不足
+       `RECURRING_MIN_TICKETS` 一定是呼叫端漏做 `is_recurring`，直接 `PermanentError`
+       擋在模型呼叫**之前**；精確的窗口判斷仍只由 `is_recurring` 負責。
+
+    `name_gap` 只拿得到 `cluster_id`（Phase 41 的 Task 不傳 Ticket 也不傳 `project_id`），
+    所以群成員走 `scan_entity("TICKET")` 再依 `cluster_id` 過濾；MVP 是單一專案（D01），
+    與 `is_recurring` 的 `list_tickets` 路徑結果一致。成員依 `Ticket.id` 升序才讓 prompt
+    不隨掃描順序漂移。
+
+    模型回不存在的 `feature_id` 是設計 §7.6 要程式攔下的違規輸出，丟 `ContentError`，
+    **不自動改成 `null`、不補建 Feature**；回 `null` 則是設計 §14.1 明列的合法業務結果，
+    保留 gap 交 Phase 40 決定。本函式自己不重試、不做第二次呼叫。
+    """
+    ref = operation_ref(operation_id, "gap-naming")
+    features = known_features(repository)
+    validate = gap_naming_validator(
+        known_feature_ids=frozenset(one.feature_id for one in features))
+    saved = repository.get_object(ref)
+    if saved is not None:
+        reused: dict[str, Any] = json.loads(saved)
+        naming = _validated_naming(reused, validate)
+        operations.record_model_output(operation_id, ref)
+        return naming
+    tickets = sorted((item_to_model(row, Ticket) for row in _meta_rows(repository, "TICKET")),
+                     key=lambda ticket: ticket.id)
+    texts = [one.text for one in tickets if one.cluster_id == cluster_id]
+    if len(texts) < RECURRING_MIN_TICKETS:
+        raise PermanentError(f"群 {cluster_id} 未達 recurring 門檻，不呼叫模型")
+    system, user = prompt_name_gap(texts, [one.feature_id for one in features])
+    # node 名固定 "name_gap"：人工驗收靠它在 `CallTrace` 裡數同一個 operation 的 attempt，
+    # 只能有一筆。Phase 38 的 "ticket-embedding" 同樣直接寫在呼叫點，不另立常數。
+    reply = writer.generate_json(system, user, GapNaming,
+                                 operation_id=operation_id, node="name_gap")
+    naming = _validated_naming(reply, validate)
+    body = json.dumps(naming, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    repository.put_object(ref, body, "application/json", if_none_match=True)
+    operations.record_model_output(operation_id, ref)
+    return naming
