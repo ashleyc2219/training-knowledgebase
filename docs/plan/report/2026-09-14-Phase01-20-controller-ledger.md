@@ -83,3 +83,5 @@ W0 P01 | W1 P02 ∥ P03 | W2 P04 ∥ P14 | W3 P05 ∥ P13 ∥ P15 | W4 P06 ∥ P
 - Ruling: #5 resolved by code — rename to public `generate_validated_json` re-exported from `training_kb.writing`, 00A §6.5 wording updated — cost if wrong: downstream phases import a different name (trivial rename).
 - Ruling: fix wave verified by controller (full gates + focused checks) instead of a dispatched scoped re-review — user asked to minimize reviews — cost if wrong: a regression in the five small fixes slips through (all have new tests).
 - Fix wave dispatched (opus, single agent).
+- Fix wave: complete (commits c8f97c2..304d527; 365 passed/23 skipped; ruff/mypy src+infra clean; controller spot-checked aware() microsecond rejection, py.typed, generate_validated_json export; real-table smoke 1 passed with TKB_TABLE_NAME=training_kb; 6 Bedrock live tests FAIL = O5 BLOCKED as expected).
+- Closing: REP §6.0 filled; TODO ticked; project docs committed (8dd9c95); old prototype deletions committed per ruling; ledger copied to docs/plan/report/2026-09-14-Phase01-20-controller-ledger.md; workspace deleted.
