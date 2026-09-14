@@ -68,7 +68,7 @@ Ticket(id="t_gh-acme-app-881", source=TicketSource.GITHUB_ISSUE, author="u_gh-48
 | 動作 | 路徑 | 責任 |
 |---|---|---|
 | 修改 | `src/training_kb/ingress.py` | 兩個 validation 函式與共用的必填欄位檢查；模組由 Phase 30 建立。 |
-| 修改 | `src/training_kb/models.py` | 只補前期已規劃但尚未完成的 model validation，不另創實體、不加模型以外的欄位。 |
+| 未改 | `src/training_kb/models.py` | 原本預留「補前期已規劃但尚未完成的 model validation」；實際檢查後 Phase 04 已經做齊（`Ticket` 的 `bare_id`／`filled`／`aware`／`feature_ids` 最多一個、`Release.renamed_carries_both_names`、`aware()` 拒絕微秒），本 Phase **沒有修改 `models.py`**。 |
 | 測試 | `tests/unit/test_ingress_validation.py` | 必填、列舉、時間與「分析欄位不得預填」的測試。 |
 | 測試 | `tests/integration/test_o6_github_mapping.py` | 用 Phase 13 核定 fixture 做可追溯整合。 |
 | 消費 | `tests/fixtures/github/issue-opened.json`、`pull-request-merged.json`、`tests/fixtures/o6/approved-sources.json` | Phase 13 建立的 O6 fixture 與核定紀錄，本 Phase 只讀不改。 |
@@ -98,7 +98,10 @@ def missing_nonempty_strings(payload: Mapping[str, object],
                              keys: Sequence[str]) -> tuple[str, ...]: ...
 ```
 
-Ticket 必填六欄 `id, source, text, author, ts, project_id`；`cluster_id`／`feature_ids`／`embedding` 是分析欄位，接入時不得預填。Release 必填六欄 `id, source, feature, kind, evidence, ts`；`kind` 為 `renamed` 時另要求 `old_name, new_name`，其他 kind 允許兩個名稱欄位為空。`source_event_id`、`old_name`、`new_name` 在模型裡可為 `None`，所以建構時一律用 `payload.get(...)`，不用 `payload[...]`。關聯欄位保存裸 ID，只有 DynamoDB key 才加前綴（設計 §9.1）。
+模組層另外公開四個常數：`TICKET_REQUIRED`、`RELEASE_REQUIRED`（00A §6.8 逐字）、
+`RENAMED_REQUIRED = ("old_name", "new_name")` 與 `ANALYSIS_FIELDS`。
+
+Ticket 必填六欄 `id, source, text, author, ts, project_id`；`cluster_id`／`feature_ids`／`embedding` 是分析欄位，接入時不得預填。Release 必填六欄 `id, source, feature, kind, evidence, ts`；`kind` 為 `renamed` 時另要求 `old_name, new_name`，其他 kind 允許兩個名稱欄位為空。`source_event_id`、`old_name`、`new_name` 在模型裡可為 `None`，所以建構時一律用 `payload.get(...)`，不用 `payload[...]`；實作把這個取值收斂成 `_optional_string(payload, key)`（沒出現或給 `null` 都是 `None`，給了非字串就是 `IngressError`），因為 mypy strict 不接受把 `object` 直接餵給 `str | None` 欄位。這三個欄位**不檢查 key 有沒有出現**：00A §6.8 的 `RELEASE_REQUIRED` 不含它們，而 `changed`／`removed` 事件本來就沒有名稱欄位、`changelog` 來源也沒有上游事件識別碼。關聯欄位保存裸 ID，只有 DynamoDB key 才加前綴（設計 §9.1）。
 
 驗證順序固定如下，先看欄位在不在，再看值合不合法；每一關都把不合法欄位名收進 `IngressError.fields`：
 
@@ -113,17 +116,21 @@ payload（adapter 候選欄位）
    |
    +--> (4) source / kind 是合法 StrEnum 值？ -- 否 --> IngressError(("source",) 或 ("kind",))
    |
-   +--> (5) parse_iso(ts) 是 aware UTC？ -- 否 --> IngressError(("ts",))
+   +--> (5) parse_iso(ts) 是 aware UTC 整秒？ -- 否 --> IngressError(("ts",))
+   |
+   +--> (6) 模型層仍然拒絕？(例如 id 帶 TICKET# 前綴) -- 是 --> IngressError(loc 上的欄位名)
    |
    v
 canonical Ticket / Release（沒有任何 Repository 寫入）
 ```
 
+第 (5) 關連**微秒**一起擋掉：00A §3.5 要求 datetime 欄位一律 UTC 整秒，靜默截斷會讓以時間入鍵的計算悄悄改變答案。第 (6) 關是本 Phase 的補強——這兩個函式是唯一的 canonical model 邊界，pydantic 的 `ValidationError` 若原樣往外丟，只認得 `IngressError`／`TimeoutError` 的 webhook handler 會回 500 而不是明確拒絕（00A §4.1 把 `IngressError` 的拋出者寫成 `validate_ticket`／`validate_release`）。
+
 本 Phase 的兩個函式是純函式，**不收 `deadline`**：正規化只做欄位檢查，沒有網路或 IO，不必自己看時間。期限由呼叫端管——Phase 32 的 `normalize_then_accept(*, domain, adapter, event_type, headers, payload, deadline)` 在呼叫 `validate_ticket`／`validate_release` 之前先 `assert_time_left(deadline, step="normalize")`（Phase 30 的 helper），拿的是 Phase 30 handler 進入時算好的同一個 `deadline`，**不重新計八秒**、也不在本 Phase 內再呼叫 `monotonic()`。
 
 ## 6. Task 1：鎖定 Ticket canonical 契約
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -155,7 +162,7 @@ def test_ticket_has_no_analysis_output_at_ingress(valid_ticket):
     assert ticket.feature_ids == []
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_ingress_validation.py -q -k ticket
@@ -163,7 +170,7 @@ uv run pytest tests/unit/test_ingress_validation.py -q -k ticket
 
 預期：FAIL，訊號包含 `cannot import name 'validate_ticket'`。不要先建空殼讓測試假綠。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from collections.abc import Mapping, Sequence
@@ -200,16 +207,16 @@ def validate_ticket(payload: Mapping[str, object]) -> Ticket:
     if payload["source"] not in set(TicketSource):
         raise IngressError("Ticket source 不合法", ("source",))
     return Ticket(
-        id=str(payload["id"]), source=TicketSource(payload["source"]),
+        id=str(payload["id"]), source=TicketSource(str(payload["source"])),
         text=str(payload["text"]), author=str(payload["author"]),
         ts=_parsed_ts(payload), project_id=str(payload["project_id"]),
         cluster_id=None, feature_ids=[], embedding=None,
     )
 ```
 
-`set(TicketSource)` 是 Phase 03 StrEnum 的成員集合；`"github_issue" in set(TicketSource)` 成立，因為 StrEnum 成員本身就是字串，不必另外維護一份字面值清單。
+`set(TicketSource)` 是 Phase 03 StrEnum 的成員集合；`"github_issue" in set(TicketSource)` 成立，因為 StrEnum 成員本身就是字串，不必另外維護一份字面值清單。列舉轉型要寫成 `TicketSource(str(payload["source"]))`：`payload` 的值型別是 `object`，mypy strict 不接受直接餵進 `TicketSource(...)`；此處已經通過必填檢查，`str(...)` 只是讓型別收斂，不會改值。
 
-- [ ] **Step 4：補邊界測試並跑完整檔案確認綠燈**
+- [x] **Step 4：補邊界測試並跑完整檔案確認綠燈**
 
 ```python
 @pytest.mark.parametrize(("patch", "expected"), [
@@ -232,7 +239,7 @@ uv run pytest tests/unit/test_ingress_validation.py -q
 
 預期：`-k ticket` 的案例全綠；`author` 為全空白時歸到「缺必填」而不是通過（D23 覆寫 D09 的舊答案）。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/unit/test_ingress_validation.py
@@ -241,7 +248,7 @@ git commit -m "feat(ingress): 正規化Ticket契約"
 
 ## 7. Task 2：鎖定 Release 與 renamed 條件
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from training_kb.ingress import validate_release
@@ -270,7 +277,7 @@ def test_changed_does_not_invent_names(valid_release):
     assert release.new_name is None
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_ingress_validation.py -q -k release
@@ -278,7 +285,7 @@ uv run pytest tests/unit/test_ingress_validation.py -q -k release
 
 預期：FAIL，訊號包含 `cannot import name 'validate_release'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from training_kb.models import Release, ReleaseKind, ReleaseSource
@@ -296,17 +303,18 @@ def validate_release(payload: Mapping[str, object]) -> Release:
     if payload["kind"] not in set(ReleaseKind):
         raise IngressError("Release kind 不合法", ("kind",))
     return Release(
-        id=str(payload["id"]), source_event_id=payload.get("source_event_id"),
-        source=ReleaseSource(payload["source"]), feature=str(payload["feature"]),
-        kind=ReleaseKind(payload["kind"]), old_name=payload.get("old_name"),
-        new_name=payload.get("new_name"), evidence=str(payload["evidence"]),
+        id=str(payload["id"]),
+        source_event_id=_optional_string(payload, "source_event_id"),
+        source=ReleaseSource(str(payload["source"])), feature=str(payload["feature"]),
+        kind=ReleaseKind(str(payload["kind"])), old_name=_optional_string(payload, "old_name"),
+        new_name=_optional_string(payload, "new_name"), evidence=str(payload["evidence"]),
         ts=_parsed_ts(payload),
     )
 ```
 
-`source_event_id`、`old_name`、`new_name` 是「必填但可為 null」的欄位，所以用 `payload.get(...)`：`payload["old_name"]` 在 `changed`／`removed` 事件會直接 `KeyError`，那是程式錯誤，不該變成接入錯誤。`payload.get("kind") == ReleaseKind.RENAMED` 成立是因為 StrEnum 成員等於自己的字串值。`IngressError` 的 constructor 已排序去重，這裡不必再 `sorted(set(...))`。
+`source_event_id`、`old_name`、`new_name` 是「必填但可為 null」的欄位，所以用 `payload.get(...)`（實作包成 `_optional_string`，見 §5）：`payload["old_name"]` 在 `changed`／`removed` 事件會直接 `KeyError`，那是程式錯誤，不該變成接入錯誤。`payload.get("kind") == ReleaseKind.RENAMED` 成立是因為 StrEnum 成員等於自己的字串值。`IngressError` 的 constructor 已排序去重，這裡不必再 `sorted(set(...))`。
 
-- [ ] **Step 4：補多 Feature 子 Release 測試並跑完整檔案確認綠燈**
+- [x] **Step 4：補多 Feature 子 Release 測試並跑完整檔案確認綠燈**
 
 一個 PR 同時改到兩個功能時（設計 F14），adapter 先拆成兩個候選，本函式**逐筆**驗證；`id` 由 `github_release_id(owner, repo, pr_number, k)` 產生、`source_event_id` 由 `github_source_event_id(owner, repo, pr_number)` 產生，兩筆相同。
 
@@ -330,7 +338,7 @@ uv run pytest tests/unit/test_ingress_validation.py -q
 
 預期：required、renamed、enum、時間、子 Release 案例全綠；移除或重排 payload 文字都不改變 `id`，也不得讓模型補 ID。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/unit/test_ingress_validation.py
@@ -339,7 +347,7 @@ git commit -m "feat(ingress): 正規化Release契約"
 
 ## 8. Task 3：用 O6 fixture 做可追溯整合
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import json
@@ -351,9 +359,13 @@ from training_kb.ingress import validate_ticket
 from training_kb.source_ids import (approved_stable_keys, github_ticket_id,
                                     github_user_id, load_source_approvals)
 
-FIXTURES = Path("tests/fixtures/github")
-APPROVED = approved_stable_keys(load_source_approvals("tests/fixtures/o6/approved-sources.json"))
+REPO_ROOT = Path(__file__).resolve().parents[2]   # 相對路徑會隨 pytest 的 cwd 飄掉
+FIXTURES = REPO_ROOT / "tests" / "fixtures" / "github"
+APPROVED = approved_stable_keys(
+    load_source_approvals(REPO_ROOT / "tests" / "fixtures" / "o6" / "approved-sources.json")
+)
 ISSUE_APPROVED = bool(APPROVED.get(("github.com", "issues")))
+PR_APPROVED = bool(APPROVED.get(("github.com", "pull_request")))
 
 @pytest.mark.xfail(not ISSUE_APPROVED, strict=True, reason="O6 尚未核定")
 def test_issue_fixture_maps_to_traceable_ticket():
@@ -371,27 +383,29 @@ def test_issue_fixture_maps_to_traceable_ticket():
     assert ticket.model_dump_json() == validate_ticket(payload).model_dump_json()
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_o6_github_mapping.py -q
 ```
 
-預期：O6 已核定時 FAIL（缺 `validate_ticket` 或 Phase 13 的 ID 函式）；O6 尚未核定時是明確 XFAIL。兩種情況都不可宣稱整合完成。
+預期：O6 已核定時 FAIL（缺 `validate_ticket` 或 Phase 13 的 ID 函式）；O6 尚未核定時是明確 XFAIL。兩種情況都不可宣稱整合完成。**本次實作的實際情況**：Task 1／Task 2 已經先把 `validate_ticket`／`validate_release` 做出來，這個紅燈在 Task 1 Step 2 就消化掉了，所以 Task 3 Step 2 改用 mutation 證明不是假綠——暫時把 `author` 從 `TICKET_REQUIRED` 拿掉，整合測試立刻紅燈，還原後綠燈。
 
-- [ ] **Step 3：補 PR fixture 的子 Release 斷言**
+**xfail 的成立條件**：`xfail(strict=True)` 要求「未核定時測試真的會失敗」，所以每個測試的第一行是 `assert (domain, event_type) in APPROVED`。這個 gate 斷言不通過就是 XFAIL；維護者核定之後它自動通過，剩下的斷言才會真的跑。
 
-同樣從 `tests/fixtures/github/pull-request-merged.json` 讀入，斷言至少包含：上游事件識別 `gh-<owner>-<repo>-pr<n>`、canonical `Release.id`、stable author、兩筆 `source_event_id` 相同、子 Release 依 `k` 升序、`feature` 與 `kind` 在接入當下就已解析（ING Rule 23）。期望值一律由 Phase 13 的函式產生，**不在測試裡手寫另一套期望 ID**。
+- [x] **Step 3：補 PR fixture 的子 Release 斷言**
 
-- [ ] **Step 4：跑完整檔案確認綠燈或明確 XFAIL**
+同樣從 `tests/fixtures/github/pull-request-merged.json` 讀入，斷言至少包含：上游事件識別 `gh-<owner>-<repo>-pr<n>`、canonical `Release.id`、stable user、兩筆 `source_event_id` 相同、子 Release 依 `k` 升序（用 Phase 13 的 `sub_release_ids`）、`feature` 與 `kind` 在接入當下就已解析（ING Rule 23）。期望值一律由 Phase 13 的函式產生，**不在測試裡手寫另一套期望 ID**。`Release` 模型沒有 author 欄位，所以「stable author」這一項斷言的是 `github_user_id(sender.id)` 的編碼可追溯，而不是存進 `Release`。fixture 的兩個子變更放在 `pull_request.body`，本 Phase 在測試裡用一個十行的 `pr_changes` 扮演 adapter 角色；真正的抽取工具是 Phase 36 的 `parse_pr_diff`。
+
+- [x] **Step 4：跑完整檔案確認綠燈或明確 XFAIL**
 
 ```bash
 uv run pytest tests/integration/test_o6_github_mapping.py -q
 ```
 
-預期：同 fixture 執行兩次，`model_dump_json()` 完全相同。若 O6 尚未核定，整個檔案維持 `xfail(strict=True)`，Phase 31 保持 blocked；**不可用自造 fixture 改成綠燈**。
+預期：同 fixture 執行兩次，`model_dump_json()` 完全相同。gate 是**逐 `(domain, event_type)`** 判斷，不是整個檔案一起（00A §4.2 O6：「該 `(domain, event_type)` 為 blocked」）：`("github.com", "issues")` 已核定，兩個 Issue 測試是真綠燈；`("github.com", "pull_request")` 的 `approved_by` 仍是空字串，子 Release 測試維持 `xfail(strict=True)`，該來源保持 blocked；**不可用自造 fixture 或改動 Phase 13 的核定紀錄改成綠燈**。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add tests/integration/test_o6_github_mapping.py
@@ -432,7 +446,7 @@ uv run pytest tests/integration/test_o6_github_mapping.py -q
 - [接入來源事件.feature](../../spec/features/接入來源事件.feature)（00B 縮寫 `ING`）
   - Rule 21：「正規化物件必須具有 schema 的必填欄位」→ **primary**；Task 1／Task 2 的必填參數化測試直接斷言。
   - Rule 22：「Ticket 接入時 id、source、text、author、ts 與 project_id 必填」→ **primary**；Task 1 的六欄參數化測試，加上缺 `author` 的匯入檔拒絕案例。
-  - Rule 23：「Release 接入時即完成功能與種類解析」→ **primary**；Task 3 對 PR fixture 斷言接入當下即產出 `feature` 與 `kind`。
+  - Rule 23：「Release 接入時即完成功能與種類解析」→ **primary**；primary 證據是 Task 2 的**單元**斷言（`validate_release` 回來的 `Release` 當下就有非空 `feature` 與合法 `kind`，缺任一即 `IngressError`），Task 3 對 PR fixture 的斷言只是補強——`("github.com", "pull_request")` 未核定時它是 XFAIL，不能當成這條 Rule 的唯一證據（00B ING Rule 23）。
   - Rule 24：「正規化物件的 id 直接使用已全域唯一的上游識別碼」→ **相關（primary 在 [Phase 13](./13-Phase13-O6來源ID與穩定使用者契約.md)）**；本 Phase 只驗證 ID 來自 Phase 13 的編碼函式、PR 編號不單獨成為 `Release.id`，不重複宣稱編碼契約。
   - Rule 25：「正規化物件的枚舉欄位必須使用合法值」→ **primary**；Task 1／Task 2 用 `set(TicketSource)`、`set(ReleaseSource)`、`set(ReleaseKind)` 斷言非法值被拒。
 - [依改版更新教學.feature](../../spec/features/依改版更新教學.feature)（00B 縮寫 `REL`）
@@ -443,11 +457,27 @@ uv run pytest tests/integration/test_o6_github_mapping.py -q
 
 ## 12. 完成清單
 
-- [ ] Ticket 六個必填欄位與 `source` 已驗證，全空白字串算缺值。
-- [ ] Release 六個必填欄位、`kind`／`source` 與 renamed 的 `old_name`／`new_name` 已驗證。
-- [ ] 分析欄位（`embedding`／`cluster_id`／`feature_ids`）預填即拒絕。
-- [ ] `IngressError.fields` 一律是 tuple，測試以 tuple 比較。
-- [ ] 多 Feature 使用共同 `source_event_id` 與不同子 Release ID。
-- [ ] PR number 未直接作 `Release.id`。
-- [ ] stable user 與 ID 都可追到 Phase 13 的 O6 fixture 與編碼函式。
-- [ ] O6 若未核對，文件與測試明示 blocked（`xfail(strict=True)`），未宣稱整合完成。
+- [x] Ticket 六個必填欄位與 `source` 已驗證，全空白字串算缺值。
+- [x] Release 六個必填欄位、`kind`／`source` 與 renamed 的 `old_name`／`new_name` 已驗證。
+- [x] 分析欄位（`embedding`／`cluster_id`／`feature_ids`）預填即拒絕。
+- [x] `IngressError.fields` 一律是 tuple，測試以 tuple 比較。
+- [x] 多 Feature 使用共同 `source_event_id` 與不同子 Release ID。
+- [x] PR number 未直接作 `Release.id`。
+- [x] stable user 與 ID 都可追到 Phase 13 的 O6 fixture 與編碼函式。
+- [x] O6 若未核對，文件與測試明示 blocked（`xfail(strict=True)`），未宣稱整合完成。
+
+## 13. 實作偏差紀錄（2026-09-14）
+
+實作後回填；每一條都是「Phase 文件與 00A／既有程式不一致」而修文件，不改 00A 的名稱。
+
+| # | 位置 | 原文 | 實際做法與理由 |
+|---|---|---|---|
+| 1 | §4 | 修改 `models.py` | **未改**。Phase 04 的 validator 已涵蓋本 Phase 需要的模型層限制，00A §3.2 允許但不強制修改。 |
+| 2 | §5、§6 Step 3、§7 Step 3 | `TicketSource(payload["source"])`、`payload.get("old_name")` | mypy strict（`files = ["src", "infra"]`）不接受把 `object` 餵給 `str` 參數或 `str \| None` 欄位，改成 `TicketSource(str(...))` 與 `_optional_string(payload, key)`；行為不變。 |
+| 3 | §5 流程圖 | 第 (5) 關只寫 aware UTC | 依 00A §3.5「datetime 欄位一律 UTC 整秒」補上微秒即拒；並補第 (6) 關把模型層的 `ValidationError` 收斂成 `IngressError`（00A §4.1 指定這兩個函式是 `IngressError` 的拋出者，webhook handler 只認 `IngressError`／`TimeoutError`）。 |
+| 4 | §8 Step 1 | `Path("tests/fixtures/github")` | 相對路徑會隨 pytest 的 cwd 飄掉，改用 `Path(__file__).resolve().parents[2]`，與 Phase 13 的 `test_o6_fixture_contract.py` 同一種寫法。 |
+| 5 | §8 Step 2 | 預期紅燈是「缺 `validate_ticket`」 | Task 1／Task 2 先做，該紅燈已在 Task 1 Step 2 消化；Task 3 改用 mutation（暫時拿掉 `TICKET_REQUIRED` 的 `author`）證明整合測試不是假綠。 |
+| 6 | §8 Step 3 | 斷言「stable author」 | `Release` 模型沒有 author 欄位（00A §5.1），改為斷言 `github_user_id(sender.id)` 的編碼可追溯到核定紀錄的 `stable_user_source`。 |
+| 7 | §8 Step 4 | 「整個檔案維持 `xfail(strict=True)`」 | O6 是**逐 `(domain, event_type)`** 判斷（00A §4.2）：`issues` 已核定所以真綠，`pull_request` 未核定所以 `xfail(strict=True)`。為了讓 strict xfail 成立，每個測試第一行先 `assert (domain, event_type) in APPROVED`。 |
+| 8 | §11 Rule 23 | primary 證據寫在 Task 3 | 依 00B ING Rule 23，primary 證據是 Task 2 的單元斷言；Task 3 的 PR 斷言在未核定期間是 XFAIL，只能當補強。 |
+| 9 | `ingress.py` 模組 docstring | 區塊清單把「正規化」列為第 4 點卻要求放在接線點之上 | 依「放在接線點之上」為準，把正規化改成第 3 節、接線點改成第 4 節，讓清單順序與檔案實際順序一致。 |
