@@ -71,7 +71,7 @@ canonical Ticket / Release（Phase 31）
 | 動作 | 路徑 | 責任 |
 |---|---|---|
 | 修改 | `src/training_kb/ingress.py` | `operation_id_for`、`execution_name` 與兩個 accept 函式；模組由 Phase 30 建立。 |
-| 建立 | `src/training_kb/pipeline_starter.py` | `PipelineStarter` Protocol 與 boto3 adapter；[Phase 37](./37-Phase37-Rote-Agent回退與成功提交.md) 直接 `from training_kb.pipeline_starter import PipelineStarter`。 |
+| 建立 | `src/training_kb/pipeline_starter.py` | `PipelineStarter` Protocol 與 boto3 adapter；[Phase 37](./37-Phase37-Rote-Agent回退與成功提交.md) 直接 `from training_kb.pipeline_starter import PipelineStarter`。**實作時 Protocol 與 `STATE_MACHINE_NAMES`／`state_machine_arns` 在 Task 2 就建立**（`Wiring.starter` 需要型別），`BotoPipelineStarter` 才留到 Task 3。 |
 | 測試 | `tests/unit/test_ingress_acceptance.py` | 名稱決定性、去重、有限 input、錯誤流程。 |
 | 測試 | `tests/integration/test_start_execution_idempotency.py` | running／closed execution 與程序重啟。 |
 
@@ -107,14 +107,30 @@ from training_kb.models import Release, Ticket
 from training_kb.operations import Acceptance, OperationKind
 from training_kb.pipelines.common import JSONValue, PipelineName
 
+# training_kb.pipeline_starter（00A §6.8：Protocol 與 adapter 都在這支）
 STATE_MACHINE_NAMES: dict[PipelineName, str]   # 三條 pipeline 的 state machine 名稱
-
-def operation_id_for(kind: OperationKind, canonical_id: str) -> str: ...
-def execution_name(operation_id: str) -> str: ...
+def state_machine_arns(*, region: str, account_id: str) -> dict[PipelineName, str]: ...
 
 class PipelineStarter(Protocol):
     def start(self, pipeline: PipelineName, execution_name: str,
               input: dict[str, JSONValue]) -> str: ...   # 回 execution ARN
+
+class BotoPipelineStarter:                     # 正式實作（Task 3）
+    def __init__(self, client: object, arns: dict[PipelineName, str],
+                 operations: OperationCoordinator) -> None: ...
+
+# training_kb.ingress 第 4 節
+SAFE_EXECUTION_NAME: re.Pattern[str]           # [A-Za-z0-9_-]{1,80}
+PIPELINE_FOR_KIND: dict[OperationKind, PipelineName]   # ticket→ticket-analysis、release→release-update
+INPUT_NAME = "input"                           # operation_ref(operation_id, INPUT_NAME)
+
+@dataclass(frozen=True)
+class Wiring:                                  # 本計畫選擇的四個相依（測試覆寫 `_wiring` 注入）
+    operations: OperationCoordinator; starter: PipelineStarter
+    repository: Repository; settings: Settings
+
+def operation_id_for(kind: OperationKind, canonical_id: str) -> str: ...
+def execution_name(operation_id: str) -> str: ...
 
 def accept_ticket(ticket: Ticket, *, deadline: float) -> Acceptance: ...
 def accept_release(release: Release, *, deadline: float) -> Acceptance: ...
@@ -133,7 +149,7 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
 
 ## 6. Task 1：固定 operation 與 execution 名稱
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import re
@@ -156,7 +172,7 @@ def test_execution_name_always_obeys_the_step_functions_rule(canonical_id):
     assert name == execution_name(operation_id_for("ticket", canonical_id))
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_ingress_acceptance.py -q -k names
@@ -164,7 +180,10 @@ uv run pytest tests/unit/test_ingress_acceptance.py -q -k names
 
 預期：FAIL，訊號包含 `cannot import name 'operation_id_for'`。
 
-- [ ] **Step 3：建立最小實作**
+實作時的實際紅燈是 `ImportError: cannot import name 'execution_name' from 'training_kb.ingress'`
+（同一個 import 敘述裡 `execution_name` 排在前面），原因相同：兩個名稱都還不存在。
+
+- [x] **Step 3：建立最小實作**
 
 ```python
 import hashlib
@@ -189,7 +208,7 @@ def execution_name(operation_id: str) -> str:
 
 `15 + 1 + 64 = 80`，所以截取後仍在長度上限內；SHA-256 取全長 64 個十六進位字元，不截短到有碰撞風險卻沒有測試的長度。名稱只由 kind 與已核定的 canonical ID 組成，**不含 user、comment 或 title**。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_ingress_acceptance.py -q
@@ -197,7 +216,7 @@ uv run pytest tests/unit/test_ingress_acceptance.py -q
 
 預期：超長 ID、Unicode、`ticket`／`release` 同 canonical ID 三個邊界都綠燈，且同輸入兩次得到同名稱。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/unit/test_ingress_acceptance.py
@@ -206,9 +225,11 @@ git commit -m "feat(ingress): 固定事件與執行名稱"
 
 ## 7. Task 2：先永久接受，再保存 input reference
 
-- [ ] **Step 1：建立重送失敗測試**
+- [x] **Step 1：建立重送失敗測試**
 
-`harness` 是本 Phase 的測試夾具：記錄呼叫次數的 fake `PipelineStarter`（`calls`、`pipelines`、`last_input`）、以 dict 當儲存的 fake `Repository`（`objects`）、真正的 `OperationCoordinator` 接 moto DynamoDB，外加兩個期限值 `deadline`（還有剩）與 `expired_deadline`（已過期）；`TICKET`／`RELEASE` 是 Phase 31 `validate_ticket`／`validate_release` 產出的 `t_881`、`r_gh-acme-app-pr42-1` canonical 物件。
+`harness` 是本 Phase 的測試夾具：記錄呼叫次數的 fake `PipelineStarter`（`calls`、`pipelines`、`names`、`last_input`）、以 dict 當儲存的 fake `Repository`（`objects`、`put_object_calls`）、真正的 `OperationCoordinator`，外加兩個期限值 `deadline`（還有剩）與 `expired_deadline`（已過期）；`TICKET`／`RELEASE` 是 Phase 31 `validate_ticket`／`validate_release` 產出的 `t_881`、`r_gh-acme-app-pr42-1` canonical 物件。
+
+**實作時的選擇：** 單元測試不接 moto，改用記憶體版 `FakeRepository`（`put_meta_item` 的 create-only、`update_meta` 的 revision CAS、`put_object(..., if_none_match=True)` 撞 key 丟 `ObjectAlreadyExists` 三條語意逐條照 Phase 06／07）配**真正的** `OperationCoordinator`——去重語意仍然由 Phase 10 的程式決定，不在測試裡另寫一份，但單元測試維持零 AWS 相依、毫秒級。moto 的證據在 `tests/integration/test_start_execution_idempotency.py`，真表的 O2 證據在 Phase 11。`deadline` 用 `monotonic() + WEBHOOK_DEADLINE_SECONDS`；該常數目前在 `training_kb.handlers.github_webhook`（Phase 30 的實際落點）而不是 00A §6.8 寫的 `ingress.py`，測試依實際落點 import（見 §13）。
 
 ```python
 import json
@@ -227,7 +248,7 @@ def test_duplicate_ticket_starts_once(harness):
     assert TICKET.text not in json.dumps(harness.starter.last_input, ensure_ascii=False)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_ingress_acceptance.py -q -k duplicate
@@ -235,7 +256,10 @@ uv run pytest tests/unit/test_ingress_acceptance.py -q -k duplicate
 
 預期：FAIL，訊號包含 `cannot import name 'accept_ticket'`。
 
-- [ ] **Step 3：建立最小實作（固定次序）**
+實作時的實際紅燈是 `cannot import name 'Wiring' from 'training_kb.ingress'`（夾具要先組出
+`Wiring` 才能注入），原因相同：第 4 節的名稱都還不存在。
+
+- [x] **Step 3：建立最小實作（固定次序）**
 
 ```python
 import json
@@ -310,11 +334,23 @@ def _normalize(*, domain: str, adapter: str, event_type: str,
 
 **duplicate 但尚未啟動是合法的續跑**（00A D-45）：`accept` 已寫 `OPS#`、但 input 物件或 execution 還沒建立時，本次補完即可，不建立第二筆 operation、不換名字。`ObjectAlreadyExists` 用**型別**判斷，不比對訊息字串；其他 S3 錯誤照常往上拋，不吞錯。
 
+**實作時的兩個差異（皆為最小追加）：**
+
+1. `_accept` 的參數少一個 `pipeline`，改由模組常數 `PIPELINE_FOR_KIND[kind]` 查表
+   （`ticket` → `ticket-analysis`、`release` → `release-update`）。這樣「哪一種事件觸發哪一條
+   pipeline」（00B ING Rule 26／27）只有一份宣告，呼叫端不可能傳錯配對。
+2. `starter.start(...)` 包在 `_start_once` 裡：失敗時先 `operations.fail(operation_id, str(error),
+   isinstance(error, TransientError), now=now_utc())` 留下可追溯紀錄，再把**原例外**往外丟
+   （與 `run_sequence` 同一條判準）。這是 §9 驗收表「StartExecution 暫時失敗 → 保留 `input_ref`
+   並標 `retryable=True`」那一列的實作；`_accept` 本身**不自己重試**。
+
 期限檢查一律用 Phase 30 的 `assert_time_left(deadline, step=...)`（逾時丟內建 `TimeoutError`），**不要**在本模組另寫一個比 `time.monotonic()` 的私有 helper：八秒是整個 handler 共用的一段時間，本 Phase 只是消費它。`normalize_then_accept` 就是 Phase 30 handler 唯一呼叫的那個函式，六個參數全部 keyword-only；`_normalize` 是留給 [Phase 37](./37-Phase37-Rote-Agent回退與成功提交.md) 的接縫，`domain`／`adapter`／`event_type`／`headers` 四個參數本 Phase 不解讀，只原樣轉交。
 
-- [ ] **Step 4：補五個狀態的重送測試並跑完整檔案確認綠燈**
+- [x] **Step 4：補五個狀態的重送測試並跑完整檔案確認綠燈**
 
 `OperationStatus` 只有 `accepted`、`normalized`、`started`、`done`、`failed` 五個值。逐一把 ledger 預設成這五種狀態後重送，斷言 starter 呼叫次數與 object 寫入次數符合下表；Ticket 與 Release 各跑一次。
+
+**本 Phase 對保留值的裁決（00A §6.4 指定由 P32 決定）：接受路徑不寫入 `normalized`／`started`，兩個值維持保留。** 續跑判斷一律看 `input_ref`／`execution_arn` 這兩個**事實**欄位，不看 `status`（意圖）。三個理由：(1) 00A §6.4 把 `record_normalized`／`record_execution` 的簽名固定成只帶 ref、沒有 `now`，順手改寫 `status` 卻不動 `updated_at` 會讓紀錄自相矛盾；(2) O2 gate 是用現在這份 `operations.py` 在真實 DynamoDB 上取得的，改寫它的寫入行為等於讓 gate 證據與程式脫鉤；(3) 每推進一次狀態就多一次 CAS 往返，在八秒期限內沒有收益。因此測試要擺出 `normalized`／`started` 這兩種 ledger 狀態時，欄位一律走 Phase 10 的公開方法寫，只有 `status` 由夾具 `seed(...)` 直接設定（`harness.seed(kind, canonical_id, status=..., input_ref=..., execution_arn=...)`）。
 
 | ledger 既有狀態 | `execution_arn` | 重送時預期 |
 |---|---|---|
@@ -348,7 +384,7 @@ uv run pytest tests/unit/test_ingress_acceptance.py -q
 
 預期：五種狀態都不會建立第二筆 operation，`set(harness.objects)` 永遠只有一個 key；`normalize_then_accept` 在期限已過時連 `_normalize` 都不會走到。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/unit/test_ingress_acceptance.py
@@ -374,7 +410,14 @@ ledger 有 execution_arn？ -- 沒有 --> 由 state machine ARN + 名稱推導�
   （必要時補寫 record_execution）             否 -> CoordinationError（需人工確認）
 ```
 
-- [ ] **Step 1：建立 closed execution 失敗測試**
+- [x] **Step 1：建立 closed execution 失敗測試**
+
+**實作時的夾具差異：** 真正的 `OperationCoordinator` 沒有 `put(record)` 方法（Phase 10 的寫入
+入口只有 `accept`／`record_*`／`complete`／`fail`），所以 `ledger_record(**overrides)` 改成
+`harness.seed(status=..., execution_arn=...)`：欄位走公開方法寫進 moto 表，需要 `done`／`failed`
+就呼叫 `complete`／`fail`。Step Functions 那一側用 `unittest.mock.MagicMock`，
+`client.exceptions.ExecutionAlreadyExists` 指向測試自訂的例外類別（boto3 的那個類別是動態產生的）。
+下面的偽碼保留原樣，實際斷言以 `tests/integration/test_start_execution_idempotency.py` 為準。
 
 ```python
 import pytest
@@ -411,7 +454,7 @@ def test_running_already_exists_reuses_the_same_arn(harness):
     assert harness.starter.start("ticket-analysis", OP, LIMITED_INPUT) == ARN
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_start_execution_idempotency.py -q
@@ -419,7 +462,7 @@ uv run pytest tests/integration/test_start_execution_idempotency.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'PipelineStarter'` 或 `BotoPipelineStarter`。
 
-- [ ] **Step 3：建立最小 boto3 adapter**
+- [x] **Step 3：建立最小 boto3 adapter**
 
 ```python
 STATE_MACHINE_NAMES: dict[PipelineName, str] = {
@@ -459,7 +502,7 @@ class BotoPipelineStarter:
 
 `STATE_MACHINE_NAMES` 是 00A §3.5 固定的 state machine 名稱；部署時由它與帳號、Region 組出 `arns`，測試直接注入假 ARN。ledger 沒有 `execution_arn` 時才推導執行 ARN，這是**本計畫選擇**，必須由 [Phase 41](./41-Phase41-Ticket-Analysis雲端流程驗收.md) 的雲端驗收實證後才可信賴。
 
-- [ ] **Step 4：補重啟與禁止改名測試並跑完整檔案確認綠燈**
+- [x] **Step 4：補重啟與禁止改名測試並跑完整檔案確認綠燈**
 
 - 建立新的 adapter 物件（模擬程序重啟），只憑持久 ledger 仍取得同一個 `operation_id`、`input_ref` 與 ARN。
 - 斷言 `start_execution` 的 `name` 參數在任何分支都等於 `execution_name(operation_id)`：**不得追加 timestamp、random suffix 或新的 operation ID**。
@@ -471,7 +514,7 @@ uv run pytest tests/integration/test_start_execution_idempotency.py -q
 
 預期：running／done／ambiguous 三個分支全綠，`start_execution` 每個案例都只呼叫一次。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipeline_starter.py tests/integration/test_start_execution_idempotency.py
@@ -511,8 +554,8 @@ uv run pytest tests/integration/test_start_execution_idempotency.py -q
 ## 11. 來源與 Rule 對照
 
 - [接入來源事件.feature](../../spec/features/接入來源事件.feature)（00B 縮寫 `ING`）
-  - Rule 26：「正規化成功的 Ticket 觸發 Ticket Analysis」→ **primary**；`tests/unit/test_ingress_acceptance.py` 斷言合法 Ticket 只啟動 `ticket-analysis` 一次。
-  - Rule 27：「正規化成功的 Release 觸發 Release Note Update」→ **primary**；同檔斷言合法 Release 只啟動 `release-update` 一次。
+  - Rule 26：「正規化成功的 Ticket 觸發 Ticket Analysis」→ **primary**；`tests/unit/test_ingress_acceptance.py::test_a_fresh_ticket_starts_ticket_analysis_exactly_once` 斷言合法 Ticket 只啟動 `ticket-analysis` 一次（`starter.pipelines == ["ticket-analysis"]`）。
+  - Rule 27：「正規化成功的 Release 觸發 Release Note Update」→ **primary**；同檔 `test_duplicate_release_starts_once` 斷言合法 Release 只啟動 `release-update` 一次。
   - Rule 30：「同一正規化事件重送時只處理一次」→ **相關（primary 在 [Phase 10](./10-Phase10-O2操作紀錄與永久去重契約.md)）**；本 Phase 的重送測試是接入端的表現，永久去重契約本身由 Phase 10 的 ledger 測試證明。
 - [設計 §14.1、§14.2](../../design/training-kb.md)：同一事件重送取得既有結果或沿用未完成邏輯操作，不新增版本、回饋樣本或 PROC 成功樣本；StartExecution 只對「同名、同 input、仍在執行」冪等，已結束的同名執行回 `ExecutionAlreadyExists`，**不能直接當成功，也不能改名就無條件重跑**。
 - [設計 §18 O2](../../design/training-kb.md)：操作紀錄與接受順序的儲存形狀待確認；TTL 與 SDK 重試都不保證永久去重。
@@ -521,13 +564,30 @@ uv run pytest tests/integration/test_start_execution_idempotency.py -q
 
 ## 12. 完成清單
 
-- [ ] canonical event key 永久對應一個 operation（`op-<kind>-<canonical_id>`）。
-- [ ] operation／execution 名稱可重現、符合 `[A-Za-z0-9_-]{1,80}` 且不含敏感內容。
-- [ ] ASL input 只有 `operation_id`、`project_id`、`input_ref`。
-- [ ] Ticket／Release 啟動正確且唯一的 pipeline；Release 的 `project_id` 來自 `Settings`。
-- [ ] `accepted`／`normalized`／`started`／`done`／`failed` 五種 ledger 狀態的重送都有測試。
-- [ ] `normalize_then_accept` 是 D-60 的六個 keyword 參數，accept 半邊依型別分派到 `accept_ticket`／`accept_release`。
-- [ ] 期限檢查全部走 `assert_time_left(deadline, step=...)`，模組裡沒有第二份 `monotonic()` 比較。
-- [ ] duplicate 但尚未啟動時是續跑，不建立第二筆 operation。
-- [ ] closed `ExecutionAlreadyExists` 不直接當成功、不換名重跑；process restart 後仍只憑持久 ledger 取得原狀態。
-- [ ] O2 gate 未通過時維持 blocked 標示，沒有把 mock 綠燈寫成永久去重已完成。
+- [x] canonical event key 永久對應一個 operation（`op-<kind>-<canonical_id>`）。
+- [x] operation／execution 名稱可重現、符合 `[A-Za-z0-9_-]{1,80}` 且不含敏感內容。
+- [x] ASL input 只有 `operation_id`、`project_id`、`input_ref`。
+- [x] Ticket／Release 啟動正確且唯一的 pipeline；Release 的 `project_id` 來自 `Settings`。
+- [x] `accepted`／`normalized`／`started`／`done`／`failed` 五種 ledger 狀態的重送都有測試。
+- [x] `normalize_then_accept` 是 D-60 的六個 keyword 參數，accept 半邊依型別分派到 `accept_ticket`／`accept_release`。
+- [x] 期限檢查全部走 `assert_time_left(deadline, step=...)`，模組裡沒有第二份 `monotonic()` 比較。
+- [x] duplicate 但尚未啟動時是續跑，不建立第二筆 operation。
+- [x] closed `ExecutionAlreadyExists` 不直接當成功、不換名重跑；process restart 後仍只憑持久 ledger 取得原狀態。
+- [x] O2 gate 未通過時維持 blocked 標示，沒有把 mock 綠燈寫成永久去重已完成。
+
+## 13. 實作偏差紀錄（2026-09-14）
+
+| # | 文件原文 | 實作 | 原因 |
+|---|---|---|---|
+| 1 | §6 Step 2 預期紅燈 `cannot import name 'operation_id_for'` | 實際是 `cannot import name 'execution_name'` | 同一個 import 敘述，`execution_name` 排在前面；原因相同（名稱都不存在）。 |
+| 2 | §7 Step 2 預期紅燈 `cannot import name 'accept_ticket'` | 實際是 `cannot import name 'Wiring'` | 夾具要先組出 `Wiring` 才能注入 fake。 |
+| 3 | §7 Step 3 `_accept(kind, pipeline, canonical_id, ...)` | `_accept(kind, canonical_id, project_id, payload, deadline)`，pipeline 由 `PIPELINE_FOR_KIND[kind]` 查表 | 「哪一種事件觸發哪一條 pipeline」只留一份宣告（ING Rule 26／27），呼叫端不可能傳錯配對。 |
+| 4 | §7 Step 3 偽碼直接呼叫 `wiring.starter.start(...)` | 包一層 `_start_once`：失敗先 `operations.fail(..., retryable=isinstance(error, TransientError), now=now_utc())` 再丟原例外 | 實作 §9 驗收表「StartExecution 暫時失敗 → 保留 `input_ref` 並標 `retryable=True`」那一列；判準與 `run_sequence` 一致。 |
+| 5 | 00A §6.4 把 `normalized`／`started` 的寫入交給 P32 裁決 | **不寫入**，兩個值維持保留；續跑只看 `input_ref`／`execution_arn` | 見 §7 Step 4 的三個理由（簽名沒有 `now`、不動搖 O2 gate 證據、省一次 CAS 往返）。`operations.py` 一行都沒有改。 |
+| 6 | §7 Step 1 harness「真正的 `OperationCoordinator` 接 moto DynamoDB」 | 單元測試用記憶體版 `FakeRepository` ＋真正的 `OperationCoordinator`；moto 證據放整合測試 | 去重語意仍由 Phase 10 的程式決定，但單元測試維持零 AWS 相依。 |
+| 7 | §8 Step 1 `harness.operations.put(ledger_record(...))` | `harness.seed(status=..., execution_arn=...)`，欄位走 `accept`／`record_normalized`／`record_execution`／`complete`／`fail` | `OperationCoordinator` 沒有 `put`；用公開方法擺狀態才不會繞過 Phase 10 的契約。 |
+| 8 | §5 Produces 只列 `STATE_MACHINE_NAMES` | 另加 `state_machine_arns(*, region, account_id)` | 00A §6.8「部署時由它加上帳號與 Region 組出 ARN」需要一個可測試的地方；帳號不寫死在程式裡。 |
+| 9 | §5「`_wiring()` 由模組層工廠取得」 | `_build_wiring(settings)` 用 boto3 建 resource／client，帳號由 STS 現查、Region 由 client 自報 | 不新增 `TKB_` 以外的環境變數（00A §3.5）。**這條路徑本批不執行**，真正的雲端接線與 IAM 由 Phase 41 驗收。 |
+| 10 | 00A §6.8 說 `WEBHOOK_DEADLINE_SECONDS` 在 `ingress.py` | 實際在 `training_kb/handlers/github_webhook.py`（Phase 30 的落點） | 不動別人的檔案；測試依實際落點 import。**建議主導者在 00A §6.8 更正落點，或請 P30 搬家。** |
+| 11 | 00A §8 D-08 要求修正本文件 §5／§6 的舊名稱 | **本文件已無舊名稱**（`is_duplicate`／`running`／`result_ref` 只出現在 §10「常見錯誤」表，是「不要這樣寫」的提醒） | D-08 已在先前版本套用完畢，本次無需再改。 |
+| 12 | §12「O2 gate 未通過時維持 blocked 標示」 | O2 已於 Phase 11 以真實 DynamoDB PASS（COMMON.md），但本 Phase 的 moto／mock 綠燈**仍然只證明程式邏輯**，不是 gate 證據；「lease 不等於接受順序、TTL 不是準時解鎖」兩句保留 | 依 controller 2026-09-14 的裁決：離線開發照常，真實 Step Functions 驗證延後到 Phase 41／52。 |
