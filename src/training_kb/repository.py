@@ -13,6 +13,7 @@ AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**
 4. `Repository`：metadata CRUD、`revision_of` 與四個具名 getter
 """
 
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any, TypeVar
 
@@ -162,6 +163,49 @@ class Repository:
         response = self._table.get_item(Key={"PK": pk, "SK": META}, ConsistentRead=True)
         item = response.get("Item")
         return None if item is None else int(item["_revision"])
+
+    def revision_of(self, pk: str) -> int:
+        """`expected_revision` 的唯一取值來源；`get_meta` 濾掉 `_revision`，模型身上沒有它。"""
+        revision = self._revision_or_none(pk)
+        if revision is None:
+            raise CoordinationError(f"metadata not found: {pk}")
+        return revision
+
+    def update_meta(self, pk: str, changes: Mapping[str, DynamoValue], *,
+                    expected_revision: int) -> int:
+        """revision compare-and-swap：只有目前 `_revision` 等於讀到的值才更新，回傳新的 revision。
+
+        每個欄位名都經 `ExpressionAttributeNames` 的 `#fN` 佔位，因為 `name`／`status`／`type`
+        都是 DynamoDB 保留字；`#revision = :next` 與業務欄位在同一個 `SET`，所以版本與內容
+        一定一起生效或一起失敗。
+        """
+        if not changes:
+            raise PermanentError(f"update_meta needs at least one change: {pk}")
+        reserved = sorted(RESERVED_ATTRS.intersection(changes))
+        if reserved:
+            raise PermanentError(f"reserved attributes are not updatable: {reserved}")
+        names = {"#revision": "_revision"}
+        values: dict[str, object] = {":expected": expected_revision,
+                                     ":next": expected_revision + 1}
+        assignments = ["#revision = :next"]
+        for index, field in enumerate(sorted(changes)):
+            names[f"#f{index}"] = field
+            values[f":v{index}"] = _encode(changes[field])
+            assignments.append(f"#f{index} = :v{index}")
+        try:
+            self._table.update_item(
+                Key={"PK": pk, "SK": META},
+                UpdateExpression="SET " + ", ".join(assignments),
+                ConditionExpression="#revision = :expected",
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=values,
+            )
+        except ClientError as error:
+            if error.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                raise CoordinationError(
+                    f"stale revision for {pk}: expected {expected_revision}") from error
+            raise
+        return expected_revision + 1
 
     # --- metadata 讀取 ---
 

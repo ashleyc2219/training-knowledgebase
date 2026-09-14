@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from training_kb.errors import PermanentError
+from training_kb.errors import CoordinationError, PermanentError
 from training_kb.models import Feature, Ticket, TutorialStep
 from training_kb.repository import RESERVED_ATTRS
 
@@ -43,3 +43,42 @@ def test_tutorial_step_has_no_metadata_item(repository) -> None:
                         type="click_ui", text="按下開始", feature_id="Prepare")
     with pytest.raises(PermanentError, match="put_edge"):
         repository.put_meta(step)
+
+
+def test_create_conflict_does_not_overwrite(repository) -> None:
+    repository.put_meta(feature())
+    with pytest.raises(CoordinationError, match="already exists"):
+        repository.put_meta(feature("Meeting Summary"))
+    assert repository.get_feature("Prepare") == feature()
+
+
+def test_revision_of_drives_update_and_rejects_stale_writes(repository) -> None:
+    repository.put_meta(feature())
+    assert repository.revision_of("FEATURE#Prepare") == 1
+    assert repository.update_meta(
+        "FEATURE#Prepare", {"name": "Meeting Summary"},
+        expected_revision=repository.revision_of("FEATURE#Prepare")) == 2
+    assert repository.revision_of("FEATURE#Prepare") == 2
+    with pytest.raises(CoordinationError, match="stale revision"):
+        repository.update_meta("FEATURE#Prepare", {"name": "Prepare Again"},
+                               expected_revision=1)
+    assert repository.get_feature("Prepare").name == "Meeting Summary"
+    with pytest.raises(CoordinationError, match="metadata not found"):
+        repository.revision_of("FEATURE#Missing")
+
+
+def test_reserved_attributes_and_empty_changes_are_rejected(repository) -> None:
+    repository.put_meta(feature())
+    for attribute in ("PK", "SK", "target", "entity", "_revision"):
+        with pytest.raises(PermanentError, match="reserved"):
+            repository.update_meta("FEATURE#Prepare", {attribute: "x"},
+                                   expected_revision=1)
+    with pytest.raises(PermanentError, match="at least one change"):
+        repository.update_meta("FEATURE#Prepare", {}, expected_revision=1)
+
+
+def test_controlled_overwrite_keeps_revision_monotonic(repository) -> None:
+    repository.put_meta(feature())
+    repository.put_meta(feature("Meeting Summary"), create_only=False)
+    assert repository.revision_of("FEATURE#Prepare") == 2
+    assert repository.get_feature("Prepare").name == "Meeting Summary"
