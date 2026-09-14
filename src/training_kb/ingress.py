@@ -366,8 +366,11 @@ def _accept(kind: OperationKind, canonical_id: str, project_id: str,
     if accepted.record.input_ref != input_ref:
         operations.record_normalized(operation_id, input_ref)
     assert_time_left(deadline, step="start-execution")
+    # ASL input 的 project_id 以 **ledger** 為準：續跑時本次請求的設定可能已經換過
+    # （例如 `Settings.project_id` 改了），但這筆 operation 從接受當下就綁定一個專案。
     arn = _start_once(wiring.starter, operations, PIPELINE_FOR_KIND[kind], operation_id,
-                      {"operation_id": operation_id, "project_id": project_id,
+                      {"operation_id": operation_id,
+                       "project_id": accepted.record.project_id,
                        "input_ref": input_ref})
     operations.record_execution(operation_id, arn)
     record = operations.load(operation_id)

@@ -377,3 +377,15 @@ def test_long_names_under_the_same_kind_stay_distinct() -> None:
     second = execution_name(operation_id_for("feedback-review", "demo-會前摘要-" + "2" * 90))
     assert first != second
     assert first == execution_name(operation_id_for("feedback-review", "demo-會前摘要-" + "1" * 90))
+
+
+def test_the_asl_input_project_id_follows_the_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """續跑時 `project_id` 以接受當下寫進 ledger 的值為準，不是本次請求的設定值。"""
+    later = build_harness(monkeypatch, project_id="acme")
+    later.operations.accept(AcceptOperation(
+        operation_id="op-release-r_gh-acme-app-pr42-1", kind="release",
+        canonical_id="r_gh-acme-app-pr42-1", project_id="demo", now=now_utc()))
+    resumed = later.accept_release(RELEASE)
+    assert resumed.status == "duplicate"
+    assert resumed.record.project_id == "demo"
+    assert later.starter.last_input["project_id"] == "demo"
