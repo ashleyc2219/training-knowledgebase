@@ -62,7 +62,8 @@ def test_a_write_conflict_without_a_readable_record_fails_loudly(
     """
     class _AmnesiacRepository(Repository):
         def get_meta_item(self, pk: str) -> DynamoItem | None:
-            return None
+            """只對 `OPS#` 失憶。`SEQ#` 要照常讀得回，`accept` 的取號（Phase 11）才走得完。"""
+            return None if pk.startswith("OPS#") else super().get_meta_item(pk)
 
     operations = OperationCoordinator(_AmnesiacRepository(table, bucket))
     operations.accept(REQUEST)
