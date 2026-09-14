@@ -16,7 +16,7 @@
 - **上一份：** [Phase 04](04-Phase04-十個邏輯實體模型.md)。
 - **下一份：** [Phase 06 Repository Metadata 與實體讀寫](06-Phase06-Repository-Metadata與實體讀寫.md)。
 - **本階段不做：** 不建立 AWS 表、不實作分頁、不寫任何 item、不產生 `OPS#`／`CONFIG#`／`SEQ#`／`LEASE#` 這類非業務前綴（`ops_pk`、`operation_ref` 由 [Phase 10](10-Phase10-O2操作紀錄與永久去重契約.md) 加在同一支 `keys.py`）、不提供 `make_version_id`／`parse_version_id`（[00A](00A-共用契約與名詞.md) 第 3.3、6.6 節把它們指派給 [Phase 20](20-Phase20-版本分配與重試重用.md) 的 `content.py`，`keys.py` 不得複製第二份版本 ID 解析規則）、不用計畫文字宣稱 O1 已核定。
-- **與本 Phase 有關的 gate：** O1 是本 Phase 的首要 gate，只能由 `docs/decisions/O1-metadata-sort-key.md` 的真實核定紀錄改變狀態。未核定前一律寫「O1 尚未核定，`META` 仍是建議值，不得宣稱物理鍵契約已定案。」並停止 [Phase 06](06-Phase06-Repository-Metadata與實體讀寫.md)。O2、O3、O6 與本 Phase 無關，也不得因為鍵測試全綠而宣稱它們有進展。
+- **與本 Phase 有關的 gate：** O1 是本 Phase 的首要 gate，只能由 `docs/decisions/O1-metadata-sort-key.md` 的真實核定紀錄改變狀態。**目前狀態：provisionally accepted（暫定接受）**——2026-09-14 由 controller 依維護者授權暫定接受 `META`，待 Timmy Lin 親自確認；紀錄的 `Approver` 欄寫的是 controller，不得寫成維護者本人已核定。未核定前一律寫「O1 尚未核定，`META` 仍是建議值，不得宣稱物理鍵契約已定案。」並停止 [Phase 06](06-Phase06-Repository-Metadata與實體讀寫.md)。O2、O3、O6 與本 Phase 無關，也不得因為鍵測試全綠而宣稱它們有進展。
 - 以下程式檔均是實作時預計建立；本計畫本身不代表它們已存在。
 
 ## 你在整體流程的位置
@@ -212,7 +212,7 @@ RELATIONS = frozenset({"REFERENCES", "SUPERSEDES", "APPLIED_TO", "ASKS_ABOUT", "
 
 
 def _bare(value: str) -> str:
-    if not isinstance(value, str) or not value or "#" in value:
+    if not isinstance(value, str) or not value or value != value.strip() or "#" in value:
         raise ValueError(f"key input must be a non-empty bare identifier: {value!r}")
     return value
 
@@ -293,12 +293,30 @@ def parse_edge_sk(value: str) -> tuple[str, str]:
 def parse_step_pk(value: str) -> tuple[str, int]:
     kind, identifier = parse_pk(value)
     version_id, separator, number = identifier.rpartition("#")
-    if kind != "STEP" or not separator or not number.isdigit():
+    if (
+        kind != "STEP"
+        or not separator
+        or not version_id
+        or not number.isdecimal()
+        or str(int(number)) != number
+    ):
         raise ValueError(f"invalid step primary key: {value!r}")
     return version_id, int(number)
 ```
 
 `parse_step_pk` 用 `rpartition`（從**右邊**切第一個 `#`）而不是 `partition`：版本 ID 本身長得像 `prepare-meeting@v2`，未來若含 `#` 也不會把步驟號切錯邊。
+
+**四道守門缺一不可**（controller 裁決：review 發現本計畫原本給的 `if kind != "STEP" or not separator or not number.isdigit():` 過度寬鬆，已在此改成修正後的版本）。判準是 round-trip 必須封閉，也就是 `step_pk(*parse_step_pk(pk)) == pk` 對任何能通過的字串都成立：
+
+| 畸形輸入 | 原本的條件 | 修正後 | 為什麼要擋 |
+|---|---|---|---|
+| `STEP##3` | 回 `("", 3)` | `ValueError` | 版本 ID 空字串，`step_pk` 根本產不出這把鍵（`_bare` 會先拒絕）。 |
+| `STEP#slug#03` | 回 `("slug", 3)` | `ValueError` | 前導零：組回去是 `STEP#slug#3`，不是原字串，等於同一步有兩把鍵。 |
+| `STEP#slug#３` | 回 `("slug", 3)` | `ValueError` | 全形數字：`str.isdigit()` 與 `int()` 都會放行，組回去卻不是原字串。 |
+| `STEP#slug#³` | 丟 `int()` 的 `invalid literal for int()` | `ValueError: invalid step primary key: …` | 上標數字：`isdigit()` 為真但 `isdecimal()` 為假；先用 `isdecimal()` 擋掉，錯誤訊息才會是契約訊息而不是 `int()` 的內部訊息。 |
+| `STEP#slug#` | `ValueError`（`""` 非數字） | `ValueError` | 原本就會擋，修正後仍擋。 |
+
+`isdecimal()` 只解決 `³`；`３` 與 `03` 要靠 `str(int(number)) == number` 這道「正規形」檢查。兩者的順序不能對調：`or` 由左至右短路，`isdecimal()` 必須排在 `int()` 前面，否則 `³` 會先讓 `int()` 丟出非契約訊息。
 
 三件事要看懂：`_bare` 是「不准重複加前綴」的唯一守門員，八個單值 builder 經由 `_pk` 呼叫它，`step_pk`、`view_pk` 直接呼叫它，十個入口都擋得住重複前綴；`RELATIONS` 就是設計 §9.2 的五種關係，多一種都不行，所以 `HAS_VERSION`、`VIEWED`、`SUCCESSOR` 在這裡就被擋掉；`view_pk` 先用 `to_iso` 把時間轉成 UTC `Z` 字串再雜湊，所以同一個三元組在任何機器上都得到同一把鍵。
 
@@ -375,7 +393,7 @@ uv run pytest tests/unit/test_keys.py::test_metadata_sort_key_matches_the_record
 
 Status: accepted
 Date: 2026-09-13
-Approver: <核定者姓名>
+Approver: <核定者姓名或代為暫定者，並在說明段落寫清楚是誰、依據什麼授權>
 Sort-Key: META
 
 ## 決策內容
@@ -398,7 +416,7 @@ uv run pytest tests/unit/test_keys.py -q
 rg -n '^(Status|Date|Approver|Sort-Key): ' docs/decisions/O1-metadata-sort-key.md
 ```
 
-預期：整支測試檔 PASS，`rg` 四個欄位都印得出來。任一欄位缺少、或核定者仍是佔位字串時，本 Phase 的結論寫「O1 尚未核定，`META` 仍是建議值，不得宣稱物理鍵契約已定案。」並標記 `O1 BLOCKED`，[Phase 06](06-Phase06-Repository-Metadata與實體讀寫.md) 停止，不進入任何 metadata 寫入。O1 accepted 也只代表鍵**命名**定案；實表 CRUD 由 Phase 06、Phase 09 另外留證。
+預期：整支測試檔 PASS，`rg` 四個欄位都印得出來。任一欄位缺少、或核定者仍是佔位字串時，本 Phase 的結論寫「O1 尚未核定，`META` 仍是建議值，不得宣稱物理鍵契約已定案。」並標記 `O1 BLOCKED`，[Phase 06](06-Phase06-Repository-Metadata與實體讀寫.md) 停止，不進入任何 metadata 寫入。O1 accepted 也只代表鍵**命名**定案；實表 CRUD 由 Phase 06、Phase 09 另外留證。核定者若是代為暫定（本專案即是：controller 依授權暫定），紀錄與報告一律寫 **provisionally accepted**，不得簡寫成「已核定」。
 
 - [x] **Step 5：提交**
 
@@ -451,11 +469,11 @@ SHA-256 在本 Phase 只用於確定性去重，不是使用者身分驗證，�
 
 ## 完成清單
 
-- [x] 八個單值 builder 加 `step_pk`、`view_pk` 共十種 PK 與三個 parser（`parse_pk`、`parse_edge_sk`、`parse_step_pk`）可 round-trip。
+- [x] 八個單值 builder 加 `step_pk`、`view_pk` 共十種 PK 與三個 parser（`parse_pk`、`parse_edge_sk`、`parse_step_pk`）可 round-trip，且 `step_pk(*parse_step_pk(pk)) == pk` 封閉（前導零、全形／上標數字、空版本 ID 一律拒絕）。
 - [x] `view_pk` 只消耗 version、stable user 與 UTC ts，同三元組同鍵、差一秒不同鍵。
 - [x] metadata SK 與 edge SK 沒有混用；`TutorialStep` 明確走 edge 而非 `META`。
 - [x] 五種關係以外一律拒絕，`_bare` 擋掉所有重複加前綴的輸入。
-- [x] `docs/decisions/O1-metadata-sort-key.md` 有 `Status`／`Date`／`Approver`／`Sort-Key` 四個欄位，且 `META` 等於 `Sort-Key`；未決時文件明確標 `O1 BLOCKED`。
+- [x] `docs/decisions/O1-metadata-sort-key.md` 有 `Status`／`Date`／`Approver`／`Sort-Key` 四個欄位，且 `META` 等於 `Sort-Key`；未決時文件明確標 `O1 BLOCKED`，代為暫定時標 `provisionally accepted`。
 - [x] 所有 `uv run pytest` 測試都是本機契約，未宣稱 AWS 已驗證。
 - [x] Phase 06 可直接消耗 `META` 與全部 key builders，Phase 08 可用 `parse_step_pk` 還原步驟號，Phase 10 可在同一支檔案追加 `ops_pk`／`operation_ref`。
 
