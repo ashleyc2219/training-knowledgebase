@@ -5,8 +5,8 @@ owner 是 Phase 30；P31（正規化）、P32（接受／啟動）、P37（Rote 
 
 1. 驗簽（P30）—— 解析 JSON 之前先用原始 request bytes 比對 HMAC-SHA256。
 2. 整體期限（P30）—— webhook 的八秒 deadline，下游每一步開始前呼叫 `assert_time_left`。
-3. 接線點（P30 stub → P32 接受端 → P37 完整三層）。
-4. 正規化（P31 之後追加於「接線點」之上）。
+3. 正規化（P31）—— 候選欄位轉成 canonical `Ticket`／`Release`，是唯一的 model 邊界。
+4. 接線點（P30 stub → P32 接受端 → P37 完整三層）。
 
 log 不得出現原始 body、簽名或 secret（00A §3.8）。
 """
@@ -14,10 +14,15 @@ log 不得出現原始 body、簽名或 secret（00A §3.8）。
 import hashlib
 import hmac
 import string
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from time import monotonic
 
+from pydantic import ValidationError
+
+from training_kb.clock import parse_iso
 from training_kb.errors import IngressError, PermanentError
+from training_kb.models import Ticket, TicketSource
 from training_kb.operations import Acceptance
 from training_kb.pipelines.common import JSONValue
 
@@ -71,7 +76,75 @@ def assert_time_left(deadline: float, *, step: str) -> None:
         raise TimeoutError(f"{step} 時已超過 webhook 的八秒整體期限")
 
 
-# --- 3. 接線點（Phase 30 stub → Phase 32 接受端 → Phase 37 完整三層）----------
+# --- 3. 正規化（Phase 31）-----------------------------------------------------
+
+TICKET_REQUIRED = ("id", "source", "text", "author", "ts", "project_id")
+ANALYSIS_FIELDS = ("cluster_id", "feature_ids", "embedding")
+"""接入不得預填的分析欄位：分群、Feature 命中與向量都由後面的 pipeline 補。"""
+
+
+def missing_nonempty_strings(
+    payload: Mapping[str, object], keys: Sequence[str]
+) -> tuple[str, ...]:
+    """回「缺少或不是非空字串」的欄位名 tuple，直接當 `IngressError.fields`。
+
+    「一次回報所有缺欄位」只有這一份實作（00A §6.8）。全空白字串算缺值（D23 覆寫 D09）；
+    這裡只判斷合不合法，**不 strip 之後改寫來源給的值**。
+    """
+    return tuple(
+        key for key in keys
+        if not isinstance(payload.get(key), str) or not str(payload[key]).strip()
+    )
+
+
+def _parsed_ts(payload: Mapping[str, object]) -> datetime:
+    """`ts` 必須是帶時區的 ISO-8601 **整秒**（00A §3.5）；naive、格式錯與帶微秒一律拒絕。"""
+    try:
+        parsed = parse_iso(str(payload["ts"]))
+    except ValueError as error:
+        raise IngressError("ts 必須是 aware 的 UTC ISO-8601 時間", ("ts",)) from error
+    if parsed.microsecond:  # 靜默截斷會讓以時間入鍵的計算悄悄改變答案
+        raise IngressError("ts 必須是整秒", ("ts",))
+    return parsed
+
+
+def _invalid_fields(error: ValidationError) -> tuple[str, ...]:
+    """把 pydantic 的 `loc` 收斂成欄位名。
+
+    這兩個函式是唯一的 canonical model 邊界，接入不合法時只能吐 `IngressError`；
+    模型層的拒絕（例如 `id` 帶了 `#` 前綴）若原樣往外丟 `ValidationError`，
+    webhook handler 只認 `IngressError`／`TimeoutError`，會變成 500 而不是明確拒絕。
+    """
+    return tuple(str(item["loc"][0]) for item in error.errors() if item["loc"])
+
+
+def validate_ticket(payload: Mapping[str, object]) -> Ticket:
+    """候選欄位 → canonical `Ticket`；不合法時 `IngressError.fields` 列出問題欄位。
+
+    純函式：**不收 `deadline`**、不呼叫 `monotonic()`、不寫任何 item。正規化只做欄位檢查，
+    沒有網路或 IO，期限由呼叫端（P32 的 `normalize_then_accept`）先 `assert_time_left` 管。
+    順序固定：必填 → 分析欄位未預填 → enum 合法 → `ts` 可解析。
+    """
+    missing = missing_nonempty_strings(payload, TICKET_REQUIRED)
+    if missing:
+        raise IngressError("Ticket 必填欄位不完整", missing)
+    prefilled = tuple(key for key in ANALYSIS_FIELDS if key in payload)
+    if prefilled:
+        raise IngressError("接入不得預填分析欄位", prefilled)
+    if payload["source"] not in set(TicketSource):
+        raise IngressError("Ticket source 不合法", ("source",))
+    try:
+        return Ticket(
+            id=str(payload["id"]), source=TicketSource(str(payload["source"])),
+            text=str(payload["text"]), author=str(payload["author"]),
+            ts=_parsed_ts(payload), project_id=str(payload["project_id"]),
+            cluster_id=None, feature_ids=[], embedding=None,
+        )
+    except ValidationError as error:
+        raise IngressError("Ticket 欄位值不合法", _invalid_fields(error)) from error
+
+
+# --- 4. 接線點（Phase 30 stub → Phase 32 接受端 → Phase 37 完整三層）----------
 
 
 def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
