@@ -32,6 +32,11 @@ operations.load(operation_id)
 而 O2 gate 尚未通過**：兩個併發操作仍可能探到同一個空號，那是 gate 未通過的已知後果，
 不是條件寫入就能宣稱解決。本模組只宣稱「給定同一份操作紀錄時版號確定」。
 
+`record_version` 是 write-once（Phase 11 依 Phase 10 review 追加：同值 no-op、換值丟
+`CoordinationError`）。這裡的順序「先 `load`、有 `version_id` 就直接重用、沒有才配號再寫」
+天生相容——重送根本走不到第二次寫入；併發探到**不同**空號時，輸的那一邊會拿到
+`CoordinationError` 而不是靜默覆寫別人的版號。
+
 執行資訊（探到第幾號、基底怎麼推導）一律留在 operation 紀錄，不得寫上 VERSION item 或
 `Tutorial`：十實體模型是 strict，沒有第三類屬性（00A §3.6）。
 """

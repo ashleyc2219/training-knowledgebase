@@ -51,7 +51,13 @@ class FakeRepository:
 
 
 class FakeOperations:
-    """記憶體版 OperationCoordinator，只保存 `version_id` 與寫入次數。"""
+    """記憶體版 OperationCoordinator，只保存 `version_id` 與寫入次數。
+
+    真實的 `record_version` 由 Phase 11 改成 **write-once**（同值 no-op、換值丟
+    `CoordinationError`）。替身刻意維持單純的記錄器、不複製那套語意：`allocate_version`
+    重送時走重用分支、根本不會寫第二次，這件事由 `writes` 的長度斷言把關，重用邏輯的權威
+    驗證則在 `tests/integration/test_allocate_version_retry.py`（用真的 `OperationCoordinator`）。
+    """
 
     def __init__(self) -> None:
         self.records: dict[str, str | None] = {}
