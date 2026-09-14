@@ -194,3 +194,34 @@ def test_named_getters_use_their_own_key_builder(repository) -> None:
     assert repository.get_feature("Prepare") == feature()
     assert repository.get_proc("0123456789abcdef").domain == "github.com"
     assert repository.get_tutorial("missing") is None
+
+
+# --- Phase 06 review 代修項目（由 Phase 07 一併處理；測試放在 Phase 06 的行為所屬檔案）---
+
+
+def test_controlled_overwrite_reports_that_it_did_not_create(repository) -> None:
+    """`put_meta_item` 的回傳值是「**本次是否由我建立**」（00A §6.3）：受控覆寫成功是 `False`。
+
+    回 `True` 會讓 `OPS#`／`SEQ#`／`LEASE#` 的呼叫端誤以為自己是第一個建立者，
+    永久去重的判斷點就失效了。
+    """
+    assert repository.put_meta_item("OPS#op-9", {"status": "accepted"}) is True
+    assert repository.put_meta_item("OPS#op-9", {"status": "done"}, create_only=False) is False
+    item = repository.get_meta_item("OPS#op-9")
+    assert item["_revision"] == 2
+    assert item["status"] == "done"
+
+
+def test_tuple_values_survive_the_decimal_codec(repository) -> None:
+    """Phase 10 的 `OperationRecord.model_output_refs` 是 `tuple`；
+    tuple 內的 float 也要轉 Decimal。"""
+    repository.put_meta_item("OPS#op-10", {"refs": ("a", "b"), "scores": (0.5, 1)})
+    item = repository.get_meta_item("OPS#op-10")
+    assert item["refs"] == ["a", "b"]
+    assert item["scores"] == [0.5, 1]
+
+
+def test_malformed_primary_key_is_a_permanent_error(repository) -> None:
+    """`parse_pk` 的 `ValueError` 不在 00A §4.1 的分類裡，要包成 `PermanentError`。"""
+    with pytest.raises(PermanentError, match="primary key"):
+        repository.put_meta_item("no-prefix", {"status": "accepted"})

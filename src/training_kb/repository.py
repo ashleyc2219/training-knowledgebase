@@ -107,10 +107,14 @@ def _entity_pk(entity: Entity) -> str:
 
 
 def _encode(value: object) -> object:
-    """`float` -> `Decimal(str(value))`；用 `str` 才不會把二進位浮點誤差一起寫進表。"""
+    """`float` -> `Decimal(str(value))`；用 `str` 才不會把二進位浮點誤差一起寫進表。
+
+    序列一併認 `tuple`：Phase 10 的 `OperationRecord.model_output_refs` 是 `tuple[str, ...]`，
+    只認 `list` 的話 tuple 內的 `float` 會直接撞 boto3 的 `Float types are not supported`。
+    """
     if isinstance(value, float):
         return Decimal(str(value))
-    if isinstance(value, list):
+    if isinstance(value, list | tuple):
         return [_encode(item) for item in value]
     if isinstance(value, dict):
         return {key: _encode(item) for key, item in value.items()}
@@ -165,7 +169,8 @@ class Repository:
         """
         pk = _entity_pk(entity)
         payload = {k: _encode(v) for k, v in entity.model_dump(mode="json").items()}
-        if not self._put_item(pk, payload, create_only=create_only):
+        created = self._put_item(pk, payload, create_only=create_only)
+        if create_only and not created:
             raise CoordinationError(f"metadata already exists or changed since read: {pk}")
 
     def put_meta_item(self, pk: str, attributes: Mapping[str, DynamoValue], *,
@@ -183,8 +188,11 @@ class Repository:
         return self._put_item(pk, payload, create_only=create_only)
 
     def _put_item(self, pk: str, payload: Mapping[str, object], *, create_only: bool) -> bool:
-        """條件寫入的唯一實作。回 `True` 表示這次是新建，`False` 表示 `create_only` 撞鍵。
+        """條件寫入的唯一實作。回傳值是「**本次是否由我建立**」（00A §6.3）。
 
+        新建成功回 `True`；受控覆寫（`create_only=False` 且 item 已存在）成功回 `False`——
+        回 `True` 會讓 `OPS#`／`SEQ#`／`LEASE#` 的呼叫端誤以為自己是第一個建立者，
+        永久去重的判斷點就失效了。`create_only=True` 撞鍵同樣回 `False`（沒有寫入）。
         `create_only=False` 仍然帶條件（`#revision = :current`），而且把 `_revision` 往上加，
         不會重設成 1 讓舊的持有者誤以為自己是最新；期間被改過就丟 `CoordinationError`。
         """
@@ -198,8 +206,12 @@ class Repository:
                 "ExpressionAttributeNames": {"#revision": "_revision"},
                 "ExpressionAttributeValues": {":current": current},
             }
+        try:
+            kind = parse_pk(pk)[0]
+        except ValueError as error:
+            raise PermanentError(f"invalid physical primary key: {pk!r}") from error
         arguments["Item"] = {**payload, "PK": pk, "SK": META,
-                             "entity": parse_pk(pk)[0], "_revision": revision}
+                             "entity": kind, "_revision": revision}
         try:
             self._table.put_item(**arguments)
         except ClientError as error:
@@ -208,8 +220,11 @@ class Repository:
             if current is not None:
                 raise CoordinationError(
                     f"metadata changed since read: {pk}") from error
+            if not create_only:
+                raise CoordinationError(
+                    f"metadata created by someone else since read: {pk}") from error
             return False
-        return True
+        return current is None
 
     def _revision_or_none(self, pk: str) -> int | None:
         """讀目前的 `_revision`；item 不存在回 `None`。`revision_of` 與受控覆寫共用它。"""
