@@ -5,12 +5,13 @@ from typing import Any
 
 import pytest
 
+import training_kb.writing as writing
 from training_kb.errors import ContentError, PermanentError, TransientError
 from training_kb.writing.client import (
     BedrockWriter,
     CallTrace,
-    _generate_with_correction,
     bedrock_config,
+    generate_validated_json,
     inference_config,
 )
 from training_kb.writing.schemas import SCHEMAS, GapNaming, StepRewrite, TutorialDraft
@@ -116,16 +117,16 @@ HIT_SET_ONLY_3 = step_rewrite_validator(allowed_steps=frozenset({3}),
 
 def test_first_valid_output_is_returned_without_a_correction(fake_writer) -> None:
     fake_writer.replies.append(GOOD_STEP_3)
-    result = _generate_with_correction(fake_writer, "s", "u", StepRewrite, HIT_SET_ONLY_3,
-                                       operation_id="op-release-r_42", node="prepare_update")
+    result = generate_validated_json(fake_writer, "s", "u", StepRewrite, HIT_SET_ONLY_3,
+                                   operation_id="op-release-r_42", node="prepare_update")
     assert result == GOOD_STEP_3
     assert fake_writer.request_attempts == 1
 
 
 def test_business_invalid_output_is_fixed_by_exactly_one_correction(fake_writer) -> None:
     fake_writer.replies.extend([BAD_STEP_2, GOOD_STEP_3])
-    result = _generate_with_correction(fake_writer, "s", "u", StepRewrite, HIT_SET_ONLY_3,
-                                       operation_id="op-release-r_42", node="prepare_update")
+    result = generate_validated_json(fake_writer, "s", "u", StepRewrite, HIT_SET_ONLY_3,
+                                   operation_id="op-release-r_42", node="prepare_update")
     correction = fake_writer.calls[1]["user"]
     assert result == GOOD_STEP_3 and fake_writer.request_attempts == 2
     # 修正 prompt 只帶代碼與欄位路徑，不回印模型輸出。
@@ -138,8 +139,8 @@ def test_business_invalid_output_gets_only_one_correction(fake_writer) -> None:
     validate = step_rewrite_validator(allowed_steps=frozenset({3}),
                                       allowed_features=frozenset({"Prepare"}))
     with pytest.raises(PermanentError) as error:
-        _generate_with_correction(fake_writer, "s", "u", StepRewrite, validate,
-                                  operation_id="op-release-r_42", node="prepare_update")
+        generate_validated_json(fake_writer, "s", "u", StepRewrite, validate,
+                                operation_id="op-release-r_42", node="prepare_update")
     assert fake_writer.request_attempts == 2
     assert "step_number_not_in_hit_set" in str(error.value)
     assert "prepare-meeting" not in str(error.value)
@@ -153,8 +154,8 @@ def test_transient_error_is_not_counted_as_a_correction(fake_writer, monkeypatch
 
     monkeypatch.setattr(fake_writer, "generate_json", throttled)
     with pytest.raises(TransientError):
-        _generate_with_correction(fake_writer, "s", "u", GapNaming, lambda payload: None,
-                                  operation_id="op-ticket-t_881", node="name_gap")
+        generate_validated_json(fake_writer, "s", "u", GapNaming, lambda payload: None,
+                                operation_id="op-ticket-t_881", node="name_gap")
     assert fake_writer.request_attempts == 1
 
 
@@ -196,7 +197,7 @@ def test_storage_retry_reuses_recorded_output(fake_writer) -> None:
 
     op = "op-ticket-t_881"
     fake_writer.replies.append({"gap": "找不到會前摘要入口", "feature_id": "Prepare"})
-    output = _generate_with_correction(
+    output = generate_validated_json(
         fake_writer, "s", "u", GapNaming,
         gap_naming_validator(known_feature_ids=frozenset({"Prepare"})),
         operation_id=op, node="name_gap")
@@ -213,3 +214,13 @@ def test_storage_retry_reuses_recorded_output(fake_writer) -> None:
     save_gap(reloaded)
     assert reloaded == output
     assert fake_writer.request_attempts == 1      # 重用既有輸出，沒有第二次模型呼叫
+
+
+def test_the_correction_loop_is_the_packages_public_entry_point() -> None:
+    """00A §6.5：呼叫端呼叫 `generate_validated_json` 一次，不自己重試。
+
+    P39–P51 有 12 個 Phase 要用它，所以它必須是 `writing` 套件 re-export 的公開名稱，
+    不能只留在 `client.py` 裡當 module-private。
+    """
+    assert "generate_validated_json" in writing.__all__
+    assert writing.generate_validated_json is generate_validated_json

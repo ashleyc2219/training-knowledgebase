@@ -156,14 +156,16 @@ CORRECTION_TEMPLATE = ("{user}\n<validation_error>{code}</validation_error>\n"
                        "只修正上述違規，其餘逐字保留。")
 
 
-def _generate_with_correction(writer: Writer, system: str, user: str,
-                              schema: Mapping[str, Any], validate: BusinessValidator, *,
-                              operation_id: str, node: str) -> dict[str, Any]:
+def generate_validated_json(writer: Writer, system: str, user: str,
+                            schema: Mapping[str, Any], validate: BusinessValidator, *,
+                            operation_id: str, node: str) -> dict[str, Any]:
     """schema 合法之後再過業務 validator；不合法就**只**修正一次，仍不合法即確定失敗。
 
     這是固定演算法而不是迴圈：first + second 共兩次 request，第三次不存在（設計 §14.3）。
-    module-private 是刻意的——呼叫端只依賴 `Writer.generate_json` 與自己的 validator，
-    不跨模組 import 這支函式，也不自己重試（00A §6.5）。
+
+    **這是唯一合法的修正迴圈入口**（00A §6.5）：需要業務驗證的節點呼叫它**一次**，
+    不自己包重試、也不自己再組一次修正 prompt。公開它是為了讓 P39–P51 有一份共用實作，
+    不是為了讓呼叫端拆開來重排——「最多一次修正」這個上限只在這支函式裡成立。
 
     `TransientError`（節流、逾時、服務故障）**不進** `except`：它不是業務問題，重送有機會
     成功，交給 Phase 29 的單層 ASL Task Retry，也因此不消耗這一次修正預算。

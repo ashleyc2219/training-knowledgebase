@@ -14,8 +14,8 @@ from training_kb.errors import ContentError, PermanentError
 from training_kb.writing.client import (
     BedrockWriter,
     CallTrace,
-    _generate_with_correction,
     build_bedrock_client,
+    generate_validated_json,
     inference_config,
 )
 from training_kb.writing.schemas import GapNaming, TutorialDraft
@@ -36,7 +36,7 @@ def make_writer(trace: CallTrace) -> BedrockWriter:
 
 def test_business_valid_real_output_costs_one_attempt() -> None:
     trace = CallTrace()
-    result = _generate_with_correction(
+    result = generate_validated_json(
         make_writer(trace), SYSTEM, USER, GapNaming,
         gap_naming_validator(known_feature_ids=frozenset({"Prepare"})),
         operation_id="smoke-validation-ok", node="name_gap")
@@ -52,8 +52,8 @@ def test_business_invalid_real_output_stops_after_two_attempts() -> None:
         raise ContentError("feature_id_not_found: feature_id")
 
     with pytest.raises(PermanentError) as error:
-        _generate_with_correction(make_writer(trace), SYSTEM, USER, GapNaming, always_reject,
-                                  operation_id="smoke-validation-bad", node="name_gap")
+        generate_validated_json(make_writer(trace), SYSTEM, USER, GapNaming, always_reject,
+                                operation_id="smoke-validation-bad", node="name_gap")
     rows = json.loads(trace.to_json())
     assert trace.count(operation_id="smoke-validation-bad") == 2
     assert [row["attempt"] for row in rows] == [1, 2]

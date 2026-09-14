@@ -12,7 +12,7 @@
 
 - 一次 Task 執行內，同一個節點的生成 request 總嘗試最多 2 次：原始輸出 1 次、業務修正 1 次。第三次 request 出現即停止。
 - schema 合法仍必須經業務 validator；validator 使用呼叫當下的 Feature、原步驟、命中集合或核定類別 context。
-- 只有單一層管理同一種 retry：SDK 自動 retry 關閉、`_generate_with_correction` 不重試服務故障、Step Functions Task Retry 是唯一的暫時錯誤重試層。
+- 只有單一層管理同一種 retry：SDK 自動 retry 關閉、`generate_validated_json` 不重試服務故障、Step Functions Task Retry 是唯一的暫時錯誤重試層。
 - 儲存或網路寫入 retry 必須重用 O2 已保存的合法模型輸出（`OperationRecord.model_output_refs`），不再次呼叫模型。
 - Claude 生成 request 固定帶 `maxTokens`、逾時與 `temperature=0.1`，不同時設 `topP`；Titan embedding 仍不接受生成參數。
 - 錯誤訊息與 `CallTrace` 只寫 validator 代碼與欄位名，不回印模型輸出、prompt 原文、回饋留言或 secret。
@@ -96,9 +96,9 @@ ContentError / PermanentError / TransientError                                 #
 ```python
 BusinessValidator = Callable[[dict[str, Any]], None]
 
-def _generate_with_correction(writer: "Writer", system: str, user: str,
-                              schema: Mapping[str, Any], validate: BusinessValidator,
-                              *, operation_id: str, node: str) -> dict[str, Any]: ...
+def generate_validated_json(writer: "Writer", system: str, user: str,
+                            schema: Mapping[str, Any], validate: BusinessValidator,
+                            *, operation_id: str, node: str) -> dict[str, Any]: ...
 
 def gap_naming_validator(*, known_feature_ids: frozenset[str]) -> BusinessValidator: ...
 def step_rewrite_validator(*, allowed_steps: frozenset[int],
@@ -108,7 +108,7 @@ def inference_config(schema: Mapping[str, Any]) -> dict[str, object]: ...
 
 `bedrock_config()` **不是本 Phase 產出**：它在 [Phase 15](15-Phase15-Writing介面與呼叫追蹤.md) 的 `writing/client.py` 已經定義（`connect_timeout=2`、`read_timeout=30`、`retries={"total_max_attempts": 1}`），本 Phase 只消費它、用測試把那三個值鎖住，不再寫第二份。
 
-`_generate_with_correction` 前面的底線代表它是 module-private：後續呼叫端仍只依賴 `Writer.generate_json` 與自己的 validator，不跨模組 import 它。回傳值是**同時**通過 schema 與指定 business validator 的 dict，可交 O2 保存；兩次後仍不合法丟 `PermanentError`，訊息只列 validator 代碼與不合法欄位；`TransientError` 不被攔截，直接往上交給 Phase 29 的單層 Task Retry。
+`generate_validated_json` 是**公開**的修正迴圈入口（由 `writing/__init__.py` re-export）：P39–P51 需要業務驗證的節點一律 import 它、**呼叫一次**，不自己重試、也不自己再組一次修正 prompt——「最多一次修正」這個上限只在這支函式裡成立，複製一份等於把上限複製壞。回傳值是**同時**通過 schema 與指定 business validator 的 dict，可交 O2 保存；兩次後仍不合法丟 `PermanentError`，訊息只列 validator 代碼與不合法欄位；`TransientError` 不被攔截，直接往上交給 Phase 29 的單層 Task Retry。
 
 八個 schema 的業務檢查接入點如下。`writing/validators.py` 收錄可在本 Phase 就固定契約的 factory，其餘由對應 Phase 依同一個 `BusinessValidator` 形狀提供；同一項檢查不得兩份並存，消費 Phase 的 private helper（例如 Phase 39 的 `_validated_naming`）應包裝本 Phase 的 factory，而不是另寫一份：
 
@@ -131,7 +131,7 @@ def inference_config(schema: Mapping[str, Any]) -> dict[str, object]: ...
 botocore Config(retries={"total_max_attempts": 1})  -> SDK 完全不重試
         |
         v
-_generate_with_correction: attempt 1 --業務不合法--> attempt 2 --仍不合法--> PermanentError
+generate_validated_json: attempt 1 --業務不合法--> attempt 2 --仍不合法--> PermanentError
         |  TransientError（服務故障；不算一次修正，也不在這裡重試）
         v
 ASL Retry ["TransientError"] IntervalSeconds 1 / MaxAttempts 2 / BackoffRate 2
@@ -249,7 +249,7 @@ def test_business_invalid_output_gets_only_one_correction(fake_writer):
     validate = step_rewrite_validator(allowed_steps=frozenset({3}),
                                       allowed_features=frozenset({"Prepare"}))
     with pytest.raises(PermanentError) as error:
-        _generate_with_correction(fake_writer, "s", "u", StepRewrite, validate,
+        generate_validated_json(fake_writer, "s", "u", StepRewrite, validate,
                                   operation_id="op-release-r_42", node="prepare_update")
     assert fake_writer.request_attempts == 2
     assert "step_number_not_in_hit_set" in str(error.value)
@@ -263,7 +263,7 @@ def test_transient_error_is_not_counted_as_a_correction(fake_writer, monkeypatch
 
     monkeypatch.setattr(fake_writer, "generate_json", throttled)
     with pytest.raises(TransientError):
-        _generate_with_correction(fake_writer, "s", "u", GapNaming, lambda payload: None,
+        generate_validated_json(fake_writer, "s", "u", GapNaming, lambda payload: None,
                                   operation_id="op-ticket-t_881", node="name_gap")
     assert fake_writer.request_attempts == 1
 ```
@@ -274,12 +274,12 @@ def test_transient_error_is_not_counted_as_a_correction(fake_writer, monkeypatch
 uv run pytest tests/unit/test_writing_validation.py -q
 ```
 
-預期：FAIL，訊號包含 `cannot import name '_generate_with_correction'`；未限制迴圈的實作也會在 `request_attempts == 2` 這個斷言失敗（`replies` 用完時 `RecordingWriter` 會直接丟 `PermanentError`，第三次請求無所遁形）。
+預期：FAIL，訊號包含 `cannot import name 'generate_validated_json'`；未限制迴圈的實作也會在 `request_attempts == 2` 這個斷言失敗（`replies` 用完時 `RecordingWriter` 會直接丟 `PermanentError`，第三次請求無所遁形）。
 
 - [x] **Step 3：建立最小實作**
 
 ```python
-def _generate_with_correction(writer, system, user, schema, validate, *, operation_id, node):
+def generate_validated_json(writer, system, user, schema, validate, *, operation_id, node):
     first = writer.generate_json(system, user, schema, operation_id=operation_id, node=node)
     try:
         validate(first)
@@ -347,7 +347,7 @@ def test_storage_retry_reuses_recorded_output(coordinator, fake_writer, reposito
 
     op = "op-ticket-t_881"
     fake_writer.replies.append({"gap": "找不到會前摘要入口", "feature_id": "Prepare"})
-    output = _generate_with_correction(
+    output = generate_validated_json(
         fake_writer, "s", "u", GapNaming,
         gap_naming_validator(known_feature_ids=frozenset({"Prepare"})),
         operation_id=op, node="name_gap")
@@ -369,7 +369,7 @@ def test_storage_retry_reuses_recorded_output(coordinator, fake_writer, reposito
 uv run pytest tests/unit/test_writing_validation.py -q
 ```
 
-預期：FAIL，訊號包含 `cannot import name 'inference_config'`。把 `save_gap` 的 retry 分支故意改成重新呼叫 `_generate_with_correction`，第二個測試會在 `count(...) == 1` 失敗；確認這個訊號後再改回讀 `model_output_refs`。
+預期：FAIL，訊號包含 `cannot import name 'inference_config'`。把 `save_gap` 的 retry 分支故意改成重新呼叫 `generate_validated_json`，第二個測試會在 `count(...) == 1` 失敗；確認這個訊號後再改回讀 `model_output_refs`。
 
 - [x] **Step 3：建立最小實作**
 
@@ -459,7 +459,7 @@ git commit -m "feat(writing): 固定生成參數與輸出重用"
 
 ## 10. 完成清單
 
-- [x] correction loop（`_generate_with_correction`）是 module-private，沒有被跨模組 import。
+- [x] correction loop（`generate_validated_json`）只有這一份實作，呼叫端一律 import 它、呼叫一次，沒有人自己再寫一遍或自己重試。
 - [x] 八個 schema 都有 context-aware 業務檢查或第 5 節表格指定的接入點，且沒有兩份並存。
 - [x] 第一次就合法 1 次、修正成功 2 次、修正失敗 2 次，第三次 request 不存在。
 - [x] `TransientError` 不被 correction 攔截，交 Phase 29 的單層 Task Retry。

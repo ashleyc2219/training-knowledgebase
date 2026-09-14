@@ -5,7 +5,7 @@ schema 只看形狀（Phase 17）；「這個 `feature_id` 現在真的存在嗎
 回一個 `BusinessValidator`（合法就安靜回 `None`，不合法丟 `ContentError`）。
 
 錯誤訊息固定是 `<代碼>: <欄位路徑>`，**不含模型輸出、prompt 原文或使用者文字**：
-`client._generate_with_correction` 會把這個字串原樣放進修正 prompt 的
+`client.generate_validated_json` 會把這個字串原樣放進修正 prompt 的
 `<validation_error>`，也會出現在 log 與 `PermanentError` 裡（00A §3.8）。
 
 八個 schema 的業務檢查只有一份，接入點固定如下（Phase 18 文件 §5；「否」＝不走 correction）：
