@@ -10,8 +10,10 @@ AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**
 1. 型別別名與保留屬性
 2. 實體 → PK 的分派
 3. Decimal codec 與 `item_to_model`（DynamoDB 只收 `Decimal`，不收 `float`）
-4. `Repository`：metadata CRUD、`revision_of`、四個具名 getter，以及不走模型的
-   `put_meta_item`／`get_meta_item`（服務 `OPS#`／`CONFIG#`／`SEQ#`／`LEASE#`）
+4. `Repository`：metadata CRUD、`revision_of`、四個具名 getter，不走模型的
+   `put_meta_item`／`get_meta_item`（服務 `OPS#`／`CONFIG#`／`SEQ#`／`LEASE#`），
+   再往下是 Phase 07 的 S3 物件（`put_object`／`get_object`／`object_exists`）與
+   關係邊（`put_edge`／`list_edges`，共用私有的 `_paged`）
 """
 
 from collections.abc import Callable, Mapping
