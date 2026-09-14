@@ -27,8 +27,9 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from training_kb.content import resolve_successor
-from training_kb.keys import step_pk
+from training_kb.content import resolve_successor, retire_tutorial
+from training_kb.errors import PermanentError, TransientError
+from training_kb.keys import META, step_pk, tutorial_pk
 from training_kb.models import (
     StepType,
     Tutorial,
@@ -41,6 +42,7 @@ from training_kb.repository import DynamoValue, Repository
 NOW = datetime(2026, 9, 14, 9, 0, tzinfo=UTC)
 SLUG = "meeting-summary"
 SUCCESSOR = "prepare-meeting"
+OTHER_SUCCESSOR = "later-guide"
 REASON = "release:r_88"
 MARKDOWN_KEY = f"tutorials/{SLUG}/v2.md"
 MARKDOWN = "# 會議摘要\n\n## Steps\n\n1. (type=read, feature=Summary) 打開摘要頁。\n"
@@ -67,6 +69,9 @@ class FakeTable:
     def __init__(self) -> None:
         self.items: dict[tuple[str, str], dict[str, Any]] = {}
         self.writes: list[str] = []
+        self.bump_before_update: str | None = None
+        """插隊模擬：在 `update_item` 真的比對條件之前，先把這個 PK 的 `_revision` 加一，
+        等於「別人在我讀完 revision 之後、寫進去之前改了這一篇」。"""
 
     def put_item(self, **arguments: Any) -> dict[str, Any]:
         item = dict(arguments["Item"])
@@ -85,6 +90,8 @@ class FakeTable:
     def update_item(self, **arguments: Any) -> dict[str, Any]:
         key = arguments["Key"]
         item = self.items.get((str(key["PK"]), str(key["SK"])))
+        if item is not None and self.bump_before_update == str(key["PK"]):
+            item["_revision"] = int(item["_revision"]) + 1
         names: Mapping[str, str] = arguments["ExpressionAttributeNames"]
         values: Mapping[str, Any] = arguments["ExpressionAttributeValues"]
         field, operator, placeholder = str(arguments["ConditionExpression"]).split(" ")
@@ -173,6 +180,7 @@ def _seed(repository: Repository) -> None:
         _tutorial("cycles-back", current="cycles-back@v1", successor=SLUG),
         _tutorial("loop-b", current="loop-b@v1", successor="loop-c"),
         _tutorial("loop-c", current="loop-c@v1", successor="loop-b"),
+        _tutorial(OTHER_SUCCESSOR, current=f"{OTHER_SUCCESSOR}@v1"),
     ):
         repository.put_meta(tutorial)
     repository.put_meta(_version(SLUG, 1, supersedes=None, published_at=NOW))
@@ -239,3 +247,98 @@ def test_resolve_successor_rejects_three_node_cycle(repo: RecordingRepository) -
 def test_resolve_successor_of_none_is_none_not_an_error(repo: RecordingRepository) -> None:
     """沒有後繼不是錯誤（F19）：回 `None`，不丟例外。"""
     assert resolve_successor(SLUG, None, repository=repo) is None
+
+
+# --- Task 2：退役保留歷史且不被後繼阻擋 -------------------------------------
+
+
+def test_retire_completes_even_when_successor_is_invalid(repo: RecordingRepository) -> None:
+    """逐字取自 Phase 26 §7 Task 2 Step 1：後繼無效不能阻擋退役，歷史一個 byte 都不准動。"""
+    before = snapshot_versions(repo, SLUG)
+    result = retire_tutorial(
+        SLUG, reason=REASON, successor="not-exists",
+        repository=repo, now=NOW,
+    )
+    assert result.status == TutorialStatus.RETIRED
+    assert result.successor is None
+    assert result.current_version == f"{SLUG}@v2"
+    assert snapshot_versions(repo, SLUG) == before
+    assert repo.objects[MARKDOWN_KEY] == before.markdown
+    assert repo.versions_written == []
+
+
+def test_retire_writes_a_valid_successor(repo: RecordingRepository) -> None:
+    result = retire_tutorial(SLUG, reason=REASON, successor=SUCCESSOR,
+                             repository=repo, now=NOW)
+    assert (result.status, result.successor) == (TutorialStatus.RETIRED, SUCCESSOR)
+    assert repo.update_calls == [(tutorial_pk(SLUG), {"status": "retired",
+                                                      "successor": SUCCESSOR})]
+
+
+def test_retire_only_touches_status_and_successor(repo: RecordingRepository) -> None:
+    """`TUTORIAL` item 只准多出 `status`／`successor`／`_revision` 的變動（D-40）。
+
+    特別擋掉 `retired_at`／`retired_reason`：多一個屬性，下一次 `get_meta` 就會在嚴格模型
+    上炸掉，而且是到那時候才炸——所以在這裡就比對整份屬性名集合。
+    """
+    key = (tutorial_pk(SLUG), META)
+    before = dict(repo.raw_items()[key])
+    retire_tutorial(SLUG, reason=REASON, successor=SUCCESSOR, repository=repo, now=NOW)
+    after = dict(repo.raw_items()[key])
+    changed = {"status", "successor", "_revision"}
+    assert set(after) == set(before)
+    assert {k: v for k, v in after.items() if k not in changed} == \
+           {k: v for k, v in before.items() if k not in changed}
+    assert after["_revision"] == before["_revision"] + 1
+
+
+def test_retiring_twice_writes_nothing_the_second_time(repo: RecordingRepository) -> None:
+    """冪等的可觀察定義：第二次**零次** `update_meta`，回傳與第一次相同。"""
+    first = retire_tutorial(SLUG, reason=REASON, successor=SUCCESSOR, repository=repo, now=NOW)
+    calls = len(repo.update_calls)
+    revision = repo.revision_of(tutorial_pk(SLUG))
+    second = retire_tutorial(SLUG, reason=REASON, successor=SUCCESSOR, repository=repo, now=NOW)
+    assert second == first
+    assert len(repo.update_calls) == calls
+    assert repo.revision_of(tutorial_pk(SLUG)) == revision
+
+
+@pytest.mark.parametrize("later", [None, OTHER_SUCCESSOR])
+def test_second_retire_never_overwrites_an_existing_successor(
+        repo: RecordingRepository, later: str | None) -> None:
+    """改後繼是維護者的另一次明確決定，不是再退役一次的副作用。"""
+    retire_tutorial(SLUG, reason=REASON, successor=SUCCESSOR, repository=repo, now=NOW)
+    result = retire_tutorial(SLUG, reason=REASON, successor=later, repository=repo, now=NOW)
+    assert result.successor == SUCCESSOR
+
+
+def test_retire_rejects_blank_reason(repo: RecordingRepository) -> None:
+    with pytest.raises(PermanentError, match="原因"):
+        retire_tutorial(SLUG, reason=" ", successor=None, repository=repo, now=NOW)
+    assert repo.update_calls == []
+
+
+def test_retire_rejects_naive_now(repo: RecordingRepository) -> None:
+    """時間一律 aware UTC；`to_iso` 在寫入之前就擋掉，不會留下半套退役。"""
+    with pytest.raises(ValueError, match="timezone"):
+        retire_tutorial(SLUG, reason=REASON, successor=None, repository=repo,
+                        now=datetime(2026, 9, 14, 9, 0))
+    assert repo.update_calls == []
+
+
+def test_retire_rejects_unknown_slug(repo: RecordingRepository) -> None:
+    with pytest.raises(PermanentError, match="找不到教學"):
+        retire_tutorial("no-such-tutorial", reason=REASON, successor=None,
+                        repository=repo, now=NOW)
+
+
+def test_retire_turns_a_stale_revision_into_a_retryable_error(
+        repo: RecordingRepository) -> None:
+    """有人在讀 revision 與寫入之間插隊：轉成可重試錯誤，不靜默覆蓋對方的修改。"""
+    repo.raw_items()  # 先讓種子落地，再打開插隊開關
+    repo._table.bump_before_update = tutorial_pk(SLUG)
+    with pytest.raises(TransientError, match="有人同時改過"):
+        retire_tutorial(SLUG, reason=REASON, successor=SUCCESSOR, repository=repo, now=NOW)
+    assert repo.get_tutorial(SLUG) is not None
+    tutorial = repo.get_tutorial(SLUG)
+    assert tutorial is not None and tutorial.status == TutorialStatus.ACTIVE

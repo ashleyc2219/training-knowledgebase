@@ -46,21 +46,38 @@ import difflib
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from pydantic import ValidationError
 
-from training_kb.errors import ContentError, CoordinationError, ObjectAlreadyExists
-from training_kb.keys import edge_sk, feature_pk, parse_pk, rule_pk, step_pk, version_pk
+from training_kb.clock import to_iso
+from training_kb.errors import (
+    ContentError,
+    CoordinationError,
+    ObjectAlreadyExists,
+    PermanentError,
+    TransientError,
+)
+from training_kb.keys import (
+    edge_sk,
+    feature_pk,
+    parse_pk,
+    rule_pk,
+    step_pk,
+    tutorial_pk,
+    version_pk,
+)
 from training_kb.models import (
     Feature,
     StepDraft,
     StepType,
+    Tutorial,
     TutorialContent,
     TutorialStatus,
     TutorialVersion,
 )
 from training_kb.operations import OperationCoordinator
-from training_kb.repository import Repository, item_to_model
+from training_kb.repository import DynamoValue, Repository, item_to_model
 
 # --- 1. 版本 ID 編碼 ---------------------------------------------------------
 
@@ -870,3 +887,64 @@ def resolve_successor(slug: str, successor: str | None, *,
             return None
         cursor = following.successor
     return successor
+
+
+def retire_tutorial(
+    slug: str,
+    *,
+    reason: str,
+    successor: str | None,
+    repository: Repository,
+    now: datetime,
+) -> Tutorial:
+    """把一篇教學標記為 `retired`，**只改 `TUTORIAL` metadata 的兩個欄位**。
+
+    ```text
+    reason 去頭尾後為空 ---------------------> PermanentError（沒有原因不准退役）
+    to_iso(now) --------------------------> naive datetime／帶微秒的在這裡就被擋掉
+    找不到 TUTORIAL ----------------------> PermanentError
+    resolve_successor ---------------------> 合法就是 slug，不合法是 None（不丟例外）
+    status 還不是 retired -----------------> changes["status"] = "retired"
+    successor 目前是空的且新值合法 --------> changes["successor"] = 新值
+    changes 是空的 ------------------------> 零次 update_meta（冪等），原樣回傳
+    ```
+
+    **寫入範圍固定就是這兩個欄位。** `current_version` 不動（讀者仍讀得到最後一個已發布
+    版本）、`VERSION`／`STEP`／S3 `.md`／`.diff`／既有 `FEEDBACK` 與邊完全不碰：設計 §8.1
+    要求退役保留歷史原文與版本，`retired` 是「不再維護」不是「清理」。
+
+    **`successor` 只在目前為空時寫入。** 已經有值時一律保持原值，不論新值是 `None` 還是
+    另一個合法 slug——改後繼是維護者的另一次明確決定，不是再退役一次的副作用。
+
+    **`reason` 與 `now` 只做驗證，不寫進 item。** `Tutorial` 是嚴格模型（00A §3.6、D-40），
+    多塞一個 `retired_at`／`retired_reason` 會讓下一次 `get_meta` 直接 `ValidationError`。
+    實際紀錄由呼叫端（P52 的 `Retire` task）寫進私有的
+    `operations/<operation_id>/retire.json`，它是一個 JSON 陣列，每篇一筆
+    `{"slug", "reason", "retired_at", "successor"}`。
+
+    `update_meta` 的 `expected_revision` 取自 `revision_of`（D-27，owner 是 Phase 06）。
+    revision 不符代表有人在「讀 revision」與「寫入」之間改了這一篇，轉成 `TransientError`
+    交給 ASL 的 Task Retry 重跑整段，不靜默覆蓋別人的修改。
+    """
+    if not reason.strip():
+        raise PermanentError("退役必須帶原因，交給呼叫端寫進 operation 紀錄")
+    to_iso(now)
+    pk = tutorial_pk(slug)
+    tutorial = repository.get_tutorial(slug)
+    if tutorial is None:
+        raise PermanentError(f"找不到教學 {slug}")
+    chosen = resolve_successor(slug, successor, repository=repository)
+    changes: dict[str, DynamoValue] = {}
+    if tutorial.status != TutorialStatus.RETIRED:
+        changes["status"] = TutorialStatus.RETIRED.value
+    if chosen is not None and tutorial.successor is None:
+        changes["successor"] = chosen
+    if changes:
+        try:
+            repository.update_meta(pk, changes, expected_revision=repository.revision_of(pk))
+        except CoordinationError as error:
+            raise TransientError(f"{slug} 在退役寫入前有人同時改過，請重試") from error
+    retired = repository.get_tutorial(slug)
+    if retired is None:
+        raise PermanentError(f"{slug} 在退役寫入後讀不到，停止")
+    return retired
