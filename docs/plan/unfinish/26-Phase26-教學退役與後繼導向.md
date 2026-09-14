@@ -11,12 +11,12 @@
 ## 全域限制
 
 - 唯一主來源是 [Training KB 設計 §8.1、§8.4、§13、§14.1](../../design/training-kb.md)。
-- 前置為 [Phase 25：多篇教學整批發布](./25-Phase25-多篇教學整批發布.md)，未通過時停止；下一階段是 [Phase 27：固定圖譜查詢](./27-Phase27-固定圖譜查詢.md)。
+- 真正的前置是 [Phase 24：單篇教學發布提交](./24-Phase24-單篇教學發布提交.md)（`SiteRenderer`）與 [Phase 06](./06-Phase06-Repository-Metadata與實體讀寫.md)（`revision_of`／`update_meta`）；[Phase 25](./25-Phase25-多篇教學整批發布.md) 與 [Phase 27](./27-Phase27-固定圖譜查詢.md) 與本 Phase 同屬 controller 2026-09-14 的同一波，彼此不互相阻擋（本 Phase 一行都不碰 `publishing.py`／`repository.py`）。
 - 本階段不做：不判斷哪一篇該退役（`kind=removed` 的定位由 [Phase 50](./50-Phase50-Release步驟反查與Safety-Net.md)、觸發由 [Phase 52](./52-Phase52-Release-RETIRE與流程驗收.md) 負責）、不刪除任何版本或 S3 物件、不建立新版本、不做完整 retired 頁樣式與 diff 檢視（[Phase 57](./57-Phase57-S3靜態教學站與回饋下載.md)）、不實作回饋匯入本身（[Phase 42](./42-Phase42-Feedback與View固定匯入.md)）。
 - 資料狀態只使用 `retired`；`obsolete` 只是顯示用語，不得寫進資料。
 - successor **由維護者選定既有 Tutorial**；來源事件（Release payload、模型輸出）不得直接指定後繼。
 - 找不到合法後繼時保持空值，**不能阻擋退役**；也不做連續自動跳轉。
-- O1–O7 gate 狀態：本 Phase 不依賴 O3，也**不宣稱** O3 已通過；退役本身不發布新版本。O1 的 `META` 仍是待確認值，`update_meta` 的鍵沿用 [Phase 05](./05-Phase05-單表鍵與關係邊契約.md) 的決定。
+- O1–O7 gate 狀態：本 Phase 不依賴 O3，也**不宣稱** O3 已通過；退役本身不發布新版本，也**不寫任何 `site/` 物件**——退役頁要真的出現在公開站，仍得經 [Phase 24](./24-Phase24-單篇教學發布提交.md)／[Phase 25](./25-Phase25-多篇教學整批發布.md) 的「私有 staging → 交易 → 逐篇寫 `site/`」機制重寫一次，由 [Phase 52](./52-Phase52-Release-RETIRE與流程驗收.md) 決定何時觸發（O3 仍是 FAIL，controller 2026-09-14 裁決：離線開發照常，真實切點驗證延後）。O1 的 `META` 仍是待確認值，`update_meta` 的鍵沿用 [Phase 05](./05-Phase05-單表鍵與關係邊契約.md) 的決定。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -155,7 +155,7 @@ target.current_version is None（沒有已發布版本，不可公開）-> None
 | `VERSION` / `STEP` / S3 `.md` / `.diff` | **完全不動**，不刪除、不重寫、不產生新版本。 |
 | 既有 `FEEDBACK` 與 `REFERS_TO` 邊 | **完全不動**，仍可被查詢與統計。 |
 
-寫入用 [Phase 06](./06-Phase06-Repository-Metadata與實體讀寫.md) 的 `update_meta` compare-and-swap，`expected_revision` 取自 `revision_of(pk)`；revision 不符代表有人同時改了這篇，轉成可重試的技術錯誤，不靜默覆蓋。
+寫入用 [Phase 06](./06-Phase06-Repository-Metadata與實體讀寫.md) 的 `update_meta` compare-and-swap，`expected_revision` 取自 `revision_of(pk)`；revision 不符代表有人同時改了這篇，不靜默覆蓋。**實際的錯誤轉換是 `CoordinationError` → `TransientError`**：`update_meta` 在條件不成立時丟 `CoordinationError`（Phase 06 的既有行為），本 Phase 把它換成 `TransientError` 交給 [Phase 29](./29-Phase29-三條ASL骨架與失敗路徑.md) 的單層 Task Retry 重跑整段，不自己迴圈重試。
 
 **`reason` 與 `now` 去哪裡：** 兩者都**不寫進 `TUTORIAL` item**。`Tutorial` 只有 [Phase 04](./04-Phase04-十個邏輯實體模型.md) 的七個欄位，多塞一個 `retired_at` 或 `retired_reason` 會讓嚴格模型在下一次 `get_meta` 驗證失敗（00A 的 D-40）。`retire_tutorial` 只負責**驗證**它們（`reason` 去頭尾後不可為空；`now` 交給 `to_iso` 一起擋掉 naive datetime），實際紀錄由呼叫端寫進私有操作紀錄 `operations/<operation_id>/retire.json`：它是一個 **JSON 陣列**（一則 removed Release 可能命中多篇教學，單篇時就是長度 1 的陣列），每個元素固定是 `{"slug": ..., "reason": "release:r_88", "retired_at": "<to_iso(now)>", "successor": ...}`。[Phase 52](./52-Phase52-Release-RETIRE與流程驗收.md) 的 `retire_for_release` 是目前唯一的呼叫端，退役原因的落地由它負責；它的 `successor` 只來自維護者事先放好的 `operations/<operation_id>/successors.json`（`{slug: successor_slug}`，讀不到就是空 dict，對應決策 F54），不由本 Phase 猜。
 
@@ -165,16 +165,20 @@ target.current_version is None（沒有已發布版本，不可公開）-> None
 
 ```text
 <p class="retired">{RETIRED_NOTICE}</p>   <- 固定文字「此教學已退役，內容僅供歷史查閱。」
-<p class="successor"><a href="../prepare-meeting/index.html">改看：準備會議</a></p>   <- successor 非空才輸出
+<p class="successor"><a href="../prepare-meeting/index.html">改看：prepare-meeting</a></p>   <- successor 非空才輸出
 ```
 
-連結是明確可點的提示，不做自動跳轉；`successor` 為空時完全不輸出第二行。所有文字與 slug 一律先 `html.escape`。完整的 retired 頁樣式、版本選擇與 diff 檢視留給 [Phase 57](./57-Phase57-S3靜態教學站與回饋下載.md)。
+連結是明確可點的提示，不做自動跳轉；`successor` 為空時完全不輸出第二行。`status` 還是 `active` 時兩行都不輸出。所有文字與 slug 一律先 `html.escape`（`bare_id` 只擋 `#` 與控制字元，`<` 與 `"` 是放行的，所以 slug 也必須逃脫）。完整的 retired 頁樣式、版本選擇與 diff 檢視留給 [Phase 57](./57-Phase57-S3靜態教學站與回饋下載.md)。
+
+**本計畫選擇（實作時修正）：** 連結文字是**後繼的 slug**，不是它的 `topic`。`render_version_page` 的簽名到 Phase 57 都不變（00A §6.7），它手上只有被退役的那一篇 `Tutorial`；要印出「準備會議」就得在 renderer 裡多讀一次 DynamoDB，而 renderer 不碰儲存層。href 是**瀏覽器層的相對路徑**（版本頁在 `site/tutorials/<slug>/v<n>.html`、後繼索引在 `site/tutorials/<successor>/index.html`，只差一層目錄），不是 S3 key——組 key 的三個 helper 在 `training_kb.publishing`（D-54），而 `site` 一律不 import `publishing`，所以這裡不呼叫它們，也沒有用 `PUBLIC_SITE_PREFIX` 拼字串。
+
+`site.py` 原本的 `RETIRED_PLACEHOLDER`（Phase 24 的佔位名）保留成 `RETIRED_NOTICE` 的**別名**，字面值只存在 `content.py` 一處；守門規則要求不得移除 Phase 24 既有的公開名稱。
 
 ## 7. TDD Tasks
 
 ### Task 1：後繼合法性檢查
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 @pytest.mark.parametrize(
@@ -189,7 +193,7 @@ def test_resolve_successor_accepts_active_published_other(repo):
     assert resolve_successor("meeting-summary", "prepare-meeting", repository=repo) == "prepare-meeting"
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_retire_tutorial.py -q
@@ -197,14 +201,17 @@ uv run pytest tests/unit/test_retire_tutorial.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'resolve_successor'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
-def resolve_successor(slug, successor, *, repository):
+def resolve_successor(slug: str, successor: str | None, *,
+                      repository: Repository) -> str | None:
     if successor is None or successor == slug:
         return None
     target = repository.get_tutorial(successor)
-    if target is None or target.status != "active" or target.current_version is None:
+    if target is None or target.status != TutorialStatus.ACTIVE:
+        return None
+    if target.current_version is None:
         return None
     visited = {slug, successor}
     cursor = target.successor
@@ -212,16 +219,16 @@ def resolve_successor(slug, successor, *, repository):
         if cursor in visited:
             return None
         visited.add(cursor)
-        nxt = repository.get_tutorial(cursor)
-        if nxt is None:
+        following = repository.get_tutorial(cursor)
+        if following is None:
             return None
-        cursor = nxt.successor
+        cursor = following.successor
     return successor
 ```
 
-`target.status != "active"` 用字串比較成立，因為 `TutorialStatus` 是值為小寫字串的 `StrEnum`（[Phase 03](./03-Phase03-識別碼列舉與內容草稿模型.md)）。
+`target.status != "active"` 用字串比較也成立（`TutorialStatus` 是值為小寫字串的 `StrEnum`，[Phase 03](./03-Phase03-識別碼列舉與內容草稿模型.md)），但**實作採 StrEnum 成員 `TutorialStatus.ACTIVE`**：00A §3.3、§6.9 要求消費端一律寫大寫成員名，不散落字面值。
 
-- [ ] **Step 4：補上兩層與三層循環 fixture，跑完整檔案確認綠燈**
+- [x] **Step 4：補上兩層與三層循環 fixture，跑完整檔案確認綠燈**
 
 `cycles-back` 直接指回 `meeting-summary`；另加 `A -> B -> C -> B` 的不含起點環，兩者都必須回 `None`。再加一個 `successor=None` 的案例，確認回 `None` 而不是丟例外。
 
@@ -229,7 +236,7 @@ def resolve_successor(slug, successor, *, repository):
 uv run pytest tests/unit/test_retire_tutorial.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/unit/test_retire_tutorial.py
@@ -238,7 +245,7 @@ git commit -m "feat(content): 驗證退役教學的後繼"
 
 ### Task 2：退役保留歷史且不被後繼阻擋
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_retire_completes_even_when_successor_is_invalid(repo):
@@ -257,7 +264,7 @@ def test_retire_completes_even_when_successor_is_invalid(repo):
 
 `snapshot_versions` 回一個同時可比較、又帶得出 `.markdown` 的小 dataclass；`repo.versions_written` 記的是這次呼叫期間新建的 `VERSION` item，必須是空的。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_retire_tutorial.py -q
@@ -265,10 +272,11 @@ uv run pytest tests/unit/test_retire_tutorial.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'retire_tutorial'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
-def retire_tutorial(slug, *, reason, successor, repository, now):
+def retire_tutorial(slug: str, *, reason: str, successor: str | None,
+                    repository: Repository, now: datetime) -> Tutorial:
     if not reason.strip():
         raise PermanentError("退役必須帶原因，交給呼叫端寫進 operation 紀錄")
     to_iso(now)                       # naive datetime 在這裡就被擋掉，不寫進 item
@@ -277,13 +285,16 @@ def retire_tutorial(slug, *, reason, successor, repository, now):
     if tutorial is None:
         raise PermanentError(f"找不到教學 {slug}")
     chosen = resolve_successor(slug, successor, repository=repository)
-    changes: dict[str, object] = {}
-    if tutorial.status != "retired":
-        changes["status"] = "retired"
+    changes: dict[str, DynamoValue] = {}
+    if tutorial.status != TutorialStatus.RETIRED:
+        changes["status"] = TutorialStatus.RETIRED.value
     if chosen is not None and tutorial.successor is None:
         changes["successor"] = chosen
     if changes:
-        repository.update_meta(pk, changes, expected_revision=repository.revision_of(pk))
+        try:
+            repository.update_meta(pk, changes, expected_revision=repository.revision_of(pk))
+        except CoordinationError as error:
+            raise TransientError(f"{slug} 在退役寫入前有人同時改過，請重試") from error
     retired = repository.get_tutorial(slug)
     if retired is None:
         raise PermanentError(f"{slug} 在退役寫入後讀不到，停止")
@@ -292,15 +303,17 @@ def retire_tutorial(slug, *, reason, successor, repository, now):
 
 `reason` 與 `now` 只做驗證，不進 `TUTORIAL` item；紀錄由呼叫端寫 `operations/<operation_id>/retire.json`（見第 6 節）。`changes` 為空時完全不呼叫 `update_meta`，這就是冪等：連退兩次不會多花一次條件寫入，也不會把 `_revision` 往上推。
 
-- [ ] **Step 4：補上冪等與不覆蓋案例，跑完整檔案確認綠燈**
+寫進 item 的是 `TutorialStatus.RETIRED.value`（純 `str`），不是 enum 實例：`Tutorial.model_dump(mode="json")` 產出的也是 `"retired"`，兩條寫入路徑因此存進表的是同一種型別。
 
-同一篇連退兩次結果相同且第二次 `repo.update_calls` 不增加；第二次帶 `successor=None` 不得把已寫入的合法後繼清成 `None`；第二次帶另一個合法 slug 也不得覆蓋既有值；`reason=" "` 丟 `PermanentError`；`now` 是 naive datetime 時拒絕。
+- [x] **Step 4：補上冪等與不覆蓋案例，跑完整檔案確認綠燈**
+
+同一篇連退兩次結果相同且第二次 `repo.update_calls` 不增加（`_revision` 也不准往上推）；第二次帶 `successor=None` 不得把已寫入的合法後繼清成 `None`；第二次帶另一個合法 slug 也不得覆蓋既有值；`reason=" "` 丟 `PermanentError`；`now` 是 naive datetime 時拒絕（`to_iso` 對 naive 丟的是 `ValueError`、對帶微秒的才丟 `PermanentError`，測試按實際類別斷言）；另加兩個案例：`slug` 不存在丟 `PermanentError`、`revision` 被人插隊改掉時丟 `TransientError` 且 `status` 維持 `active`。
 
 ```bash
 uv run pytest tests/unit/test_retire_tutorial.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py tests/unit/test_retire_tutorial.py
@@ -309,7 +322,9 @@ git commit -m "feat(content): 退役教學並保留歷史"
 
 ### Task 3：拒絕新回饋與退役頁顯示
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
+
+第一個測試在 `tests/integration/test_retired_feedback_rejected.py`，第二個在 `tests/unit/test_retired_page.py`。整合測試的 `repo` 是**本檔自己的 fixture**：把 `tests/integration/conftest.py` 的 `repository`（moto 表＋bucket，owner 是 Phase 08）加上固定種子後回傳，**不改那支 conftest**（00A §3.2）。
 
 ```python
 def test_retired_tutorial_rejects_new_feedback_but_keeps_old(repo):
@@ -330,7 +345,7 @@ def test_retired_page_shows_notice_and_optional_successor(renderer, fixtures):
     assert 'class="successor"' not in renderer.render_version_page(*fixtures.retired(successor=None))
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_retired_page.py tests/integration/test_retired_feedback_rejected.py -q
@@ -338,7 +353,7 @@ uv run pytest tests/unit/test_retired_page.py tests/integration/test_retired_fee
 
 預期：FAIL，訊號包含 `cannot import name 'assert_accepts_feedback'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def assert_accepts_feedback(tutorial: Tutorial) -> None:
@@ -346,18 +361,20 @@ def assert_accepts_feedback(tutorial: Tutorial) -> None:
         raise IngressError("已退役教學不接受新回饋", fields=("tutorial_version",))
 ```
 
-`render_version_page` 在 `tutorial.status == "retired"` 時輸出 `RETIRED_NOTICE` 那一行（引用常數，不在 `site.py` 重抄字面值）；`tutorial.successor` 非空時再輸出一行連結。兩行的文字與 slug 一律先 `html.escape`，`active` 的教學兩行都不輸出。
+`render_version_page` 在 `tutorial.status == TutorialStatus.RETIRED` 時輸出 `RETIRED_NOTICE` 那一行（`from training_kb.content import RETIRED_NOTICE`，不在 `site.py` 重抄字面值）；`tutorial.successor` 非空時再輸出一行連結。兩行的文字與 slug 一律先 `html.escape`，`active` 的教學兩行都不輸出。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+`site.py` 既有的 `RETIRED_PLACEHOLDER` 改成 `RETIRED_NOTICE` 的別名（保留名稱，值同一份），並新增一個模組私有的 `_successor_line(successor)` 與公開常數 `SUCCESSOR_PREFIX = "改看："`；`SiteRenderer` 的三個簽名一個字都沒動。
 
-再補三個案例：`active` 教學呼叫 `assert_accepts_feedback` 什麼都不做；退役後同版 `TutorialView` 仍可寫入（設計 §8.4 只擋回饋）；退役頁全文搜尋不得出現使用者 ID 或回饋原文。
+- [x] **Step 4：跑完整檔案確認綠燈**
+
+再補三個案例：`active` 教學呼叫 `assert_accepts_feedback` 什麼都不做；退役後同版 `TutorialView` 仍可寫入（設計 §8.4 只擋回饋）；退役頁全文搜尋不得出現使用者 ID 或回饋原文。另加三個：後繼連結的 href 逐字是 `../<successor>/index.html` 且頁面沒有絕對網址（沒有自動跳轉的目標）；slug 含 `<`／`"` 時也要逃脫；退役前後 `VERSION`／`STEP`／`FEEDBACK`／S3 全文與全表鍵集合完全相同（人工驗收的自動化版，同時證明沒有新建 `SUCCESSOR` 邊，D22）。
 
 ```bash
 uv run pytest tests/unit/test_retired_page.py -q
 uv run pytest tests/integration/test_retired_feedback_rejected.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/content.py src/training_kb/site.py tests/unit/test_retired_page.py tests/integration/test_retired_feedback_rejected.py
@@ -412,13 +429,13 @@ primary 與相關的分工依 [00B 需求覆蓋對照](./00B-需求覆蓋對照.
 
 ## 11. 完成清單
 
-- [ ] `retire_tutorial`、`resolve_successor`、`assert_accepts_feedback` 簽名符合本文件；`revision_of` 消費自 [Phase 06](./06-Phase06-Repository-Metadata與實體讀寫.md)，本 Phase 沒有另外宣告一份。
-- [ ] 四項後繼檢查（存在、active 且已發布、非自身、不循環）各有獨立測試。
-- [ ] 後繼無效時 `successor=None`，退役仍然完成且不丟例外。
-- [ ] 退役前後 `VERSION`、`STEP`、S3 `.md`／`.diff` 與既有回饋 byte-for-byte 相同。
-- [ ] `TUTORIAL` item 只多了 `status`／`successor`／`_revision` 的變動，沒有 `retired_at`、`retired_reason` 這類新欄位。
-- [ ] 退役後新回饋被拒並指出欄位，既有回饋仍查得到，同版 `TutorialView` 仍可匯入。
-- [ ] 退役頁顯示常數 `RETIRED_NOTICE` 的固定過期說明（Phase 57 直接 import 同一個常數）；有合法後繼才輸出一個可點連結，且無自動跳轉。
-- [ ] 同一篇連退兩次是冪等的：第二次不呼叫 `update_meta`、不覆蓋既有 `successor`，回傳結果與第一次相同。
-- [ ] `REL` Rule 16、17 有直接 assertion；`COL` Rule 2 已標為相關（primary 在 Phase 42）。
-- [ ] 公開頁沒有 `release:<id>`、上游 ID、使用者 ID 或回饋原文。
+- [x] `retire_tutorial`、`resolve_successor`、`assert_accepts_feedback` 簽名符合本文件；`revision_of` 消費自 [Phase 06](./06-Phase06-Repository-Metadata與實體讀寫.md)，本 Phase 沒有另外宣告一份。
+- [x] 四項後繼檢查（存在、active 且已發布、非自身、不循環）各有獨立測試。
+- [x] 後繼無效時 `successor=None`，退役仍然完成且不丟例外。
+- [x] 退役前後 `VERSION`、`STEP`、S3 `.md`／`.diff` 與既有回饋 byte-for-byte 相同。
+- [x] `TUTORIAL` item 只多了 `status`／`successor`／`_revision` 的變動，沒有 `retired_at`、`retired_reason` 這類新欄位。
+- [x] 退役後新回饋被拒並指出欄位，既有回饋仍查得到，同版 `TutorialView` 仍可匯入。
+- [x] 退役頁顯示常數 `RETIRED_NOTICE` 的固定過期說明（Phase 57 直接 import 同一個常數）；有合法後繼才輸出一個可點連結，且無自動跳轉。
+- [x] 同一篇連退兩次是冪等的：第二次不呼叫 `update_meta`、不覆蓋既有 `successor`，回傳結果與第一次相同。
+- [x] `REL` Rule 16、17 有直接 assertion；`COL` Rule 2 已標為相關（primary 在 Phase 42）。
+- [x] 公開頁沒有 `release:<id>`、上游 ID、使用者 ID 或回饋原文。
