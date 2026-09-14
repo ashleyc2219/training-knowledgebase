@@ -123,7 +123,7 @@ signature --> get_proc(signature) --> 有 item 且 replayable？ -- 是 --> Laye
 
 ### Task 1：固定 Jaccard 與 replayable
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from datetime import UTC, datetime
@@ -163,15 +163,15 @@ def test_replay_requires_active_and_three_successes() -> None:
     assert replayable(proc(ANY_SIG, keys={"a"}, success=3))
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_matching.py -q
 ```
 
-預期：FAIL，訊號包含 `cannot import name 'jaccard' from 'training_kb.rote'`。若訊號是 `ProvenWorkflow` 不接受 `domain`／`adapter`，先停下來回 [Phase 04](04-Phase04-十個邏輯實體模型.md) 依 00A 裁決 D-09 補欄位，不要在 item 上偷加模型沒有的屬性。
+預期：FAIL，訊號包含 `cannot import name ... from 'training_kb.rote'`（實測是 import 清單裡的第一個名字 `JACCARD_THRESHOLD`，不是 `jaccard`；同一個原因、同一個修法）。若訊號是 `ProvenWorkflow` 不接受 `domain`／`adapter`，先停下來回 [Phase 04](04-Phase04-十個邏輯實體模型.md) 依 00A 裁決 D-09 補欄位，不要在 item 上偷加模型沒有的屬性。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from training_kb.models import ProcStatus, ProvenWorkflow
@@ -189,7 +189,7 @@ def replayable(proc: ProvenWorkflow) -> bool:
     return proc.status == ProcStatus.ACTIVE and proc.success_count >= PROC_MIN_SUCCESS
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_matching.py -q
@@ -197,7 +197,7 @@ uv run pytest tests/unit/rote/test_matching.py -q
 
 預期：`7 passed`；空集合回 `0.0`、`0.75` 在門檻下、`0.8` 命中、`retired` 與 `success_count=2` 都不可重放。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/unit/rote/test_matching.py
@@ -206,7 +206,7 @@ git commit -m "feat(rote): 固定重放資格與相似度"
 
 ### Task 2：確定性選出 Layer 2 候選
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from itertools import permutations
@@ -229,7 +229,9 @@ def test_layer2_picks_highest_score_then_last_used_then_signature() -> None:
     newer_b = proc(TIE_HIGH, keys=FOUR, last=datetime(2026, 9, 2, tzinfo=UTC))
     newer_a = proc(TIE_LOW, keys=FOUR, last=datetime(2026, 9, 2, tzinfo=UTC))
     for order in permutations([loose, older, newer_b, newer_a]):
-        assert pick_layer2(EVENT, list(order)).signature == TIE_LOW
+        picked = pick_layer2(EVENT, list(order))
+        assert picked is not None
+        assert picked.signature == TIE_LOW
 
 @pytest.mark.parametrize("candidate", [
     proc("c0de000000000001", keys=FOUR, status=ProcStatus.RETIRED),
@@ -246,7 +248,7 @@ def test_empty_key_sets_and_empty_candidate_list_never_match() -> None:
     assert pick_layer2(EVENT, []) is None
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_matching.py -q -k layer2
@@ -254,7 +256,7 @@ uv run pytest tests/unit/rote/test_matching.py -q -k layer2
 
 預期：FAIL，訊號包含 `cannot import name 'pick_layer2' from 'training_kb.rote'`。
 
-- [ ] **Step 3：建立最小實作**（接在 Phase 33 建立的同一個 `rote.py` 裡；`RawEvent` 與 `event_stable_keys` 已在本模組，不需要再 import）
+- [x] **Step 3：建立最小實作**（接在 Phase 33 建立的同一個 `rote.py` 裡；`RawEvent` 與 `event_stable_keys` 已在本模組，不需要再 import）
 
 ```python
 from collections.abc import Sequence
@@ -276,7 +278,7 @@ def pick_layer2(event: RawEvent, candidates: Sequence[ProvenWorkflow]) -> Proven
 
 `last_used` 由 [Phase 04](04-Phase04-十個邏輯實體模型.md) 的 aware validator 保證必填且帶時區，所以排序可以直接用 `.timestamp()`；本 Phase 不補值、不把沒有時區的時間當 UTC，也不用 `now_utc()` 墊檔。即使 `list_procs` 已依 domain＋adapter 查詢，`pick_layer2` 仍再過濾一次，讓這個純函式可以單獨測試，也不倚賴查詢層是否寫對條件。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_matching.py -q
@@ -284,7 +286,7 @@ uv run pytest tests/unit/rote/test_matching.py -q
 
 預期：`14 passed`；`permutations` 的 24 種排列都得到同一個勝者 `bbbb000000000001`，五個不合格候選各自回 `None`。`c0de000000000005` 與事件的四個 key 只交集三個、聯集六個，分數正好 `0.5`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/unit/rote/test_matching.py
@@ -293,7 +295,7 @@ git commit -m "feat(rote): 排序第二層重放候選"
 
 ### Task 3：串起 exact lookup 並證明不呼叫模型
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import inspect
@@ -301,6 +303,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from training_kb.models import ProcStatus, ProvenWorkflow
+from training_kb.repository import Repository
 from training_kb.rote import RawEvent, find_replayable, pick_layer2, structure_signature
 
 FOUR = {"action", "issue", "repository", "sender"}
@@ -326,23 +329,26 @@ class SpyWriter:
     def __getattr__(self, name: str) -> Callable[..., None]:
         return lambda *args, **kwargs: self.calls.append(name)
 
-def test_layer1_exact_hit_returns_that_proc(repository) -> None:
+def test_layer1_exact_hit_returns_that_proc(repository: Repository) -> None:
     signature = structure_signature(EVENT)
     repository.put_meta(proc(signature, keys=FOUR, success=4))
-    assert find_replayable(EVENT, signature, repository=repository).signature == signature
+    picked = find_replayable(EVENT, signature, repository=repository)
+    assert picked is not None
+    assert picked.signature == signature
 
-def test_retired_exact_falls_through_to_layer2(repository) -> None:
+def test_retired_exact_falls_through_to_layer2(repository: Repository) -> None:
     signature = structure_signature(EVENT)
     repository.put_meta(proc(signature, keys=FOUR, status=ProcStatus.RETIRED, success=9))
     repository.put_meta(proc(NEIGHBOUR, keys=FOUR | {"installation"}))
     picked = find_replayable(EVENT, signature, repository=repository)
+    assert picked is not None
     assert picked.signature == NEIGHBOUR
 
-def test_no_qualified_proc_returns_none(repository) -> None:
+def test_no_qualified_proc_returns_none(repository: Repository) -> None:
     repository.put_meta(proc(STALE, keys=FOUR, success=2))
     assert find_replayable(EVENT, structure_signature(EVENT), repository=repository) is None
 
-def test_lookup_never_reaches_a_writer(repository) -> None:
+def test_lookup_never_reaches_a_writer(repository: Repository) -> None:
     writer = SpyWriter()
     signature = structure_signature(EVENT)
     repository.put_meta(proc(signature, keys=FOUR, success=4))
@@ -352,9 +358,9 @@ def test_lookup_never_reaches_a_writer(repository) -> None:
     assert "writer" not in inspect.signature(pick_layer2).parameters
 ```
 
-`repository` 是 [Phase 06](06-Phase06-Repository-Metadata與實體讀寫.md) 在 `tests/integration/conftest.py` 提供的 fixture；`proc` 與 `SpyWriter` 都在本檔案內完整定義，不依賴其他測試模組。`SpyWriter` 會記下任何 Writer 方法呼叫，但本 Phase 的函式簽名根本收不到它，所以「清單為空」要和 `inspect.signature` 那條一起看才構成 Rule 11 的證據；端到端證據在 [Phase 37](37-Phase37-Rote-Agent回退與成功提交.md)。
+`repository` 是 [Phase 06](06-Phase06-Repository-Metadata與實體讀寫.md) 在 `tests/integration/conftest.py` 提供的 fixture（實際檔案比照 `tests/integration/` 既有測試把它註記成 `Repository`）；`proc` 與 `SpyWriter` 都在本檔案內完整定義，不依賴其他測試模組。`SpyWriter` 會記下任何 Writer 方法呼叫，但本 Phase 的函式簽名根本收不到它，所以「清單為空」要和 `inspect.signature` 那條一起看才構成 Rule 11 的證據；端到端證據在 [Phase 37](37-Phase37-Rote-Agent回退與成功提交.md)。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_rote_lookup.py -q
@@ -362,7 +368,7 @@ uv run pytest tests/integration/test_rote_lookup.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'find_replayable' from 'training_kb.rote'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from training_kb.repository import Repository
@@ -375,7 +381,7 @@ def find_replayable(event: RawEvent, signature: str, *,
     return pick_layer2(event, repository.list_procs(event.domain, event.adapter))
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/rote/test_matching.py tests/integration/test_rote_lookup.py -q
@@ -383,7 +389,7 @@ uv run pytest tests/unit/rote/test_matching.py tests/integration/test_rote_looku
 
 預期：`18 passed`。`beef000000000001` 的分數剛好是 `4/5 = 0.8`，證明門檻是 `>=`；retired 的 exact PROC 分數雖然是 `1.0`，仍被 `replayable` 濾掉，等同未命中。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/rote.py tests/integration/test_rote_lookup.py
@@ -431,10 +437,10 @@ git commit -m "feat(rote): 串接兩層重放查詢"
 
 ## 12. 完成清單
 
-- [ ] `jaccard` 的空集合回 `0.0`，`3/4` 與 `4/5` 兩個邊界方向正確。
-- [ ] `JACCARD_THRESHOLD` 用 `>=` 比較，`0.7999` 淘汰、`0.8` 命中，程式裡沒有第二份 `0.8`，門檻 `3` 也只有 `PROC_MIN_SUCCESS` 一份。
-- [ ] Layer 1 與 Layer 2 共用同一個 `replayable`，沒有各寫一份門檻。
-- [ ] exact PROC 不可重放時會繼續 Layer 2，而且不會被自己選回來。
-- [ ] Layer 2 只看同 `domain` ＋同 `adapter` 的候選，`ProvenWorkflow.domain`／`adapter` 依裁決 D-09 存在。
-- [ ] 三段排序（分數、`last_used`、signature）在所有排列下得到同一個勝者。
-- [ ] 前兩層命中時 `writer.calls == []`、`find_replayable` 與 `pick_layer2` 的簽名都沒有 writer，且本 Phase 只讀不寫 PROC。
+- [x] `jaccard` 的空集合回 `0.0`，`3/4` 與 `4/5` 兩個邊界方向正確。
+- [x] `JACCARD_THRESHOLD` 用 `>=` 比較，`0.7999` 淘汰、`0.8` 命中，程式裡沒有第二份 `0.8`，門檻 `3` 也只有 `PROC_MIN_SUCCESS` 一份。
+- [x] Layer 1 與 Layer 2 共用同一個 `replayable`，沒有各寫一份門檻。
+- [x] exact PROC 不可重放時會繼續 Layer 2，而且不會被自己選回來。
+- [x] Layer 2 只看同 `domain` ＋同 `adapter` 的候選，`ProvenWorkflow.domain`／`adapter` 依裁決 D-09 存在。
+- [x] 三段排序（分數、`last_used`、signature）在所有排列下得到同一個勝者。
+- [x] 前兩層命中時 `writer.calls == []`、`find_replayable` 與 `pick_layer2` 的簽名都沒有 writer，且本 Phase 只讀不寫 PROC。
