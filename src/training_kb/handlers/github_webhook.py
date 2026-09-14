@@ -16,6 +16,7 @@ decode_body -> verify_github_signature -> parse_json -> normalize_then_accept
 import base64
 import binascii
 import json
+import logging
 import os
 from collections.abc import Mapping
 from time import monotonic
@@ -30,8 +31,23 @@ WEBHOOK_DEADLINE_SECONDS = 8.0
 SECRET_ENV = "TKB_GITHUB_WEBHOOK_SECRET"
 """共享密鑰只由執行環境提供；**不是** `Settings` 欄位，`load_settings` 不讀它（00A §3.5）。"""
 
+DELIVERY_HEADER = "X-GitHub-Delivery"
+"""GitHub 每次投遞的識別碼；這個值可以安全寫進 log 用來追查。"""
+
 GITHUB_DOMAIN = "github.com"
 GITHUB_ADAPTERS = {"issues": "github_issue", "pull_request": "github_pr"}  # 00A D-60
+
+
+_log = logging.getLogger(__name__)
+
+
+def _record(delivery: str | None, outcome: str, operation_id: str | None) -> None:
+    """只記 delivery ID、operation ID 與結果類型（00A §3.8）。
+
+    原始 body、簽名與 secret **一律不進 log**：body 是使用者全文，簽名與 secret 一旦
+    落到 CloudWatch 就等於外流。
+    """
+    _log.info("webhook %s delivery=%s operation=%s", outcome, delivery, operation_id)
 
 
 def load_secret() -> bytes:
@@ -84,6 +100,7 @@ def parse_json(raw: bytes) -> dict[str, Any]:
 
 def handler(event: dict[str, Any], context: object) -> dict[str, object]:
     deadline = monotonic() + WEBHOOK_DEADLINE_SECONDS
+    delivery = header(event, DELIVERY_HEADER)
     secret = load_secret()  # 設定錯誤（PermanentError）不轉成使用者輸入錯誤，直接往外丟
     try:
         raw = decode_body(event)
@@ -98,8 +115,11 @@ def handler(event: dict[str, Any], context: object) -> dict[str, object]:
                                            event_type=event_type, headers=headers,
                                            payload=payload, deadline=deadline)
     except IngressError as error:
+        _record(delivery, "rejected", None)
         return {"ok": False, "message": str(error), "fields": list(error.fields),
                 "operation_id": None}
     except TimeoutError as error:
+        _record(delivery, "timeout", None)
         return {"ok": False, "message": str(error), "operation_id": None}
+    _record(delivery, "accepted", acceptance.operation_id)
     return {"ok": True, "operation_id": acceptance.operation_id}

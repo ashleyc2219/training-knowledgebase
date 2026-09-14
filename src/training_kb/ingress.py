@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import string
 from collections.abc import Mapping
+from time import monotonic
 
 from training_kb.errors import IngressError, PermanentError
 from training_kb.operations import Acceptance
@@ -46,6 +47,28 @@ def verify_github_signature(raw_body: bytes, signature_header: str | None, secre
     # 一律固定時間比較，不可寫成 `expected == supplied`。訊息只說不符，不回報期望值。
     if not hmac.compare_digest(expected, supplied):
         raise IngressError("GitHub 簽名不符", (SIGNATURE_HEADER,))
+
+
+# --- 2. 整體期限（Phase 30）---------------------------------------------------
+
+
+def time_left(deadline: float) -> float:
+    """還剩幾秒；小於等於 0 代表整體期限已到。
+
+    `deadline` 一律是 `time.monotonic()` 的**絕對時刻**（單調時鐘，不受系統調時影響），
+    由 handler 進入時算好 `monotonic() + WEBHOOK_DEADLINE_SECONDS` 一路往下傳。
+    """
+    return deadline - monotonic()
+
+
+def assert_time_left(deadline: float, *, step: str) -> None:
+    """下游每一步開始前呼叫；**不重新計一次八秒、也不自己呼叫 `monotonic()`**。
+
+    逾時丟 Python 內建的 `TimeoutError`（不是 `TransientError`：這不是服務故障，
+    而是來不及）。`step` 只用來讓訊息看得出卡在哪一步。
+    """
+    if time_left(deadline) <= 0:
+        raise TimeoutError(f"{step} 時已超過 webhook 的八秒整體期限")
 
 
 # --- 3. 接線點（Phase 30 stub → Phase 32 接受端 → Phase 37 完整三層）----------

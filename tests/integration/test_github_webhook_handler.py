@@ -6,6 +6,7 @@
 import base64
 import hashlib
 import hmac
+from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ import pytest
 
 from training_kb.errors import PermanentError
 from training_kb.handlers import github_webhook
-from training_kb.ingress import normalize_then_accept
+from training_kb.ingress import assert_time_left, normalize_then_accept, time_left
 
 SECRET = b"test-secret"
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "github" / "issue-opened.json"
@@ -180,3 +181,60 @@ def test_wiring_point_refuses_to_pretend_success() -> None:
     with pytest.raises(PermanentError):
         normalize_then_accept(domain="github.com", adapter="github_issue", event_type="issues",
                               headers={}, payload={"action": "opened"}, deadline=monotonic() + 8.0)
+
+
+# --- Task 3：八秒整體期限 -----------------------------------------------------
+
+
+def fake_clock(*ticks: float) -> Callable[[], float]:
+    values = iter(ticks)
+    return lambda: next(values)
+
+
+def test_deadline_boundary_is_exclusive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("training_kb.ingress.monotonic", fake_clock(7.999))
+    assert_time_left(8.0, step="accept")  # 7.999 秒還在期限內
+    monkeypatch.setattr("training_kb.ingress.monotonic", fake_clock(8.0))
+    with pytest.raises(TimeoutError):
+        assert_time_left(8.0, step="accept")  # 8.000 秒到期
+
+
+def test_timeout_never_returns_success(spies: Spies, monkeypatch: pytest.MonkeyPatch) -> None:
+    parsed, accepted = spies
+    monkeypatch.setattr(github_webhook, "monotonic", fake_clock(0.0))
+    monkeypatch.setattr("training_kb.ingress.monotonic", fake_clock(8.5))
+
+    def slow_accept(*, deadline: float, **passed: Any) -> None:
+        assert_time_left(deadline, step="accept")
+        raise AssertionError("超過期限後不應該繼續")
+
+    monkeypatch.setattr(github_webhook, "normalize_then_accept", slow_accept)
+    body = FIXTURE.read_bytes()
+    result = github_webhook.handler(make_event(body, header=sign(body)), None)
+    assert result["ok"] is False and result["operation_id"] is None
+    assert "success" not in str(result)
+
+
+def test_time_left_counts_down_from_the_same_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一個 deadline 一路傳下去，剩餘時間隨時鐘遞減，不會被任何一步重置。"""
+    monkeypatch.setattr("training_kb.ingress.monotonic", fake_clock(1.0, 5.0, 8.0))
+    deadline = 8.0
+    assert time_left(deadline) == pytest.approx(7.0)
+    assert time_left(deadline) == pytest.approx(3.0)
+    assert time_left(deadline) == pytest.approx(0.0)
+
+
+def test_log_records_delivery_and_operation_but_never_body_or_signature(
+    spies: Spies, caplog: pytest.LogCaptureFixture
+) -> None:
+    body = FIXTURE.read_bytes()
+    signature = sign(body)
+    with caplog.at_level("INFO", logger=github_webhook.__name__):
+        github_webhook.handler(make_event(body, header=signature), None)
+        github_webhook.handler(make_event(body, header="sha256=" + "0" * 64), None)
+    text = caplog.text
+    assert "d-001" in text and "op-ticket-t_881" in text  # delivery ID 與 operation ID
+    assert "accepted" in text and "rejected" in text  # 結果類型
+    assert signature not in text and signature.removeprefix("sha256=") not in text
+    assert SECRET.decode("ascii") not in text
+    assert "會前摘要在哪裡開啟？" not in text  # fixture 裡的使用者全文
