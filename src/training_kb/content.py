@@ -45,6 +45,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from training_kb.errors import ContentError, CoordinationError
+from training_kb.models import StepType, TutorialContent
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import Repository
 
@@ -186,3 +187,38 @@ def allocate_version(
                                                                 base_number))
     operations.record_version(operation_id, version_id)
     return _plan(version_id, supersedes, reason, rules_applied, operation_id)
+
+
+# --- 4. 內容驗證 -------------------------------------------------------------
+
+LEGAL_STEP_TYPES = frozenset(StepType)
+
+
+def _section_problems(content: TutorialContent) -> list[str]:
+    """五段是否都有非空內容、步驟編號是否為 1..n 連續。
+
+    `steps` 為空是唯一的提早返回：沒有步驟就沒有編號可檢查，繼續往下只會報出
+    「1 到 0 的連續整數」這種看不懂的話。
+    """
+    problems = [
+        f"缺少 {label}"
+        for label, value in (("Title", content.title), ("Problem", content.problem),
+                             ("Expected Outcome", content.expected_outcome))
+        if not value.strip()
+    ]
+    if not [item for item in content.prerequisites if item.strip()]:
+        problems.append("缺少 Prerequisites（沒有前置條件時請寫「無」）")
+    if not content.steps:
+        problems.append("缺少 Steps")
+        return problems
+    numbers = [step.number for step in content.steps]
+    if numbers != list(range(1, len(numbers) + 1)):
+        problems.append(f"步驟編號必須是 1 到 {len(numbers)} 的連續整數，實際是 {numbers}")
+    return problems
+
+
+def validate_content(content: TutorialContent, known_feature_ids: frozenset[str]) -> None:
+    """結構可不可以保存；不判斷文字好不好，也不修改任何內容。"""
+    problems = _section_problems(content)
+    if problems:
+        raise ContentError("教學內容驗證失敗：" + "；".join(problems))
