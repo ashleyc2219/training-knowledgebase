@@ -41,11 +41,14 @@ operations.load(operation_id)
 `Tutorial`：十實體模型是 strict，沒有第三類屬性（00A §3.6）。
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from pydantic import ValidationError
+
 from training_kb.errors import ContentError, CoordinationError
-from training_kb.models import StepType, TutorialContent
+from training_kb.models import StepDraft, StepType, TutorialContent
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import Repository
 
@@ -274,3 +277,155 @@ def validate_content(content: TutorialContent, known_feature_ids: frozenset[str]
     problems.extend(_step_problems(content, known_feature_ids))
     if problems:
         raise ContentError("教學內容驗證失敗：" + "；".join(problems))
+
+
+# --- 5. Markdown 全文 --------------------------------------------------------
+
+_MD_SPECIALS = frozenset("\\`*_[]<>#|()")
+_SECTIONS = ("Title", "Problem", "Prerequisites", "Steps", "Expected Outcome")
+_STEP_LINE = re.compile(r"^(\d+)\. \(type=([a-z_]+), feature=([^)]*)\) (.*)$")
+_DANGLING_BACKSLASH = re.compile(r"(?<!\\)(?:\\\\)*\\$")
+
+
+def escape_markdown(text: str) -> str:
+    r"""在 Markdown 會吃掉的字元前插入一個反斜線；只加，不改寫、不刪字。
+
+    兩層：行內符號 `` \ ` * _ [ ] < > # | ( ) `` 逐字加反斜線（`#` 讓使用者文字無法偽造
+    `# `／`## ` 標題，`( )` 讓步驟行的 `feature=...)` 不會被提前關閉），再加上只有出現在
+    **行首**才有意義的 `-`、`+` 與「數字後接句點」——每個欄位都自成一行，所以字串開頭
+    就是行首。`>` 已在行內清單裡，不必再處理一次行首。
+
+    反斜線自己也在清單裡，這是 `unescape_markdown` 能一對一還原的前提：它先被加倍，
+    後面的 `\<` 才不會與原文裡真的寫著的 `\<` 混在一起。
+    """
+    escaped = "".join(f"\\{ch}" if ch in _MD_SPECIALS else ch for ch in text)
+    if escaped[:1] in ("-", "+"):
+        return "\\" + escaped
+    head, dot, rest = escaped.partition(".")
+    if dot and head.isdigit():
+        return f"{head}\\.{rest}"
+    return escaped
+
+
+def unescape_markdown(text: str) -> str:
+    """把反斜線後的下一個字元原樣取出；對任何字串 `unescape(escape(x)) == x`。
+
+    **不看被轉義的是哪個字元**：只要照「反斜線吃掉下一個字元」還原，就與
+    `escape_markdown` 的插入規則互為反函式，日後改動 `_MD_SPECIALS` 也不會讓舊全文解錯。
+    結尾落單的反斜線不可能由 `escape_markdown` 產生，代表全文在 S3 之外被改過，
+    丟 `ContentError` 而不是靜靜吃掉它。
+    """
+    if _DANGLING_BACKSLASH.search(text):
+        raise ContentError("Markdown 以落單的反斜線結尾")
+    return re.sub(r"\\(.)", r"\1", text)
+
+
+def _one_line(label: str, value: str) -> str:
+    """欄位只能有一行，轉義後回傳；`label` 只用來組錯誤訊息，不進輸出。
+
+    多行欄位會讓 `parse_markdown` 分不出「同一欄的第二行」與「下一個項目」，
+    精確反函式就斷了（多段落排版留給 Phase 57 的 HTML renderer）。
+    """
+    if "\n" in value or "\r" in value:
+        raise ContentError(f"{label} 不得含換行：每個欄位在 Markdown 中只有一行")
+    if label == "feature_id" and ("(" in value or ")" in value):
+        raise ContentError(f"feature_id 不得含括號：{value}")
+    return escape_markdown(value)
+
+
+def render_markdown(content: TutorialContent) -> str:
+    """把 `TutorialContent` 寫成固定樣板的全文（00A §5.2）。
+
+    五段順序不可變、每段與標題之間恰好一個空行、檔案以一個換行結尾。**格式固定是
+    diff 有意義的前提**：前綴或空行數量會變的話，每一版的 diff 都會變成「整篇都改了」。
+    每個欄位都先過 `_one_line`（拒絕換行、再轉義），所以使用者或模型的文字不可能
+    長出新的標題、清單或連結。
+    """
+    steps = [
+        f"{step.number}. (type={step.type}, feature={_one_line('feature_id', step.feature_id)}) "
+        f"{_one_line('step.text', step.text)}"
+        for step in content.steps
+    ]
+    items = "\n".join(f"- {_one_line('Prerequisites', item)}" for item in content.prerequisites)
+    blocks = [
+        f"# {_one_line('Title', content.title)}",
+        "## Problem\n\n" + _one_line("Problem", content.problem),
+        "## Prerequisites\n\n" + items,
+        "## Steps\n\n" + "\n".join(steps),
+        "## Expected Outcome\n\n" + _one_line("Expected Outcome", content.expected_outcome),
+    ]
+    return "\n\n".join(blocks) + "\n"
+
+
+def _split_sections(markdown: str) -> dict[str, list[str]]:
+    """把全文切成五個區塊的非空行；少一個區塊就丟 `ContentError`。
+
+    **先判斷 `## ` 再判斷 `# `**，否則 `## Problem` 會被當成標題行。空行一律丟掉，
+    所以 render 的空行數量不影響解析。
+    """
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for line in markdown.splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip()
+            sections[current] = []
+        elif line.startswith("# "):
+            current = "Title"
+            sections[current] = [line[2:]]
+        elif line.strip():
+            sections.setdefault(current, []).append(line)
+    missing = [name for name in _SECTIONS if name not in sections]
+    if missing:
+        raise ContentError("Markdown 缺少區塊：" + "、".join(missing))
+    return sections
+
+
+def _step_type(value: str) -> StepType:
+    """把步驟行讀到的 `type=` 字串收斂成 `StepType`；不合法丟 `ContentError`。
+
+    Phase 文件原本寫 `type=match[2]` 直接丟給 pydantic，但 `StepDraft.type` 的宣告型別是
+    `StepType`，mypy strict 不接受 `str`（而本專案不用 `# type: ignore`）。在這裡先判斷還有
+    第二個好處：`StepType("scroll")` 丟的是**裸 `ValueError`**，不是 `ValidationError`，
+    照文件的 `except ValidationError` 會讓它外洩到呼叫端。
+    """
+    if value not in LEGAL_STEP_TYPES:
+        raise ContentError(f"步驟 type 不合法：{value}")
+    return StepType(value)
+
+
+def _only_line(sections: dict[str, list[str]], name: str) -> str:
+    lines = sections[name]
+    if len(lines) != 1:
+        raise ContentError(f"{name} 區塊必須恰好一行，實際 {len(lines)} 行")
+    return unescape_markdown(lines[0])
+
+
+def parse_markdown(markdown: str) -> TutorialContent:
+    """`render_markdown` 的反函式：Phase 23 用它把 S3 全文讀回來核對基表 STEP。
+
+    `StepDraft`／`TutorialContent` 是 Phase 03 的嚴格模型，遇到不合法內容丟的是 pydantic
+    的 `ValidationError`；**呼叫端只認得 Phase 02 的錯誤契約**，所以一律轉成 `ContentError`
+    （`PermanentError` 子類），不讓第三方例外型別外洩。訊息只帶欄位數量，不帶欄位值：
+    它可能含使用者原文。
+    """
+    sections = _split_sections(markdown)
+    try:
+        steps = []
+        for line in sections["Steps"]:
+            match = _STEP_LINE.match(line)
+            if match is None:
+                raise ContentError(f"步驟格式不符：{line}")
+            steps.append(StepDraft(number=int(match[1]), type=_step_type(match[2]),
+                                   text=unescape_markdown(match[4]),
+                                   feature_id=unescape_markdown(match[3])))
+        return TutorialContent(
+            title=_only_line(sections, "Title"),
+            problem=_only_line(sections, "Problem"),
+            prerequisites=[unescape_markdown(line.removeprefix("- "))
+                           for line in sections["Prerequisites"]],
+            steps=steps,
+            expected_outcome=_only_line(sections, "Expected Outcome"),
+        )
+    except ValidationError as exc:
+        raise ContentError(
+            f"Markdown 內容不符 TutorialContent 限制：{exc.error_count()} 個欄位") from exc
