@@ -15,6 +15,7 @@ from training_kb.operations import AcceptOperation, OperationCoordinator
 from training_kb.repository import DynamoItem, Repository
 
 NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
+LATER = datetime(2026, 9, 13, 12, 5, tzinfo=UTC)
 REQUEST = AcceptOperation("op-ticket-t_881", "ticket", "t_881", "demo", NOW)
 
 
@@ -97,3 +98,39 @@ def test_the_raw_item_carries_no_target_and_no_progress_payload(repository: Repo
     assert (item["entity"], item["SK"]) == ("OPS", META)
     assert repository.query_by_target(ops_pk("op-ticket-t_881")) == []
     assert item["version_id"] == "prepare-meeting@v2"
+
+
+def test_ledger_survives_a_new_coordinator(repository: Repository) -> None:
+    """換一個 `OperationCoordinator` 物件仍讀得回同一筆紀錄。
+
+    資料還在同一個 moto 表，所以這裡**只證明持久紀錄可以被重新載入**；真正的程序重啟、
+    交錯事件、lease 過期與 closed execution 都是 Phase 11 的整合證據。
+    """
+    first = OperationCoordinator(repository)
+    accepted = first.accept(REQUEST)
+    first.record_normalized("op-ticket-t_881", operation_ref("op-ticket-t_881", "input"))
+    again = OperationCoordinator(repository).accept(REQUEST)
+    assert again.status == "duplicate"
+    assert again.record.input_ref == "operations/op-ticket-t_881/input.json"
+    assert again.record.accepted_at == accepted.record.accepted_at
+
+
+def test_a_completed_operation_is_still_a_duplicate(repository: Repository) -> None:
+    operations = OperationCoordinator(repository)
+    operations.accept(REQUEST)
+    operations.complete("op-ticket-t_881", now=LATER)
+    again = operations.accept(REQUEST)
+    assert (again.status, again.record.status) == ("duplicate", "done")
+    assert (again.record.accepted_at, again.record.updated_at) == (NOW, LATER)
+    assert len(repository.scan_entity("OPS")) == 1
+
+
+def test_a_retryable_failure_never_creates_a_second_record(repository: Repository) -> None:
+    """要不要重試由呼叫端依 `retryable` 決定；重送仍是同一筆邏輯操作。"""
+    operations = OperationCoordinator(repository)
+    operations.accept(REQUEST)
+    operations.fail("op-ticket-t_881", "bedrock timeout", True, now=LATER)
+    again = operations.accept(REQUEST)
+    assert (again.status, again.record.status) == ("duplicate", "failed")
+    assert (again.record.error, again.record.retryable) == ("bedrock timeout", True)
+    assert len(repository.scan_entity("OPS")) == 1
