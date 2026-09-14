@@ -2,18 +2,47 @@
 
 `CallTrace` 只保存 metadata（哪個操作、哪個節點、哪個模型、第幾次、結果），
 不保存 prompt 原文、request body 或使用者全文（設計 §14.3、§17.2）。
+`BedrockWriter` 的每個 public method 都只經過一個 `_request_once`：內部沒有迴圈，
+SDK 也關掉自動重試，讓「只有一層管理重試」成立。
 """
 
 import json
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Protocol
 
-from training_kb.errors import PermanentError
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError
+
+from training_kb.clock import now_utc, to_iso
+from training_kb.errors import PermanentError, TransientError
 
 # 一筆 trace 的欄位 allowlist：多一個或少一個都是 PermanentError。
 TRACE_FIELDS = ("operation_id", "node", "model", "attempt", "kind", "started_at", "outcome")
 TRACE_KINDS = frozenset({"embedding", "generation", "tool_use"})
 TRACE_OUTCOMES = frozenset({"success", "transient_error", "permanent_error"})
+
+# 設計 §14.3 的判斷類起點：只設 maxTokens 與低 temperature，不同時調 topP。
+# 教學寫作的 2048 與依節點選 profile 由 Phase 18 的 inference_config(schema) 取代。
+JUDGEMENT_INFERENCE_CONFIG: dict[str, object] = {"maxTokens": 512, "temperature": 0.1}
+
+TIMEOUT_ERRORS = (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError)
+TRANSIENT_ERROR_CODES = frozenset({
+    "ThrottlingException", "ServiceQuotaExceededException", "ModelNotReadyException",
+    "ModelTimeoutException", "ServiceUnavailableException", "InternalServerException"})
+
+
+class Writer(Protocol):
+    """所有需要模型的 Phase 共用的窄介面；正式實作是 `BedrockWriter`，測試用 `RecordingWriter`。"""
+
+    def embed(self, text: str, *, operation_id: str, node: str) -> list[float]: ...
+
+    def generate_json(self, system: str, user: str, schema: Mapping[str, Any], *,
+                      operation_id: str, node: str) -> dict[str, Any]: ...
+
+    def converse_with_tools(self, system: str, messages: Sequence[Mapping[str, Any]],
+                            tools: Sequence[Mapping[str, Any]], *,
+                            operation_id: str, node: str) -> dict[str, Any]: ...
 
 
 class CallTrace:
@@ -40,3 +69,86 @@ class CallTrace:
 
     def to_json(self) -> str:
         return json.dumps(self._records, ensure_ascii=False, sort_keys=True)
+
+
+def bedrock_config() -> Config:
+    """全套唯一一份 Bedrock SDK 設定：連線 2 秒、等待 30 秒、SDK 這一層不重試。"""
+    return Config(connect_timeout=2, read_timeout=30, retries={"total_max_attempts": 1})
+
+
+def build_bedrock_client(region: str) -> Any:
+    return boto3.client("bedrock-runtime", region_name=region, config=bedrock_config())
+
+
+def _error_code(error: BaseException) -> str:
+    """只取 botocore 的 Error.Code；Message 可能回聲使用者輸入，一律不取。"""
+    response = getattr(error, "response", None)
+    body = response.get("Error", {}) if isinstance(response, Mapping) else {}
+    return str(body.get("Code", "")) if isinstance(body, Mapping) else ""
+
+
+class BedrockWriter:
+    """`Writer` 的正式實作：只封裝 Bedrock 請求與解析，不碰 DynamoDB、S3 或發布。"""
+
+    def __init__(self, client: Any, trace: CallTrace, *,
+                 generation_model_id: str | None, embedding_model_id: str) -> None:
+        self.client, self.trace = client, trace
+        self._gen_id, self._embed_id = generation_model_id, embedding_model_id
+
+    def _gen_model(self) -> str:
+        if not self._gen_id:
+            raise PermanentError("O5 尚未通過：generation_model_id 還沒有實測值")
+        return self._gen_id
+
+    def _request_once(self, call: Callable[[], Any], *, model: str, operation_id: str,
+                      node: str, kind: str) -> Any:
+        """送一次 request：先配 attempt，成功或例外後各寫一筆 trace，內部沒有迴圈。"""
+        row: dict[str, Any] = {
+            "operation_id": operation_id, "node": node, "model": model, "kind": kind,
+            "attempt": self.trace.next_attempt(operation_id=operation_id, node=node),
+            "started_at": to_iso(now_utc())}
+        try:
+            response = call()
+        except Exception as exc:
+            code = _error_code(exc)
+            transient = isinstance(exc, TIMEOUT_ERRORS) or code in TRANSIENT_ERROR_CODES
+            outcome = "transient_error" if transient else "permanent_error"
+            self.trace.add({**row, "outcome": outcome})
+            # 只留錯誤碼或例外類別名：ClientError 的 message 可能回聲使用者輸入。
+            raise_as: type[Exception] = TransientError if transient else PermanentError
+            raise raise_as(code or type(exc).__name__) from exc
+        self.trace.add({**row, "outcome": "success"})
+        return response
+
+    def _converse(self, *, model: str, system: str, messages: Sequence[Mapping[str, Any]],
+                  extra: Mapping[str, Any], operation_id: str, node: str, kind: str) -> Any:
+        return self._request_once(
+            lambda: self.client.converse(
+                modelId=model, system=[{"text": system}], messages=list(messages),
+                inferenceConfig=dict(JUDGEMENT_INFERENCE_CONFIG), **extra),
+            model=model, operation_id=operation_id, node=node, kind=kind)
+
+    def generate_json(self, system: str, user: str, schema: Mapping[str, Any], *,
+                      operation_id: str, node: str) -> dict[str, Any]:
+        model = self._gen_model()
+        response = self._converse(
+            model=model, system=system, extra={}, operation_id=operation_id, node=node,
+            messages=[{"role": "user", "content": [{"text": user}]}], kind="generation")
+        try:
+            value = json.loads(response["output"]["message"]["content"][0]["text"])
+        except json.JSONDecodeError as exc:
+            raise PermanentError("model response is not valid JSON") from exc
+        if not isinstance(value, dict):
+            raise PermanentError("model response is not a JSON object")
+        return value
+
+    def converse_with_tools(self, system: str, messages: Sequence[Mapping[str, Any]],
+                            tools: Sequence[Mapping[str, Any]], *,
+                            operation_id: str, node: str) -> dict[str, Any]:
+        """只送一次 request；拿到 toolUse 後要不要再問一輪由 Phase 37 決定。"""
+        model = self._gen_model()
+        result: dict[str, Any] = self._converse(
+            model=model, system=system, messages=messages, kind="tool_use",
+            extra={"toolConfig": {"tools": list(tools)}},
+            operation_id=operation_id, node=node)
+        return result
