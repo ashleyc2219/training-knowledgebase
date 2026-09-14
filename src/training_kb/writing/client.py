@@ -27,8 +27,12 @@ TRACE_KINDS = frozenset({"embedding", "generation", "tool_use"})
 TRACE_OUTCOMES = frozenset({"success", "transient_error", "permanent_error"})
 
 # 設計 §14.3 的判斷類起點：只設 maxTokens 與低 temperature，不同時調 topP。
-# 教學寫作的 2048 與依節點選 profile 由 Phase 18 的 inference_config(schema) 取代。
+# 每個生成 request 的 inferenceConfig 都由 inference_config(schema) 產出，這是它的底稿。
 JUDGEMENT_INFERENCE_CONFIG: dict[str, object] = {"maxTokens": 512, "temperature": 0.1}
+
+# 教學寫作類的唯一例外（設計 §14.3、00A §3.7）：其餘七個 schema 都留在判斷類的 512。
+# 截斷（`stopReason == "max_tokens"`）一律是驗證失敗，不靠調高上限救，見 `_parse_schema_json`。
+WRITING_MAX_TOKENS: dict[str, int] = {"TutorialDraft": 2048}
 
 # 「向量幾維」這個數字的唯一一份（00A §5.4）：送出的 body 與收回的回應都拿它比。
 TITAN_DIMENSIONS = 1024
@@ -81,6 +85,21 @@ class CallTrace:
 def bedrock_config() -> Config:
     """全套唯一一份 Bedrock SDK 設定：連線 2 秒、等待 30 秒、SDK 這一層不重試。"""
     return Config(connect_timeout=2, read_timeout=30, retries={"total_max_attempts": 1})
+
+
+def inference_config(schema: Mapping[str, Any]) -> dict[str, object]:
+    """依 schema 的 `$id` 決定這次生成的 `inferenceConfig`：教學寫作 2048，其餘判斷類 512。
+
+    吃的是 **schema dict 而不是節點名字**（00A §6.5）：節點會增加，schema 只有八個，
+    用 `$id` 查表才不會有節點漏設 `maxTokens`。`temperature` 一律 0.1，而且永遠不設
+    `topP`——同時調兩個取樣參數會互相干擾（設計 §14.3）。
+    `$id` 缺席（測試用的裸 `{"type": "object"}`）時走判斷類預設，不丟例外。
+    """
+    config = dict(JUDGEMENT_INFERENCE_CONFIG)
+    name = str(schema.get("$id", ""))
+    if name in WRITING_MAX_TOKENS:
+        config["maxTokens"] = WRITING_MAX_TOKENS[name]
+    return config
 
 
 def build_bedrock_client(region: str) -> Any:
@@ -216,11 +235,17 @@ class BedrockWriter:
         return _validated_embedding(payload.get("embedding"))
 
     def _converse(self, *, model: str, system: str, messages: Sequence[Mapping[str, Any]],
-                  extra: Mapping[str, Any], operation_id: str, node: str, kind: str) -> Any:
+                  extra: Mapping[str, Any], operation_id: str, node: str, kind: str,
+                  inference: Mapping[str, object] = JUDGEMENT_INFERENCE_CONFIG) -> Any:
+        """每個 Converse request 都帶 inferenceConfig：沒有「忘了設 maxTokens」的分支。
+
+        `inference` 的預設是判斷類：Rote 的 tool use 沒有 schema，屬於判斷類。
+        `generate_json` 則逐次傳 `inference_config(schema)`。
+        """
         return self._request_once(
             lambda: self.client.converse(
                 modelId=model, system=[{"text": system}], messages=list(messages),
-                inferenceConfig=dict(JUDGEMENT_INFERENCE_CONFIG), **extra),
+                inferenceConfig=dict(inference), **extra),
             model=model, operation_id=operation_id, node=node, kind=kind)
 
     def generate_json(self, system: str, user: str, schema: Mapping[str, Any], *,
@@ -228,7 +253,8 @@ class BedrockWriter:
         model = self._gen_model()
         response = self._converse(
             model=model, system=system, extra={}, operation_id=operation_id, node=node,
-            messages=[{"role": "user", "content": [{"text": user}]}], kind="generation")
+            messages=[{"role": "user", "content": [{"text": user}]}], kind="generation",
+            inference=inference_config(schema))
         raw = response["output"]["message"]["content"][0]["text"]
         return _parse_schema_json(raw, schema, stop_reason=response.get("stopReason", ""))
 
