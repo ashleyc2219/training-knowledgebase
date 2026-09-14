@@ -30,7 +30,7 @@ from training_kb.content import (
     put_private_artifact,
     render_markdown,
 )
-from training_kb.errors import PublishError
+from training_kb.errors import CoordinationError, PublishError, TransientError
 from training_kb.keys import tutorial_pk, version_pk
 from training_kb.models import (
     Feature,
@@ -386,9 +386,41 @@ def test_commit_publishes_first_version_without_supersedes(
 
 def test_transaction_bumps_revision_so_stale_writers_lose(
         publisher: Publisher, repo: RecordingRepository) -> None:
-    """交易與 `update_meta` 共用同一個 `_revision` CAS：切換過後舊的持有者一定失敗。"""
+    """交易與 `update_meta` 共用同一個 `_revision` CAS：切換過後舊的持有者一定失敗。
+
+    只斷言 `_revision` 有 +1 還不算證明「舊持有者會輸」，所以最後真的拿發布前讀到的
+    revision 去 `update_meta` 一次：它必須被條件式擋下（`CoordinationError`），
+    而且 `current_version` 保持交易寫進去的值。
+    """
     prepared = publisher.prepare(PublishRequest((V2,), OPERATION), now=NOW)
     before = repo.revision_of(tutorial_pk(SLUG))
     publisher.commit(prepared, now=NOW)
     assert repo.revision_of(tutorial_pk(SLUG)) == before + 1
     assert repo.revision_of(version_pk(V2)) >= 2
+    with pytest.raises(CoordinationError, match="stale revision"):
+        repo.update_meta(tutorial_pk(SLUG), {"current_version": V1},
+                         expected_revision=before)
+    tutorial = repo.get_tutorial(SLUG)
+    assert tutorial is not None and tutorial.current_version == V2
+
+
+def test_commit_records_the_version_before_it_writes_site(
+        publisher: Publisher, repo: RecordingRepository, operations: OperationCoordinator,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """切點 `a2_after_transact_before_site` 發生時，ledger 仍然留著版號。
+
+    P59 的**單篇**復原輸入就是 `OPS#<operation_id>.version_id` + `site_key`（00A §6.7：
+    單篇不寫 `pending-promote.json`）。`record_version` 若排在 S3 階段之後，a2 一發生
+    ledger 就是 `None`，復原沒有東西可以重算（Phase 24 review Important 1）。
+    """
+    prepared = publisher.prepare(PublishRequest((V2,), OPERATION), now=NOW)
+
+    def broken(version_id: str, operation_id: str) -> None:
+        raise TransientError("a2_after_transact_before_site 注入")
+
+    monkeypatch.setattr(publisher, "_promote", broken)
+    with pytest.raises(PublishError, match="a2_after_transact_before_site"):
+        publisher.commit(prepared, now=NOW)
+    record = operations.load(OPERATION)
+    assert record is not None and record.version_id == V2
+    assert site_keys(repo) == []
