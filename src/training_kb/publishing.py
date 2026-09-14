@@ -306,12 +306,33 @@ class Publisher:
         operation_id = prepared.request.operation_id
         published: list[str] = []
         for version, tutorial in loaded:
-            self._restage(version, tutorial, operation_id, now=now)
-            self._promote(version.version_id, operation_id)
-            self._write_indexes(tutorial.slug)
+            self._publish_site(version, tutorial, operation_id, now=now)
             self._operations.record_version(operation_id, version.version_id)
             published.append(version.version_id)
         return PublishResult(published=tuple(published), failed=None, reasons=())
+
+    def _publish_site(self, version: TutorialVersion, tutorial: Tutorial, operation_id: str,
+                      *, now: datetime) -> None:
+        """交易成功之後的 S3 階段：重新渲染 -> 版本頁與 diff 副本 -> 教學索引 -> 站台索引。
+
+        **這一段失敗一律轉成 `PublishError`**（設計 §8.3、Phase 24 §6）：此時
+        `published_at` 與 `current_version` 已經切換，整個 `commit` 再重跑一次也會被
+        `inspect` 擋下（版本已發布），所以它不是可以交給 ASL Retry 的暫時故障。這正是
+        Phase 12 標記的切點 `a2_after_transact_before_site`——**DynamoDB 已是新版、公開站
+        仍是舊版**。讀者看到的是舊的**已發布**版本，不是未發布內容，但它確實是 partial：
+        **不得因為本 Phase 綠燈就宣稱 O3 已通過**。補償重送（`resume_publish`）歸 Phase 59；
+        私有 staging 一律保留不刪，讓它有東西可補。
+        """
+        try:
+            self._restage(version, tutorial, operation_id, now=now)
+            self._promote(version.version_id, operation_id)
+            self._write_indexes(tutorial.slug)
+        except PublishError:
+            raise
+        except Exception as error:
+            raise PublishError(
+                f"{version.version_id} 已切換 published_at 與 current_version，"
+                f"但公開頁尚未寫出（切點 a2_after_transact_before_site）：{error}") from error
 
     def _transact_items(self, version: TutorialVersion, tutorial: Tutorial, *,
                         now: datetime) -> list[Mapping[str, object]]:
