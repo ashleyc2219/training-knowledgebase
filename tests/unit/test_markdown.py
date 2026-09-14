@@ -13,8 +13,12 @@ from collections.abc import Sequence
 import pytest
 
 from training_kb.content import (
+    PRIVATE_TUTORIAL_PREFIX,
+    PUBLIC_SITE_PREFIX,
+    diff_key,
     escape_markdown,
     make_diff,
+    markdown_key,
     parse_markdown,
     render_markdown,
     unescape_markdown,
@@ -168,3 +172,23 @@ def test_diff_has_unified_headers_and_trailing_newline() -> None:
     assert lines[1] == "+++ tutorials/prepare-meeting/v2.md"
     assert lines[2].startswith("@@ ")
     assert diff.endswith("\n") and not diff.endswith("\n\n")
+
+
+# --- 私有 key ---------------------------------------------------------------
+
+
+def test_keys_are_private() -> None:
+    assert markdown_key("prepare-meeting", 2) == "tutorials/prepare-meeting/v2.md"
+    assert diff_key("prepare-meeting", 2) == "tutorials/prepare-meeting/v2.diff"
+    assert not markdown_key("prepare-meeting", 2).startswith(PUBLIC_SITE_PREFIX)
+    assert diff_key("prepare-meeting", 1).startswith(PRIVATE_TUTORIAL_PREFIX)
+
+
+@pytest.mark.parametrize(("slug", "number"), [("a@b", 1), ("a#b", 1), ("prepare", 0),
+                                              ("prepare", -1), (" prepare", 1)])
+def test_key_builders_reject_parts_that_cannot_be_a_version(slug: str, number: int) -> None:
+    """`make_version_id` 當守門員：避免產出 `tutorials/a@v1/v0.md` 這種對不上版本的 key。"""
+    with pytest.raises(ValueError):
+        markdown_key(slug, number)
+    with pytest.raises(ValueError):
+        diff_key(slug, number)

@@ -48,7 +48,7 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
-from training_kb.errors import ContentError, CoordinationError
+from training_kb.errors import ContentError, CoordinationError, ObjectAlreadyExists
 from training_kb.models import StepDraft, StepType, TutorialContent
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import Repository
@@ -455,3 +455,53 @@ def make_diff(previous_md: str | None, current_md: str, *, previous_name: str,
     )
     text = "\n".join(lines)
     return f"{text}\n" if text else ""
+
+
+# --- 7. 私有 key 與條件寫入 --------------------------------------------------
+
+PRIVATE_TUTORIAL_PREFIX = "tutorials/"
+PUBLIC_SITE_PREFIX = "site/"
+
+
+def _artifact_key(slug: str, number: int, suffix: str) -> str:
+    """`tutorials/<slug>/v<n><suffix>`（00A §3.4）。
+
+    第一行的 `make_version_id` 只當守門員：`slug` 含 `@`／`#`、有前後空白，或 `number < 1`
+    時它丟 `ValueError`，避免產出 `tutorials/a@v1/v0.md` 這種對不上版本的 key。回傳值刻意
+    不用——key 的形狀是 `<slug>/v<n>`，不是 `<slug>@v<n>`。
+    """
+    make_version_id(slug, number)
+    return f"{PRIVATE_TUTORIAL_PREFIX}{slug}/v{number}{suffix}"
+
+
+def markdown_key(slug: str, number: int) -> str:
+    """該版全文的私有 key：`tutorials/<slug>/v<n>.md`。"""
+    return _artifact_key(slug, number, ".md")
+
+
+def diff_key(slug: str, number: int) -> str:
+    """該版與前版差異的私有 key：`tutorials/<slug>/v<n>.diff`（v1 是 0 位元組）。"""
+    return _artifact_key(slug, number, ".diff")
+
+
+def put_private_artifact(repository: Repository, key: str, text: str,
+                         content_type: str) -> None:
+    """以條件寫入保存未發布產物；同 key 同內容視為重送，內容不同則拒絕覆寫。
+
+    **公開前綴一律拒絕**（設計 §9.3、§13）：未發布全文落進 `site/` 就是已公開，
+    「還沒放連結」不算私有。發布 staging 也不走這裡，P24 直接用 `Repository.put_object`。
+
+    `ObjectAlreadyExists`（S3 412）用**型別**而不是訊息字串辨識（D-30）：只有它代表
+    「同一個 key 已經有東西」，這時才比對 bytes——一樣就是同一次操作重送，靜靜通過；
+    不一樣代表兩次不同內容搶同一版，丟 `ContentError` 並**保留既有物件**。
+    `PermanentError` 的其他子類（例如建 `Repository` 時沒給 bucket）要原樣往上拋，
+    攔太寬會把設定錯誤誤判成重送。
+    """
+    if not key.startswith(PRIVATE_TUTORIAL_PREFIX) or key.startswith(PUBLIC_SITE_PREFIX):
+        raise ContentError(f"未發布產物只能寫私有前綴 tutorials/：{key}")
+    body = text.encode("utf-8")
+    try:
+        repository.put_object(key, body, content_type, if_none_match=True)
+    except ObjectAlreadyExists:
+        if repository.get_object(key) != body:
+            raise ContentError(f"S3 已有同一個 key 但內容不同，不覆寫：{key}") from None
