@@ -18,9 +18,11 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from training_kb.errors import PermanentError
 from training_kb.models import ProcStatus, ProvenWorkflow
+from training_kb.operations import OperationCoordinator
 from training_kb.pipelines.common import JSONValue
 from training_kb.repository import Repository
 
@@ -170,5 +172,39 @@ def find_replayable(event: RawEvent, signature: str, *,
 
 
 # --- 4. PROC 生命週期（Phase 35 追加）-----------------------------------------
+
+PROC_MAX_CONSECUTIVE_FAIL = 3
+"""連續重放失敗幾次就退役（決策 D20）。
+
+與重放門檻 `PROC_MIN_SUCCESS` 剛好同值但意義不同：一個數「累積幾次不同事件成功」、
+一個數「連續幾次重放失敗」，所以是兩個常數名（00A §5.4），不得互相替代。
+"""
+
+
+def _reject_retired(proc: ProvenWorkflow) -> None:
+    """retired 的最後一道防線：默默覆寫等於自動復活（決策 F53）。
+
+    正常路徑上 Phase 37 的 `commit_success` 就會先擋掉 retired signature，
+    這裡丟 `PermanentError` 是為了讓「繞過去呼叫」變成看得見的錯誤而不是靜默的計數重置。
+    """
+    if proc.status == ProcStatus.RETIRED:
+        raise PermanentError(f"PROC {proc.signature} 已 retired，需人工核定新序列才能重置（F53）")
+
+
+def on_new_success(proc: ProvenWorkflow, operation_id: str,
+                   operations: OperationCoordinator, now: datetime) -> ProvenWorkflow:
+    """一次**新事件**的完整成功：`success_count + 1` 並把 `last_used` 推到 `now`。
+
+    「算不算新樣本」完全由 Phase 10 的 `record_proc_sample` 決定，不是由呼叫次數決定：
+    同一個 operation 重送會拿到 `False`，這時原樣回傳（決策 F05）。
+    **不清 `fail_count`**——被 Agent 救回的那一次重放仍然是一次失敗（設計 §7.2 只讓
+    `on_replay_success` 歸零）。
+    """
+    _reject_retired(proc)
+    if not operations.record_proc_sample(operation_id, proc.signature):
+        return proc
+    return proc.model_copy(update={"success_count": proc.success_count + 1, "last_used": now})
+
+
 # --- 5. 記錄步驟的驗證與執行（Phase 36 追加）----------------------------------
 # --- 6. 三層 normalize 與成功提交（Phase 37 追加）-----------------------------
