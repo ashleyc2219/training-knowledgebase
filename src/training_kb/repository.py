@@ -6,7 +6,7 @@
 AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**不是** `TransientError`，
 呼叫端不得自動重試）。
 
-檔案分成四段，Phase 10 直接接在後面，不必改動前面幾段：
+檔案分成六段，後來的 Phase 直接接在後面，不必改動前面幾段：
 1. 型別別名與保留屬性
 2. 實體 → PK 的分派
 3. Decimal codec 與 `item_to_model`（DynamoDB 只收 `Decimal`，不收 `float`）
@@ -17,6 +17,9 @@ AWS 端判斷，不是「先查再寫」。衝突一律 `CoordinationError`（**
    （`query_pk`／`query_by_target`／`scan_entity`）與六個固定讀取（`get_steps` 與五個 `list_*`）
 5. Phase 24 追加的交易寫入（`table_name`／`transact_write`）：唯一走 boto3 **client** 的一段，
    值仍然是原生 Python 值（resource 的 client 會自己序列化，見 `transact_write` 說明）
+6. Phase 27 追加的固定圖譜查詢（五個具名方法，與 Phase 08 的 `list_feedback_of_version`
+   合為設計 §10 的六種固定查詢）與排序用的模組函式 `version_sort_key`；全部只讀、不接
+   `Writer`，所以正常關係遍歷不可能呼叫模型
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -149,6 +152,25 @@ def item_to_model[T: StrictModel](item: DynamoItem, model: type[T]) -> T:
     """
     payload = {key: _decode(value) for key, value in item.items() if key not in RESERVED_ATTRS}
     return model.model_validate(payload)
+
+
+def version_sort_key(version_id: str) -> tuple[str, int]:
+    """`<slug>@v<n>` -> `(slug, n)`：版本排序的唯一依據（00A §6.3）。
+
+    模組函式而不是方法，因為 Phase 27 的三個查詢與 Phase 28 都要拿它當 `sorted` 的 key。
+    字典序會把 `@v10` 排在 `@v2` 前面，所以只要牽涉版本排序就一律經過它。
+    它與 `content.parse_version_id` 回傳同一種東西，但**不能**直接 import：相依方向是
+    `content` 呼叫 `repository`（設計 §5），反向 import 會造成循環，所以這裡自帶一份最小解析。
+    驗證寫法與那一支對齊——`isdecimal()`（不是 `isdigit()`）擋掉 `²` 這種 `int()` 會丟自己的
+    `ValueError` 的字元，再用 round-trip 比較擋掉 `a@v01` 的前導零與 `a@v１` 的全形數字，
+    否則兩個字串會對應同一版、排序也就不再是全序。格式不合丟 `PermanentError`
+    （**不是** `ValueError`）：呼叫端拿到的是「這筆資料確定不合法」，不是鍵格式筆誤。
+    """
+    slug, marker, suffix = version_id.partition("@v")
+    number = int(suffix) if suffix.isdecimal() else 0
+    if not slug or not marker or number < 1 or f"{slug}@v{number}" != version_id:
+        raise PermanentError(f"不是合法的 version_id：{version_id}")
+    return slug, number
 
 
 # --- 4. Repository -----------------------------------------------------------
@@ -603,3 +625,46 @@ class Repository:
                     return index
             raise TransientError(f"transaction cancelled: {reasons}") from error
         return None
+
+    # --- 6. 固定圖譜查詢（Phase 27 追加） ---
+
+    def _meta_models[M: StrictModel](self, entity: str, model: type[M]) -> list[M]:
+        """`scan_entity` 的 raw item -> 模型清單；**不排序**，排序由各查詢自己決定。
+
+        `scan_entity` 的預設 `meta_only=True` 已經濾過一次邊，這裡仍然自己再濾一次
+        `SK == META`：`entity` 等於 PK 前綴（00A §3.6），所以 `scan_entity("VERSION")` 的
+        掃描範圍同時涵蓋 VERSION 本體與它的 `SUPERSEDES` 邊，哪天預設值變了、或有人改傳
+        `meta_only=False`，邊就會被當成版本餵進 `item_to_model` 而整筆 `ValidationError`。
+        與 `_scan_models` 的差別只有兩點：不接 `equals` 過濾、不排序，所以三個 Scan 型查詢
+        可以各自套自己的順序（`version_sort_key`／`feature_id`／`slug`）。
+        """
+        rows = [item for item in self.scan_entity(entity) if str(item["SK"]) == META]
+        return [item_to_model(item, model) for item in rows]
+
+    def find_feature_by_name_or_alias(self, name: str) -> Feature | None:
+        """先比 `name` 再比 `aliases`（設計 §7.4）；找不到回 `None`，**不做語意搜尋**。
+
+        `name` 命中時直接採用，所以「某個 Feature 的舊名是另一個 Feature 的現名」不會誤判。
+        alias 必須唯一（D07），同一字串命中兩個 Feature 的 alias 一律 `PermanentError`，
+        不自行挑一個——挑錯會把改版寫到別篇教學上。掃描結果先依 `feature_id` 升序排好再比對，
+        讓同名（name 撞名）時的回傳可重現。語意搜尋與建立 Feature 都不在這裡（Phase 49）。
+        """
+        features = sorted(self._meta_models("FEATURE", Feature),
+                          key=lambda feature: feature.feature_id)
+        exact = [feature for feature in features if feature.name == name]
+        hits = exact or [feature for feature in features if name in feature.aliases]
+        if not exact and len(hits) > 1:
+            raise PermanentError(f"alias {name} 同時屬於 {len(hits)} 個 Feature")
+        return hits[0] if hits else None
+
+    def list_versions_of_tutorial(self, slug: str) -> list[TutorialVersion]:
+        """某篇教學的**全部**版本，依版號升序（設計 §10 六問之一）。
+
+        含歷史版與 `published_at=None` 的未發布版：索引頁只列已發布是 Phase 24 的責任，
+        查詢層先把事實給齊。`VERSION#<slug>@v` 不是合法的 Query 鍵（PK 是完整值，不是前綴），
+        所以照設計 §10 走基表分頁 Scan 再依 `slug` 篩選。排序一律經 `version_sort_key`，
+        字典序會把 `@v10` 排在 `@v2` 前面。
+        """
+        versions = self._meta_models("VERSION", TutorialVersion)
+        chosen = [version for version in versions if version.slug == slug]
+        return sorted(chosen, key=lambda version: version_sort_key(version.version_id))
