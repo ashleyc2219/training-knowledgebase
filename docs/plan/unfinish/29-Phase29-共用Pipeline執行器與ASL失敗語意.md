@@ -51,8 +51,8 @@ Phase 41 / 48 / 52 的業務節點                  +--> 不 publish、不建版
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 新增 | `src/training_kb/pipelines/__init__.py`、`common.py` | 套件入口；`PipelineName`、`JSONValue`、`TaskFn`、`Deps`、`run_sequence`。 |
-| 新增 | `src/training_kb/pipelines/asl.py` | `task_state`、`assert_safe_asl`、`canonical_json`、`save_asl_snapshot`。 |
+| 新增 | `src/training_kb/pipelines/__init__.py`、`common.py` | 套件入口（**不 re-export**，00A 第 6.9 節把 import 路徑定在 `pipelines.common`／`pipelines.asl`）；`PipelineName`、`JSONValue`、`TaskFn`、`PIPELINE_NAMES`、`Deps`、`run_sequence`。 |
+| 新增 | `src/training_kb/pipelines/asl.py` | `task_state`、`assert_safe_asl`、`canonical_json`、`save_asl_snapshot`，以及 `FAIL_STATE_NAME`、`TASK_TIMEOUT_SECONDS`、`RETRY`、`CATCH`、`ASL_LOCAL_PATH`、`ASL_SNAPSHOT_KEY` 六個固定常數。 |
 | 新增 | `tests/unit/pipelines/test_common.py`、`test_asl.py` | 順序與失敗終止；每個 `Task`（含 `Map` 內）都有 `Retry`／`Catch`／`Fail` 與快照條件寫入。 |
 | 消費 | `src/training_kb/errors.py`、`operations.py`、`repository.py` | 錯誤型別、`OperationCoordinator.fail`、`put_object`／`get_object`。 |
 
@@ -74,6 +74,7 @@ TransientError / PermanentError（Phase 02）、ObjectAlreadyExists（Phase 07�
 ### Produces
 
 ```python
+# pipelines/common.py
 PipelineName = Literal["ticket-analysis", "release-update", "feedback-review"]
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 TaskFn = Callable[[dict[str, JSONValue], "Deps"], dict[str, JSONValue]]
@@ -85,11 +86,13 @@ class Deps:
 
 def run_sequence(pipeline: PipelineName, payload: dict[str, JSONValue],
                  tasks: Sequence[TaskFn], deps: Deps) -> dict[str, JSONValue]: ...
+PIPELINE_NAMES: tuple[str, ...]           # = get_args(PipelineName)，就是上面三個名稱
+
+# pipelines/asl.py
 TASK_TIMEOUT_SECONDS = 120
 FAIL_STATE_NAME = "PipelineFailed"
 RETRY: tuple[dict[str, JSONValue], ...]   # D-53：固定兩條 retrier，兩條都是 1 秒／2 次／倍率 2
 CATCH: tuple[dict[str, JSONValue], ...]   # 一條 States.ALL -> PipelineFailed（ResultPath 是 $.failure）
-PIPELINE_NAMES: tuple[str, ...]           # = get_args(PipelineName)，就是上面三個名稱
 ASL_LOCAL_PATH = "infra/stepfunctions/{pipeline}/v{number}.json"
 ASL_SNAPSHOT_KEY = "stepfunctions/{pipeline}/v{number}.json"
 def task_state(resource_arn: str, next_state: str) -> dict[str, JSONValue]: ...
@@ -123,7 +126,7 @@ Lambda 丟 PermanentError            --> 不重試（刻意不列進 ErrorEquals
 
 ## 8. Task 1：先固定本機序列的成功與失敗
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/pipelines/test_common.py
@@ -161,7 +164,7 @@ def test_run_sequence_stops_at_first_failure() -> None:
     assert operations.failures == [("op-ticket-t_881", "invalid business result", False)]
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/pipelines/test_common.py -q
@@ -169,7 +172,7 @@ uv run pytest tests/unit/pipelines/test_common.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'run_sequence'`。若測試直接綠燈，先確認不是讀到舊實作或同名檔案。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/pipelines/common.py
@@ -198,11 +201,11 @@ def run_sequence(pipeline: PipelineName, payload: dict[str, JSONValue],
 
 `except Exception` 是刻意的：`PublishError` 與 `CoordinationError` 在 00A 第 4.1 節不是 `PermanentError` 的子類，只攔那兩類會讓它們繞過操作紀錄。攔下來之後**一定 `raise` 原例外**，不吞錯、不改成回傳值；`retryable` 只看是不是 `TransientError`。
 
-- [ ] **Step 4：補邊界測試並跑 `uv run pytest tests/unit/pipelines/test_common.py -q` 確認綠燈**
+- [x] **Step 4：補邊界測試並跑 `uv run pytest tests/unit/pipelines/test_common.py -q` 確認綠燈**
 
 補五個案例：成功路徑（結果保留輸入三欄並合併 Task 產出）、失敗後的第三個 Task 不被呼叫、未知名稱（`run_sequence("analytics", ...)` 丟 `PermanentError`，證明沒有第四條 pipeline）、`tasks=[]`（回傳輸入的複本且沒有任何 `fail` 呼叫）、`TransientError`（斷言 `failures == [("op-ticket-t_881", "bedrock timeout", True)]` 且該 Task 只被呼叫一次）。預期：全部 PASS；`failures` 第三欄在 `TransientError` 時是 `True`、`PermanentError` 時是 `False`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/__init__.py src/training_kb/pipelines/common.py tests/unit/pipelines/test_common.py
@@ -211,7 +214,7 @@ git commit -m "feat(pipelines): 建立共用執行契約"
 
 ## 9. Task 2：讓每個 ASL Task 都有 Retry 與 Catch
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/pipelines/test_asl.py
@@ -272,7 +275,7 @@ def test_task_with_only_the_first_retrier_is_rejected() -> None:
     assert "AssignCluster" in str(error.value)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/pipelines/test_asl.py -q
@@ -280,7 +283,7 @@ uv run pytest tests/unit/pipelines/test_asl.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'task_state'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/pipelines/asl.py
@@ -342,15 +345,18 @@ def _check_task(state: dict, states: dict, *, where: str) -> None:
         raise PermanentError(f"Catch 沒有導向同層的 Fail state：{where} -> {target}")
 ```
 
+實作與上面草稿有兩處必要差異（mypy strict 與共用常數安全，2026-09-14 實作時修正）：
+（a）`task_state` 用私有的 `_copies(...)` 取代 `[dict(item) for item in RETRY]`——`dict(item)` 是淺複製，所有 Task 會共用同一個 `ErrorEquals` list，任何一處就地 append 就污染全部定義；`_copies` 連 list 值一起複製，產出的 JSON 完全相同。（b）`_check_scope`／`_check_task` 的參數型別是 `Mapping[str, JSONValue]`，取值後一律 `isinstance` 收斂（`JSONValue` 是 union，裸 `dict` 註記過不了 `mypy --strict`）；順帶多一條檢查：`States` 裡的值不是物件時丟 `PermanentError(f"state 不是物件：{where}")`。
+
 `_check_scope` 會遞迴進 `Map` 的 `ItemProcessor`／`Iterator` 與 `Parallel` 的 `Branches`，錯誤訊息帶完整 state 路徑，所以漏掉保護的是哪一個節點看得出來。`Catch` 的目標只在**同一層** `States` 內找，因為 ASL 不允許從 `Map` 內部跳到外層 state。`task_state` 只給骨架：事件封套 `"Parameters": {"pipeline": ..., "task": ..., "state.$": "$"}`（00A D-49）由 Phase 41、48、52 各自補在結果上，因為這個簽名看不到 pipeline 與 task 名稱。
 
 `assert_safe_asl` 強制每個 Task 的 `Retry` **前兩條**與 `RETRY` 逐字相同（00A 第 8 節 D-53），而且任何一條 retrier 都不得涵蓋 `States.ALL`——那等於連 `PermanentError` 也重試，資料不合法時白等三次。第三條之後的有界 retrier 不擋，但三條 pipeline 目前都只用這兩條，[Phase 41](41-Phase41-Ticket-Analysis雲端流程驗收.md)、[Phase 48](48-Phase48-Feedback-Review排程流程.md)、[Phase 52](52-Phase52-Release-RETIRE與流程驗收.md) 一律 `from training_kb.pipelines.asl import CATCH, RETRY, task_state`，不各自抄一份字面值。
 
-- [ ] **Step 4：跑 `uv run pytest tests/unit/pipelines/test_asl.py -q` 確認綠燈**
+- [x] **Step 4：跑 `uv run pytest tests/unit/pipelines/test_asl.py -q` 確認綠燈**
 
 預期：三個測試都 PASS。再手動把 `sample_definition()` 其中一個 Task 的 `Catch` 刪掉重跑一次，必須紅燈；確認後改回來。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/asl.py tests/unit/pipelines/test_asl.py
@@ -359,7 +365,7 @@ git commit -m "test(pipelines): 鎖定ASL失敗語意"
 
 ## 10. Task 3：保存版本化 ASL 快照
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # 續寫 tests/unit/pipelines/test_asl.py
@@ -387,7 +393,7 @@ def test_snapshot_versioned_and_never_overwritten() -> None:
     assert repository.objects[key] == body
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/pipelines/test_asl.py -q -k snapshot
@@ -395,7 +401,7 @@ uv run pytest tests/unit/pipelines/test_asl.py -q -k snapshot
 
 預期：FAIL，訊號包含 `cannot import name 'save_asl_snapshot'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # 續寫 src/training_kb/pipelines/asl.py
@@ -422,13 +428,15 @@ def save_asl_snapshot(repository, pipeline: PipelineName, number: int, body: byt
     return key
 ```
 
+實作把 `repository` 註記成 00A 第 6.9 節的 `Repository`（草稿沒有註記，`mypy --strict` 不接受）；測試用鴨子型別的 `FakeRepository`，`mypy` 不掃 `tests/`，兩邊不衝突。
+
 本地定義檔是 `ASL_LOCAL_PATH`（`infra/stepfunctions/ticket-analysis/v1.json`），S3 私有快照是 `ASL_SNAPSHOT_KEY`（`stepfunctions/ticket-analysis/v1.json`），兩者是**同一份 bytes**；簡報早期寫的 `<pipeline>.asl.json` 單檔佈局已作廢，不要再出現。版本號與教學版本無關，由部署者遞增。
 
-- [ ] **Step 4：跑 `uv run pytest tests/unit/pipelines -q` 確認綠燈**
+- [x] **Step 4：跑 `uv run pytest tests/unit/pipelines -q` 確認綠燈**
 
 預期：`test_common.py` 與 `test_asl.py` 全綠；不同內容撞同 key 時是 `PermanentError`，既有物件內容保持不變。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/asl.py tests/unit/pipelines/test_asl.py
@@ -472,8 +480,8 @@ git commit -m "feat(pipelines): 保存ASL版本快照"
 
 ## 14. 完成清單
 
-- [ ] `run_sequence` 的成功、永久失敗、暫時失敗與空 `tasks` 測試全部通過，失敗時一定先寫 `OperationCoordinator.fail(...)` 再把原例外往外丟。
-- [ ] 所有 `Task`（含 `Map`／`Parallel` 內）都有兩條 `IntervalSeconds 1`／`MaxAttempts 2`／`BackoffRate 2` 的 `Retry` 與導向 `Fail` 的 `Catch`。
-- [ ] `Retry` 前兩條逐字等於 `RETRY`（`TransientError` 一條、四個 `Lambda.*` 服務層錯誤一條，D-53）、`TimeoutSeconds` 是 120、`Choice` 都有 `Default`、Lambda Task 用直接函式 ARN；三條固定 pipeline 名稱已鎖定（`PipelineName` 沒有第四個值），ASL input 僅含 `operation_id`／`project_id`／`input_ref`。
-- [ ] 快照 key 為 `stepfunctions/<pipeline>/v<n>.json`，條件寫入且不覆蓋既有內容；`Deps` 仍只有兩個欄位，並標明 Phase 38 會追加三個預設 `None` 的欄位。
-- [ ] 未把本機 fixture 稱為 AWS runtime 通過；O2／O3 未通過時的阻擋狀態仍清楚可見。
+- [x] `run_sequence` 的成功、永久失敗、暫時失敗與空 `tasks` 測試全部通過，失敗時一定先寫 `OperationCoordinator.fail(...)` 再把原例外往外丟。
+- [x] 所有 `Task`（含 `Map`／`Parallel` 內）都有兩條 `IntervalSeconds 1`／`MaxAttempts 2`／`BackoffRate 2` 的 `Retry` 與導向 `Fail` 的 `Catch`。
+- [x] `Retry` 前兩條逐字等於 `RETRY`（`TransientError` 一條、四個 `Lambda.*` 服務層錯誤一條，D-53）、`TimeoutSeconds` 是 120、`Choice` 都有 `Default`、Lambda Task 用直接函式 ARN；三條固定 pipeline 名稱已鎖定（`PipelineName` 沒有第四個值），ASL input 僅含 `operation_id`／`project_id`／`input_ref`。
+- [x] 快照 key 為 `stepfunctions/<pipeline>/v<n>.json`，條件寫入且不覆蓋既有內容；`Deps` 仍只有兩個欄位，並標明 Phase 38 會追加三個預設 `None` 的欄位。
+- [x] 未把本機 fixture 稱為 AWS runtime 通過；O2／O3 未通過時的阻擋狀態仍清楚可見。
