@@ -114,6 +114,7 @@ handler({"action": "metrics", "version_ids": ["prepare-meeting@v1"]}, None)
 | 測試 | `tests/unit/test_reopen_metrics.py` | 窗口端點、去重、先後、cluster、零分母、`VersionMetrics` 與 handler 分派。 |
 | 測試 | `tests/unit/infra/test_analytics_stack.py` | `Template` 斷言 Lambda 名稱、handler 路徑與沒有 Function URL（`tests/unit/infra/` 由 Phase 41 首建）。 |
 | 測試 | `tests/unit/test_rule_and_call_metrics.py` | 規則狀態計數、套用次數與 attempt 計數。 |
+| 修改 | `tests/unit/test_feedback_review_flow.py` | （現況核對 2026-09-14：§4 原本漏列，§7 Task 4 有寫。）只把 `test_stack_has_review_machine_and_exactly_one_daily_schedule` 的 `names == {...}` 補上 `"training-kb-analytics"`；這是 COMMON R3.6 的**有文件依據的例外**（Phase 48 §7 已預告），只改那一行、不動該檔其他內容。 |
 
 ## 5. 固定介面
 
