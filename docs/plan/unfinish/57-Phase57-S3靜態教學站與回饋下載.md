@@ -225,11 +225,34 @@ class SiteRenderer:                              # src/training_kb/site.py，只
 - **不把版本頁的退役區塊拿掉**（REP §8 第 8 項提過「拿掉或改成只在未發布的預覽有意義」，修正波的實際選擇是兩處都留；拿掉會讓 P26 的四個測試紅燈）。
 - `successor` **等於自身**時不顯示連結：**現有 `_successor_line` 沒有這一條**（P26 的 `resolve_successor` 在寫入前已經擋掉，renderer 不再判一次）。本 Phase §7 Task 2 Step 4 的「successor 等於自身」案例若要成立，加判斷時**不能**改動既有輸出字串，而且要確認 P26 的四個 successor 測試仍然全綠。**本計畫選擇：** 照 `site.py` 現有註解的理由（責任在 `resolve_successor`）**不加**這一條判斷，改成在測試裡斷言「renderer 原樣輸出」，並在報告寫明分工；若實作者選擇加，必須先跑 `uv run pytest tests/unit/test_retired_page.py tests/unit/test_retire_tutorial.py -q` 確認沒有紅燈。
 
+**本計畫選擇（2026-09-14，實作時新增的四項裁決）：**
+
+1. **`_diff_block` 的守門條件改成「有更舊的已發布版卻缺 `supersedes`」，不是「版號大於 1」。**
+   00A §6.7 的字面條件與既有程式衝突（R5 以既有程式為準）：`content._base_version` 在
+   `current_version is None` 時回 `(None, 0)`，`_next_free_number` 又會跳過被永久失敗的未發布版
+   占用的號碼，所以「v1 永久失敗、v2 才是第一個成功版本」會產生**合法的** `v2 + supersedes=None`
+   （設計 §8.1 明文允許版號缺口）。照字面實作會讓這種教學永遠渲染不出來，也會讓 P25 既有的
+   `tests/integration/test_batch_publish_cutpoints.py`（seed 了 `prepare-meeting@v2 + supersedes=None`）
+   全檔 error，而那支測試依 R3.6 不得修改。改用 `tutorial.current_version` 判斷之後，
+   「v3 但目前版本是 v2 卻沒有 `supersedes`」仍然丟 `PermanentError`，§8 的 Failure 列照樣成立。
+   **建議 controller 把 00A §6.7 的那句話改成同樣的條件。**
+2. **`render_tutorial_index` 不排序，只過濾。** §7 Task 2 Step 3 原寫「依版號升序排序」，但
+   `Publisher._write_tutorial_index` 已經用 `list_versions_of_tutorial`（升序）再 `[::-1]` 反轉成
+   「版號大的在前」，而且 `test_publisher_single.py` 正在斷言那個順序。兩份排序邏輯遲早分岔，
+   所以 renderer 保留呼叫端給的順序。
+3. **版本頁不放「回站台索引」的 `../../index.html`。** §6 把它列為實作者可選；不放的話版本頁的
+   對外連結只剩同目錄三個，整站掃描（每個 href 都要指得到實際 key）也最單純。讀者仍可經
+   版本紀錄頁與站台索引往返（站台索引 → `tutorials/<slug>/index.html` → `v<n>.html`）。
+4. **widget 的初始狀態是「尚未產生檔案」，`NOT_SENT_TEXT` 放在固定說明句裡。** §2 的畫面示意把
+   `NOT_SENT_TEXT` 當成初始狀態，但還沒按下下載就說「檔案已產生」是假的。改成：固定說明句
+   逐字包含「檔案已產生，尚未送出」，狀態列初始是「尚未產生檔案」，按下下載後才換成
+   「檔案已產生，尚未送出。請把檔案交給維護者匯入。」。
+
 ## 7. TDD Tasks
 
 ### Task 1：版本頁的版本選擇、差異與未發布標記
 
-- [ ] **Step 1：建立失敗測試**（`renderer` fixture 是 `SiteRenderer(notice="合成資料示範", batch="demo-seed-01", categories=("找不到按鈕", "缺少資訊"))`；`make_version` 建 `TutorialVersion`，`published_at` 預設是一個 aware datetime）
+- [x] **Step 1：建立失敗測試**（`renderer` fixture 是 `SiteRenderer(notice="合成資料示範", batch="demo-seed-01", categories=("找不到按鈕", "缺少資訊"))`；`make_version` 建 `TutorialVersion`，`published_at` 預設是一個 aware datetime）
 
 ```python
 from training_kb.site import NO_PREVIOUS_TEXT, SiteRenderer
@@ -250,7 +273,7 @@ def test_version_page_v1_says_no_previous(renderer, tutorial, steps, content):
     assert NO_PREVIOUS_TEXT in page and "v0.diff.txt" not in page
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_site_pages.py -q
@@ -258,7 +281,7 @@ uv run pytest tests/unit/test_site_pages.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'NO_PREVIOUS_TEXT'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 import html
@@ -299,7 +322,7 @@ def _diff_block(version) -> str:
 
 `site_diff_key(version_id)`（**S3 key**，含 `tutorials/` 不含 `site/`）在 `publishing.py`：把既有的 `_diff_copy_key` 改成這個公開名稱，`_public_pairs` 改呼叫它，一份字串兩個用途。
 
-- [ ] **Step 4：補版本選擇與跳脫後跑綠燈**
+- [x] **Step 4：補版本選擇與跳脫後跑綠燈**
 
 `_version_switch(tutorial, version)` 組出三段：`version.supersedes` 非空時是 `_page_href(version.supersedes, ".html")` 的「上一版 vN」、本頁版號（等於 `tutorial.current_version` 時加「（目前版本）」）、以及 `href="index.html"` 的「查看版本紀錄」。（現況核對 2026-09-14：原文要 `from training_kb.publishing import site_key, tutorial_index_key` 再套 `_href(...)`，**那會造成 `site` ↔ `publishing` 循環 import**——`publishing.py` 第 74 行已經 `from training_kb.site import SiteRenderer`，而 `site.py` 的模組 docstring 也明寫反向 import 一律禁止。三個 key helper 仍然是 D-54 的唯一 key 來源，只是它們算的是 **S3 key**，頁面裡的是 **href**，兩層分開。）
 
@@ -315,7 +338,7 @@ uv run pytest tests/unit/test_site_pages.py tests/unit/test_site_renderer.py \
 
 其中已經鎖死、**不得改測試只能改實作去滿足**的有：`data-published="true"/"false"` 兩個標記、`data-site-version="v<n>"`、版本頁與教學索引都輸出 `class="retired"`＋`RETIRED_NOTICE`、後繼連結逐字是 `<a href="../<successor>/index.html">`、教學索引在沒有 successor 時**整頁不含 `index.html`**、教學索引印完整 `version_id` 字串且只列已發布版本、`render_version_page` 對步驟不同步仍丟 `PublishError`、頁面不含 `reason`／`c12`／`operations/`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/site.py tests/unit/test_site_pages.py
@@ -324,7 +347,7 @@ git commit -m "feat(site): 版本頁加入版本選擇與差異連結"
 
 ### Task 2：退役頁、後繼連結與索引頁的公開界線
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from training_kb.content import RETIRED_NOTICE
@@ -352,7 +375,7 @@ def test_tutorial_index_hides_unpublished_versions(renderer, tutorial):
     assert "prepare-meeting@v1" in page      # P24 的既有斷言：索引印完整 version_id
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_site_pages.py -q
@@ -360,17 +383,17 @@ uv run pytest tests/unit/test_site_pages.py -q
 
 預期：FAIL，退役橫幅與索引過濾都還不存在。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 **（現況核對 2026-09-14：這一整段大部分已經做完了。）** 原文要新建的 `_retired_banner(tutorial)` 就是既有的 `site.py::_retired_block(tutorial)`＋`_successor_line(successor)`：它已經在 `status != TutorialStatus.RETIRED` 時回空字串、已經 `from training_kb.content import RETIRED_NOTICE`（不重抄字面值）、已經在 `successor is None` 時不輸出 `<a>`、已經 `escape` 過 slug，href 逐字是 `../<successor>/index.html`（D-78）。**不要重寫它，也不要改名。** 「`successor` 等於 `tutorial.slug` 時不顯示」這一條**現況沒有**（責任在 P26 的 `resolve_successor`），要不要加見 §6 的「本計畫選擇」。
 
 本 Step 真正要新寫的只有：`_published_versions(versions)` —— 只保留 `published_at is not None`，依 `parse_version_id(v.version_id)[1]` 升序排序，連結用 **`_page_href(v.version_id, ".html")`** 的同目錄相對 href（**不是** `_href(site_key(...))`，理由見 §6），每列仍然印出完整的 `version_id` 文字（P24 既有斷言）；外層保留既有的 `data-site-version` 與 `data-slug`。**索引頁不得輸出任何指向站台索引的 `index.html`**（P26 的 `test_tutorial_index_omits_the_link_when_the_successor_was_rejected` 斷言 `"index.html" not in page`）。退役時 widget 區塊整段不輸出。
 
-- [ ] **Step 4：補邊界案例並跑綠燈**
+- [x] **Step 4：補邊界案例並跑綠燈**
 
 再加 successor 為 `None`、successor 等於自身、successor 為空白字串三個案例，預期都沒有連結卻仍顯示過期說明與原文；再加一個「退役頁全文不含使用者 ID 與回饋留言」的斷言。執行 `uv run pytest tests/unit/test_site_pages.py -q`，預期整個檔案全綠。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/site.py tests/unit/test_site_pages.py
@@ -385,7 +408,7 @@ git commit -m "feat(site): 退役頁與索引只列已發布版本"
 > - **`tests/integration/test_site_widget_roundtrip.py` 的 `import_feedback` roundtrip 本波做不完。** 本計畫選擇：本波把 roundtrip 檔建起來，內容改成**只斷言下載封套的形狀**（`{kind, source, generated_at, note, items}`、`kind in ("feedback", "view")`、`items[0]` 具備 P42 的必填欄位 `id`／`tutorial_version`／`rating`／`user`、`type(rating) is int`、ID 形狀 `f_site-<slug>-<user>-<epoch>`，00A §6.7「widget 下載封套」列），不 import `training_kb.ingress.import_feedback`；真正的 roundtrip 由 **P42 在 W2 補上**（它是 `import_feedback` 的 owner，00A 把 P57 列為它的消費 Phase）。差異寫進 Phase 報告 §9 與 §11 完成清單（維持未勾）。
 > - `approved_categories(repository)`（P43）同理：`SiteRenderer(categories=...)` 的值本波直接用 `("找不到按鈕", "缺少資訊")` 這個 tuple 字面值傳入測試，**並在 `site.py` 裡一個字都不寫類別清單**（renderer 不自己維護類別表，00A §6.7）。
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from pathlib import Path
@@ -411,7 +434,7 @@ def test_downloaded_feedback_passes_phase42_import(repository, operations):
     # 本波先只留封套形狀斷言（見本 Task 開頭的說明），這一行等 P42 補。
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_site_assets.py tests/integration/test_site_widget_roundtrip.py -q
@@ -419,7 +442,7 @@ uv run pytest tests/unit/test_site_assets.py tests/integration/test_site_widget_
 
 預期：FAIL，訊號包含 `FileNotFoundError: demo/site_assets/widget.js`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```javascript
 (function () {
@@ -450,13 +473,13 @@ uv run pytest tests/unit/test_site_assets.py tests/integration/test_site_widget_
 
 同一檔案再加三段：`button.rating` 與 `button.category` 的 click handler 只更新兩個區域變數並用 `textContent` 更新狀態列；`#tkb-download` 檢查 `field("tkb-user")` 非空且評分是 1–5 的整數，再用 `Number(...)` 讓 `rating` 是數字型別，組出 `id = "f_site-" + token(slug) + "-" + token(user) + "-" + Math.floor(Date.now() / 1000)` 後呼叫 `save(..., "feedback", [...])`；`#tkb-view` 只檢查使用者 ID，呼叫 `save(..., "view", [{tutorial_version: versionId, user: user, ts: nowIso()}])`。全部用 `addEventListener`，不用 `innerHTML`。封套 `{kind, source, generated_at, note, items}` 的 `kind`／`items` 與 Phase 42 匯入入口的事件形狀相同，維護者用 [Phase 58](./58-Phase58-Demo控制台與規則開關預覽.md) 的 `import` 子命令把 `items` 逐筆送進 `import_feedback`／`import_view`；`user` 一律是 Demo 種子的 `u_01` 形狀，不是瀏覽器隨機 ID。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 roundtrip 另需補 `validate_view` 案例、「同一個 `id` 第二次匯入回 `duplicate` 且不增加樣本」的案例，以及「`rating` 是 `"4"` 字串時被拒絕並指出 `rating` 欄位」的案例。執行 `uv run pytest tests/unit/test_site_assets.py tests/integration/test_site_widget_roundtrip.py -q`，預期整個檔案全綠。
 
 （現況核對 2026-09-14：這三個案例全部相依 P42 的 `validate_feedback`／`validate_view`／`import_*`，**在 W1 做不到**，留給 P42 在 W2 補進同一支檔。本波 `tests/integration/test_site_widget_roundtrip.py` 只放「整站掃描」（Task 4 Step 4 那一項，不相依 P42）與封套形狀斷言。`rating` 是 `"4"` 會被拒絕這件事，本波可以用**已存在的** `training_kb.models.Feedback`（`rating` 的 `mode="before"` strict int validator）先斷言一次，不必等 P42。）
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add demo/site_assets tests/unit/test_site_assets.py tests/integration/test_site_widget_roundtrip.py
@@ -465,7 +488,7 @@ git commit -m "feat(site): 回饋 widget 產生可匯入檔案"
 
 ### Task 4：只公開 `site/*` 的 bucket policy
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import json
@@ -499,7 +522,7 @@ def test_website_hosting_is_enabled_without_public_acls() -> None:
         "BlockPublicPolicy": False, "RestrictPublicBuckets": False}
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_infra_site_hosting.py -q
@@ -507,7 +530,7 @@ uv run pytest tests/unit/test_infra_site_hosting.py -q
 
 預期：FAIL，Phase 09 建立的 bucket 還沒有 website 設定與 bucket policy。
 
-- [ ] **Step 3：修改 Phase 09 的 CDK**
+- [x] **Step 3：修改 Phase 09 的 CDK**
 
 在 `infra/training_kb_data_stack.py` 既有的 `s3.Bucket(...)` 加上 `website_index_document="index.html"`、`website_error_document="index.html"`，把 `block_public_access` 由 `s3.BlockPublicAccess.BLOCK_ALL` 改成 `s3.BlockPublicAccess(block_public_acls=True, ignore_public_acls=True, block_public_policy=False, restrict_public_buckets=False)`，並把 `enforce_ssl=True` 改成 `enforce_ssl=False`。再用 `bucket.add_to_resource_policy(iam.PolicyStatement(effect=iam.Effect.ALLOW, principals=[iam.AnyPrincipal()], actions=["s3:GetObject"], resources=[bucket.arn_for_objects("site/*")]))`，最後以 `CfnOutput` 輸出 `bucket.bucket_website_url` 並在說明寫「只有 HTTP」。**`enforce_ssl=False` 是本 Phase 的明確決定，理由要寫進程式註解：** 設計 §9.3 只有一個 bucket，`enforce_ssl=True` 會加一段「非 HTTPS 一律 Deny」的 bucket policy，而 S3 website endpoint 只提供 HTTP（設計 §13、§17.1），兩者同時存在時公開頁永遠讀不到。關掉它不會讓私有前綴變成公開：`tutorials/`、`operations/`、`stepfunctions/`、`demo/previews/` 沒有任何 Allow 語句，只有 `site/*` 有；程式與 Lambda 透過 SDK 存取本來就走 HTTPS。**不得因此宣稱本站提供 HTTPS。**
 
@@ -530,11 +553,11 @@ uv run pytest tests/unit/test_infra_site_hosting.py -q
 
 改別人的測試檔一律**只用 Edit**、只動上表列出的斷言，不重排不重格式化（COMMON.md R3）。
 
-- [ ] **Step 4：跑測試並補整站掃描**
+- [x] **Step 4：跑測試並補整站掃描**
 
 補一個整合測試：用 `Repository.put_object` 把 `demo/site_assets/*` 寫到 `ASSET_KEYS`、把整站渲染結果寫到本機假 S3，然後斷言 `site/` 底下沒有任何物件含 `data-published="false"`、沒有 `reason` 字串，且每個站內 `href` 都對得到已產生的 key。`cdk synth` 通過只代表 template 合法，不代表已部署。執行 `uv run pytest tests/unit/test_infra_site_hosting.py tests/unit/test_data_stack.py tests/integration/test_site_widget_roundtrip.py -q`，預期整個檔案全綠。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add infra/training_kb_data_stack.py tests/unit/test_infra_site_hosting.py tests/unit/test_data_stack.py tests/integration/test_site_widget_roundtrip.py
@@ -545,7 +568,7 @@ git commit -m "feat(infra): 只公開 site 前綴的靜態教學站"
 
 上一批把所有真實 AWS 延後到 P41；這一批 **P41／P48／P52／P57／P59／P60 要真的部署與執行並保存證據**。本 Phase 承接 [Phase 24](./24-Phase24-單篇教學發布提交.md)／[Phase 25](./25-Phase25-多篇教學整批發布.md) 文件裡「真實 AWS 重跑切點與 website endpoint 人工驗收」的 website endpoint 那幾條。
 
-- [ ] **Step 1：部署 data stack**（`TrainingKbData` 已存在於 `us-east-1`，本次是更新）
+- [x] **Step 1：部署 data stack**（`TrainingKbData` 已存在於 `us-east-1`，本次是更新）
 
 ```bash
 AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \
@@ -557,7 +580,7 @@ AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \
 
 `node` 在互動 shell 被擋（`Security: node blocked`），一律 `command npx aws-cdk@2 …`；`--outputs-file` 指到 scratchpad（專案外），**`cdk.out/` 與 outputs 檔都不提交**（COMMON.md R8）。`diff` 的輸出要貼進報告——它會明確列出 BPA 兩項由 `true` 變 `false` 與新增的 bucket policy，是「改動範圍就是預期範圍」的證據。
 
-- [ ] **Step 2：寫入一份公開頁並用 website endpoint 實際讀**
+- [x] **Step 2：寫入一份公開頁並用 website endpoint 實際讀**
 
 bucket 是 `training-kb-content-example`，website endpoint 形如 `http://<bucket>.s3-website-us-east-1.amazonaws.com`。**O5 BLOCKED**，所以不要靠 pipeline 產生教學；用 `Publisher` 發布一篇測試資料的版本，或直接 `aws s3 cp` 一份渲染好的頁面與 `site/assets/*` 上去（報告要寫清楚用哪一種）。然後：
 
@@ -571,11 +594,11 @@ aws s3api get-bucket-policy --bucket <bucket> --region us-east-1 --output text
 
 存證（貼進報告 §4，**不貼 bucket 內容本身**）：第一條 `curl` 的 **HTTP 200** 與回應標頭；第二條**必須是 403／404**（私有前綴沒有公開 Allow）；`get-bucket-policy` 的 JSON 逐字，確認 `Resource` 結尾是 `/site/*` 而不是 `/*`。
 
-- [ ] **Step 3：把觀察結果原樣記錄，不做 gate 結論**
+- [x] **Step 3：把觀察結果原樣記錄，不做 gate 結論**
 
 O3 仍是 FAIL：頁面打得開**只證明 website hosting 與 bucket policy 生效**，不證明發布切點的原子性。報告 §7 只能寫「website endpoint 可讀、公開範圍僅 `site/`」，**不得**寫「O3 PASS」或「發布故障驗收通過」。同時在報告寫明本站**只有 HTTP**（設計 §17.1），要 HTTPS 須另案評估。
 
-- [ ] **Step 4：提交**（只提交程式與文件，證據寫進報告；不提交 `cdk.out/`、outputs 檔、任何 bucket 內容）
+- [x] **Step 4：提交**（只提交程式與文件，證據寫進報告；不提交 `cdk.out/`、outputs 檔、任何 bucket 內容）
 
 ## 8. 驗收矩陣
 
@@ -620,15 +643,15 @@ O3 仍是 FAIL：頁面打得開**只證明 website hosting 與 bucket policy �
 
 ## 11. 完成清單
 
-- [ ] `SiteRenderer` 三個方法簽名與 Phase 24 完全相同，且 `SiteRenderer()` 仍可無參數建構。
-- [ ] 公開 key 全部由 Phase 24 的 `site_key`／`tutorial_index_key`／`site_index_key` 與本 Phase 的 `site_diff_key`（在 `publishing.py`）組出，佈局是 `site/tutorials/<slug>/...`；**頁面裡的 href 是同目錄相對路徑，`site.py` 沒有 import `publishing`**（現況核對 2026-09-14 補）。
-- [ ] 版本頁有版本選擇、差異連結與版本紀錄連結；v1 顯示固定的無前版文案；頁面不含 `reason`。
-- [ ] 退役頁使用 Phase 26 的 `RETIRED_NOTICE`、保留原文、只在合法 successor 時顯示連結且不自動跳轉。
-- [ ] widget 只產生檔案、狀態固定為「檔案已產生，尚未送出」，下載檔通過 Phase 42 驗證；不引 CDN、不含金鑰、不用 `innerHTML` 放使用者文字。
-- [ ] bucket policy 只公開 `site/*`，`enforce_ssl=False` 的理由已寫進程式註解，Phase 09 的測試同步更新（四條，見 §7 Task 4 Step 3 的表）。
-- [ ] **資料角色補上 `site/` 的 `PutObject`／`GetObject` 與 `ListBucket` 前綴**（REP §8 第 6 項；現況核對 2026-09-14 新增）。
-- [ ] **P24／P26 的既有測試全綠**：`test_site_renderer.py`、`test_retired_page.py`、`test_retire_tutorial.py`、`test_publisher_single.py`、`test_publisher_batch.py` 一條都沒改、一條都沒紅（現況核對 2026-09-14 新增）。
-- [ ] **真實 AWS（COMMON.md R1）**：`cdk deploy TrainingKbData` 完成；website endpoint `curl` 到 `site/index.html` 是 200、私有前綴是 403／404；`get-bucket-policy` 的 `Resource` 是 `/site/*`；證據貼進報告（現況核對 2026-09-14 新增）。
-- [ ] 文件與畫面都把 website endpoint 寫成 HTTP，沒有宣稱 HTTPS；也沒有把單元測試 PASS 說成 O3 發布故障驗收已通過（**O3 現況是 FAIL**）。
+- [x] `SiteRenderer` 三個方法簽名與 Phase 24 完全相同，且 `SiteRenderer()` 仍可無參數建構。
+- [x] 公開 key 全部由 Phase 24 的 `site_key`／`tutorial_index_key`／`site_index_key` 與本 Phase 的 `site_diff_key`（在 `publishing.py`）組出，佈局是 `site/tutorials/<slug>/...`；**頁面裡的 href 是同目錄相對路徑，`site.py` 沒有 import `publishing`**（現況核對 2026-09-14 補）。
+- [x] 版本頁有版本選擇、差異連結與版本紀錄連結；v1 顯示固定的無前版文案；頁面不含 `reason`。
+- [x] 退役頁使用 Phase 26 的 `RETIRED_NOTICE`、保留原文、只在合法 successor 時顯示連結且不自動跳轉。
+- [ ] widget 只產生檔案、狀態固定為「檔案已產生，尚未送出」，下載檔通過 Phase 42 驗證；不引 CDN、不含金鑰、不用 `innerHTML` 放使用者文字。**（2026-09-14 實作：前半與後半都做完並在真實 website endpoint 實測；唯獨「通過 Phase 42 驗證」等 `import_feedback` 落地——P42 在 W2，本波改用 `models.Feedback` 的 strict `rating` 驗一次，所以本列維持未勾。）**
+- [x] bucket policy 只公開 `site/*`，`enforce_ssl=False` 的理由已寫進程式註解，Phase 09 的測試同步更新（四條，見 §7 Task 4 Step 3 的表）。
+- [x] **資料角色補上 `site/` 的 `PutObject`／`GetObject` 與 `ListBucket` 前綴**（REP §8 第 6 項；現況核對 2026-09-14 新增）。
+- [x] **P24／P26 的既有測試全綠**：`test_site_renderer.py`、`test_retired_page.py`、`test_retire_tutorial.py`、`test_publisher_single.py`、`test_publisher_batch.py` 一條都沒改、一條都沒紅（現況核對 2026-09-14 新增）。
+- [x] **真實 AWS（COMMON.md R1）**：`cdk deploy TrainingKbData` 完成；website endpoint `curl` 到 `site/index.html` 是 200、私有前綴是 403／404；`get-bucket-policy` 的 `Resource` 是 `/site/*`；證據貼進報告（現況核對 2026-09-14 新增）。
+- [x] 文件與畫面都把 website endpoint 寫成 HTTP，沒有宣稱 HTTPS；也沒有把單元測試 PASS 說成 O3 發布故障驗收已通過（**O3 現況是 FAIL**）。
 
 **（現況核對 2026-09-14）本批注定勾不起來的一列：** 「下載檔通過 Phase 42 驗證」——`import_feedback`／`import_view` 是 P42（W2）的產出，P57 在 W1。本批只驗封套形狀與 `Feedback` 模型的 strict `rating`；真正的 roundtrip 由 P42 在 `tests/integration/test_site_widget_roundtrip.py` 補上（00A 已把 P57 列為 P42 的消費 Phase）。
