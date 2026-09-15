@@ -198,7 +198,7 @@ step_indexes == () -------------------------------------> return None（NO_STEP�
 
 ### Task 1：證據指紋、REFINE operation id 與固定 reason
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -230,7 +230,7 @@ def test_evidence_must_be_one_category(world) -> None:
 
 `world` 是同檔 fixture，提供：`repo`（`get_tutorial`／`get_version`／`get_object`／`put_object`／`list_feedback_of_version`／`list_rules`／`scan_entity` 的記憶體假實作，外加 `recategorize` 與 `versions` 兩個測試鉤子）、`writer`（記下每次 `generate_json` 的 `(system, user, schema, node)`、`request_attempts` 與 `reply`）、`operations`（記憶體 O2 帳本與 lease，已接受 `operation_id`，另有 `hold(scope, owner)` 鉤子）、`base`（v1 的四步 `TutorialContent`）、`diagnosis`（`DiagnosisResult("prepare-meeting@v1", (3,), {3: "沒有指出按鈕所在頁面與位置"}, EIGHT_IDS)`）、`operation_id`（`refine_operation_id("prepare-meeting@v1", "找不到按鈕", EIGHT_IDS)`）。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_refine.py -q
@@ -238,7 +238,7 @@ uv run pytest tests/unit/test_feedback_refine.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'evidence_fingerprint'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 import hashlib
@@ -275,7 +275,7 @@ def evidence_of(diagnosis, *, repo) -> tuple[str, tuple[str, ...]]:
 
 （本文件的程式片段用單空行分隔以節省篇幅，實際落檔時照 ruff 的兩空行規則。）
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_refine.py -q
@@ -283,7 +283,7 @@ uv run pytest tests/unit/test_feedback_refine.py -q
 
 預期：PASS；重複 ID 沒有把 `n` 變成 9。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/unit/test_feedback_refine.py
@@ -292,7 +292,7 @@ git commit -m "feat(feedback): 固定 REFINE 證據指紋與改版原因"
 
 ### Task 2：只改命中步驟，只記本次注入的規則
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from training_kb.models import StepType
@@ -336,7 +336,7 @@ def test_only_rules_injected_for_hit_steps_are_recorded(world) -> None:
 
 第 1、4 步是 `read`，即使 `R-012` 也是 active，也不因「原文沿用」進入 `rules_applied`；candidate 永不入選（F29、`APL` Rule 2）。`rule(...)` 是同檔 helper，回一個 `AuthoringRule`，並在 `world.repo` 的 `operations/rules/validated_at.json` 放好每條的驗證時間。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_refine.py -q
@@ -344,7 +344,7 @@ uv run pytest tests/unit/test_feedback_refine.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'prepare_refine'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def _rules_for_hits(base, targets, *, repo):
@@ -417,7 +417,7 @@ def prepare_refine(diagnosis, *, repo, writer, operations, operation_id):
 
 `prompt_refine_steps` 加在 `writing/prompts.py`，回 `(system, user)`：system 說明「只輸出符合 schema 的 JSON、只能回列出的步驟編號、不可更動 `feature_id` 與 `type`」；user 依序放 `<active_rules>`（`render_rules_block` 的結果）、`<steps>`（只列命中步驟的 `number`／`type`／原文）與 `<source_data>`（該類別的 Feedback ID 與留言）。回饋留言是不可信文字，一律先經 [Phase 17](./17-Phase17-Claude結構化輸出與Prompt.md) 的 `_as_data`（`html.escape`）轉義再包進 `<source_data>`，當資料不當指令（D-67）；不得自創新的分區名稱。`create_version` 依 Phase 22／23 寫 `tutorials/prepare-meeting/v2.md` 與 `v2.diff`，`published_at` 保持 `null`。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_refine.py -q
@@ -425,7 +425,7 @@ uv run pytest tests/unit/test_feedback_refine.py -q
 
 預期：PASS。另補三個案例並確認同樣是 `ContentError` 且沒有版本被建立：模型漏回命中步驟、把 `feature_id` 改成別的 Feature、改寫文字去空白後為空。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py src/training_kb/writing/prompts.py tests/unit/test_feedback_refine.py
@@ -434,7 +434,7 @@ git commit -m "feat(feedback): REFINE 只改命中步驟並記錄注入規則"
 
 ### Task 3：lease、同 operation 重送與同證據不再產版
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from training_kb.errors import CoordinationError, TransientError
@@ -465,7 +465,7 @@ def test_no_step_and_same_evidence_return_none(world) -> None:
     ]
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_refine.py -q
@@ -473,7 +473,7 @@ uv run pytest tests/unit/test_feedback_refine.py -q
 
 預期：FAIL，訊號包含 `DID NOT RAISE TransientError` 與 `AssertionError`（第二次仍產生 v3 並再呼叫一次模型）。`test_operation_id_must_match_the_evidence` 這時可能因 `allocate_version` 找不到紀錄而先通過，Step 3 補上指紋守門後才是本 Phase 自己的斷言。
 
-- [ ] **Step 3：把三道守門補進 `prepare_refine`**
+- [x] **Step 3：把三道守門補進 `prepare_refine`**
 
 ```python
 def _reuse_or_call(base, diagnosis, category, rules, *, record, repo, writer,
@@ -504,16 +504,22 @@ def _guard(diagnosis, category, feedback_ids, *, repo, operations, operation_id)
 
 在 `prepare_refine` 裡照這個順序插進去：`evidence_of` 之後先 `record = _guard(...)`，`record is None` 就直接回 `None`；接著才取 `base_version` 與 `tutorial` 做基底核對；然後 `scope = f"TUTORIAL#{base_version.slug}"`（`LEASE#` 前綴由 Phase 11 自己補，00A §6.4），`operations.acquire_lease(scope, operation_id, ttl_seconds=LEASE_TTL_SECONDS, now=record.updated_at)` 為 `False` 時丟 `TransientError`；從選規則到 `verify_version_complete` 整段包在 `try` 裡，`finally` 呼叫 `operations.release_lease(scope, operation_id)`；原本直接呼叫 `writer.generate_json` 的那兩行改成 `reply = _reuse_or_call(base, diagnosis, category, rules, record=record, repo=repo, writer=writer, operations=operations, operation_id=operation_id)`。
 
-- [ ] **Step 4：跑單元測試與 O2 整合測試**
+- [x] **Step 4：跑單元測試與 O2 整合測試**
 
 ```bash
 uv run pytest tests/unit/test_feedback_refine.py -q
 uv run pytest tests/integration/test_feedback_refine_retry.py -q
 ```
 
+**實作結果（2026-09-14）：真實 AWS 段已實際執行並通過**，指令與證據見
+`docs/plan/report/phases/2026-09-14-Phase46-REP.md` §3／§4（`operation_id`
+`op-feedback-239fb32e…`、`version_id` `p46-refine-20260914d1@v2`、
+`model_output_refs` 長度 1、`request_attempts` 1、`published_at` `null`）。落檔時分成兩段：
+moto 段（不標 `aws`，一律執行，只證明腳本與資料形狀）與真實 AWS 段（標 `aws`）。
+
 整合測試用真實 DynamoDB 與 S3（`@pytest.mark.aws`，未設 `TKB_RUN_AWS_INTEGRATION=1` 時 skip）：第一次在寫 STEP 關係前注入失敗，第二次用**同一個** `operation_id` 重送，斷言版號仍是 `prepare-meeting@v2`、`record.model_output_refs` 沒有增加、`writer.request_attempts == 1`。（現況核對 2026-09-14：原寫「**O2 未 PASS 前，本 Task 只能標 blocked**」——**O2 已於 P11 PASS**，所以這支整合測試要**實際以 `TKB_RUN_AWS_INTEGRATION=1` 執行**並把輸出寫進報告，不再標 blocked。）記憶體 fake 的綠燈本身仍不算永久去重已驗證，這一點不變。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/unit/test_feedback_refine.py tests/integration/test_feedback_refine_retry.py
@@ -558,12 +564,26 @@ git commit -m "test(feedback): 驗證 REFINE 租約、重送與同證據去重"
 
 ## 11. 完成清單
 
-- [ ] `RefinePlan` 七個欄位、`prepare_refine` 簽名與 `repo=` 參數名符合 00A §6.9。
-- [ ] 指紋對順序與重複 ID 穩定，換版本或換類別一定不同；平均分與留言原文不進指紋。
-- [ ] `reason` 是 `feedback:<去重後筆數> 則 <類別>`，與 00A §3.3 的三種格式之一逐字相同。
-- [ ] 新版只改診斷命中步驟；其餘步驟與四個段落逐字相同，違反時是 `ContentError` 且不建版。
-- [ ] `rules_applied` 只含本次 prompt 真正注入的 active 規則；candidate 與未改步驟的規則都不入選。
-- [ ] `NO_STEP` 與 `no_new_evidence` 都回 `None` 且沒有配版號、沒有模型呼叫；儲存中斷後以同 operation 重送時版號與模型輸出都重用。
-- [ ] `REV` Rule 7、8 有直接 assertion，`VER` 2／4、`APL` 1、`ING` 30 標為相關並指出 primary。
-- [ ] 未把記憶體 fake 或假 Writer 的綠燈當成證據；gate 語氣照現況：**O2 PASS**（整合測試要真的跑）、**O3 FAIL**、**O5 BLOCKED**；也沒有把未發布版本寫進 `site/`。
-- [ ] `pipelines/feedback.py` 與 `writing/prompts.py` 只用 Edit 追加 `# ---- Phase 46 ----` 自己的區段，沒有動 P44／P45／P47 的程式或格式。
+> **本計畫選擇（2026-09-14）：**
+> 1. **`StepRewrite` 走教學寫作類參數（`maxTokens` 2048／`temperature` 0.1）。** 00A §3.7
+>    明列 P46／P51 屬教學寫作類，優先於 Phase 18 當時「只有 `TutorialDraft` 是 2048」的
+>    假設；`writing/client.py` 的 `WRITING_MAX_TOKENS` 因此補上 `"StepRewrite": 2048`，
+>    `tests/unit/test_writing_validation.py` 的參數化斷言同步改成「`TutorialDraft` 與
+>    `StepRewrite` 為 2048、其餘 512」（controller 核准的 R3.6 例外）。截斷仍是驗證失敗。
+> 2. **單元測試器材用 moto ＋ 真 `Repository` 子類**（比照 `tests/unit/test_publisher_single.py`），
+>    不手寫記憶體 fake：`create_version`／`verify_version_complete` 需要一整片 `Repository`
+>    行為，手寫替身只會複製一份會漂移的副本。表要含 `by_target` GSI。
+> 3. **模型輸出在呼叫後立刻保存、業務驗證之前。** 所以同一個 operation 重送會沿用同一份
+>    輸出：輸出不合格時重送仍然失敗（`ContentError` 是 `PermanentError`，走 Catch 不重試），
+>    要重跑必須換一批證據（換指紋＝換 operation），不是讓模型再擲一次骰子。
+
+
+- [x] `RefinePlan` 七個欄位、`prepare_refine` 簽名與 `repo=` 參數名符合 00A §6.9。
+- [x] 指紋對順序與重複 ID 穩定，換版本或換類別一定不同；平均分與留言原文不進指紋。
+- [x] `reason` 是 `feedback:<去重後筆數> 則 <類別>`，與 00A §3.3 的三種格式之一逐字相同。
+- [x] 新版只改診斷命中步驟；其餘步驟與四個段落逐字相同，違反時是 `ContentError` 且不建版。
+- [x] `rules_applied` 只含本次 prompt 真正注入的 active 規則；candidate 與未改步驟的規則都不入選。
+- [x] `NO_STEP` 與 `no_new_evidence` 都回 `None` 且沒有配版號、沒有模型呼叫；儲存中斷後以同 operation 重送時版號與模型輸出都重用。
+- [x] `REV` Rule 7、8 有直接 assertion，`VER` 2／4、`APL` 1、`ING` 30 標為相關並指出 primary。
+- [x] 未把記憶體 fake 或假 Writer 的綠燈當成證據；gate 語氣照現況：**O2 PASS**（整合測試要真的跑）、**O3 FAIL**、**O5 BLOCKED**；也沒有把未發布版本寫進 `site/`。
+- [x] `pipelines/feedback.py` 與 `writing/prompts.py` 只用 Edit 追加 `# ---- Phase 46 ----` 自己的區段，沒有動 P44／P45／P47 的程式或格式。
