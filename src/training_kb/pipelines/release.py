@@ -37,7 +37,7 @@ from training_kb.errors import (
     TransientError,
 )
 from training_kb.ingress import operation_id_for
-from training_kb.keys import META, feature_pk, operation_ref
+from training_kb.keys import META, feature_pk, operation_ref, tutorial_pk
 from training_kb.models import (
     AuthoringRule,
     Feature,
@@ -641,7 +641,7 @@ def prepare_update(release: Release, hits: Sequence[StepHit], *, repository: Rep
             _log.info("release update skipped retired tutorial slug=%s status=%s release=%s",
                       slug, tutorial.status.value, release.id)
             continue
-        scope = f"TUTORIAL#{slug}"
+        scope = tutorial_pk(slug)   # `LEASE#` 前綴由 Phase 11 自己補（00A §6.4）
         if not operations.acquire_lease(scope, operation_id,
                                         ttl_seconds=LEASE_TTL_SECONDS, now=now_utc()):
             raise TransientError(f"{slug} 正由另一個操作改寫，稍後重試")
@@ -664,8 +664,13 @@ RETIRE_RECORD_NAME = "retire"
 PUBLISH_REQUEST_NAME = "publish-request"
 """整批發布請求的可追溯紀錄；完整 key 是 `operation_ref(operation_id, 這個值)`。
 
-與 P48 `task_prepare_batch` 同一個檔名、同一份內容（`version_ids` ＋ `staged_keys`），
-兩條 pipeline 的 `publish_request_ref` 因此指向同一種物件。**它只是紀錄，不是發布。**
+與 P48 `task_prepare_batch` 同一個檔名、同一份內容（`version_ids` ＋ `staged_keys` ＋
+`prepared_at`），兩條 pipeline 的 `publish_request_ref` 因此指向同一種物件。
+
+**它只是稽核紀錄，不是發布，今天也沒有任何程式讀它**（修正波：final review A#7／B#1）。
+P48 的 `_restored` 只讀**自己那條** pipeline 寫的那一份；P59 的 `resume_publish` 讀的是
+`pending-promote.json` 與 ledger 的 `version_id`（00A §6.7），從來不碰這個 key。
+`prepared_at` 是修正波補上的：少了它，這份物件就不是 P48 的形狀，`_restored` 也讀不動。
 """
 
 SUCCESSORS_NAME = "successors"
@@ -778,6 +783,11 @@ def task_retire(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]
     允許覆寫；**已發布的版本頁一個 byte 都不動**（協定 A 下不可覆寫），也不呼叫
     `prepare`／`inspect`／`commit`、不建立任何新版本。直接用既有的私有方法是
     **本計畫選擇（2026-09-14）**：複製一份索引渲染邏輯遲早會與 `Publisher` 分岔。
+
+    `retire.json` 的 `successor` 記的是**維護者請求的值**（`successors.json` 那一格），
+    不是 `retire_tutorial` 實際寫進 item 的值（修正波：final review B 的 minor）：
+    `resolve_successor` 會擋掉不存在／自身／狀態不符／成環的後繼，那時 item 上的
+    `successor` 會與這份紀錄不同。要看實際結果請讀 `TUTORIAL#<slug>` item。
 
     `retire.json` 用條件寫入（`if_none_match=True`）且撞鍵就靜靜通過：同 `operation_id`
     重送要拿回同一份紀錄，`retired_at` 也不會被第二次執行的時鐘改掉。**不用「先查再寫」**
@@ -918,10 +928,16 @@ def task_publish_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSO
     `PublishError` 交給 Catch（形狀同 `ticket.task_publish_version`）。
 
     **`publish_request_ref` 指向的物件由本函式親自寫出來**（Phase 52 修正回合 1）：先
-    `prepare`（只寫私有 staging）→ 寫 `operations/<op>/publish-request.json`（`version_ids`
-    ＋ `staged_keys`，`if_none_match=False` 因為內容完全由 `version_ids` 決定）→ 才 `commit`。
-    順序是刻意的：`commit` 失敗時這份「本來要發布什麼」的紀錄仍然留著，P59 的補償重送才有
-    輸入。內容與 P48 `task_prepare_batch` 寫的那一份同形狀。
+    `prepare`（只寫私有 staging）→ 寫 `operations/<op>/publish-request.json`（三個鍵，
+    `if_none_match=False` 因為內容完全由 `prepared` 決定）→ 才 `commit`。順序是刻意的：
+    `commit` 失敗時這份「本來要發布什麼」的紀錄仍然留著。
+
+    **它是可追溯的稽核紀錄，今天沒有任何程式讀它**（修正波：final review A#7／B#1）。
+    原本的 docstring 宣稱「與 P48 同形狀」且「P59 的補償重送讀它」，兩句都不成立：P48 寫
+    三個鍵（多一個 `prepared_at`，`feedback._restored` 要求它），而
+    `publishing._resume_targets` 讀的是 `pending-promote.json` 與 ledger 的 `version_id`，
+    從來不碰這個 key。修正波把 `prepared_at` 補上，讓兩條 pipeline 的物件**真的**同形狀
+    （鍵序與 P48 的 writer 一致，不再 `sort_keys`）；「誰會讀它」則照實改成這一句。
 
     **不得因為本函式綠燈就宣稱 O3 已通過**（D-80）：整批切換的原子性由維護者的 gate 決定。
     """
@@ -937,8 +953,9 @@ def task_publish_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSO
     ref = operation_ref(operation_id, PUBLISH_REQUEST_NAME)
     repository.put_object(
         ref, json.dumps({"version_ids": list(prepared.version_ids),
-                         "staged_keys": list(prepared.staged_keys)},
-                        ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                         "staged_keys": list(prepared.staged_keys),
+                         "prepared_at": to_iso(prepared.prepared_at)},
+                        ensure_ascii=False).encode("utf-8"),
         "application/json", if_none_match=False)
     result = publisher.commit(prepared, now=deps.now())
     if result.failed is not None:

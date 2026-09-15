@@ -32,7 +32,7 @@ from training_kb.errors import (
     TransientError,
 )
 from training_kb.ingress import approved_categories, operation_id_for
-from training_kb.keys import operation_ref, rule_pk
+from training_kb.keys import operation_ref, rule_pk, tutorial_pk
 from training_kb.models import (
     AuthoringRule,
     Feature,
@@ -806,7 +806,7 @@ def prepare_refine(diagnosis: DiagnosisResult, *, repo: Repository, writer: Writ
         raise ContentError(f"{diagnosis.version_id} 的全文不存在：{base_version.s3_key}")
     base = parse_markdown(body.decode("utf-8"))
     targets = frozenset(diagnosis.step_indexes)
-    scope = f"TUTORIAL#{base_version.slug}"  # `LEASE#` 前綴由 Phase 11 自己補（00A §6.4）
+    scope = tutorial_pk(base_version.slug)  # `LEASE#` 前綴由 Phase 11 自己補（00A §6.4）
     if not operations.acquire_lease(scope, operation_id, ttl_seconds=LEASE_TTL_SECONDS,
                                     now=record.updated_at):
         raise TransientError(f"{scope} 正在被另一個操作改寫，稍後重試")

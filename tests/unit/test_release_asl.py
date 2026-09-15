@@ -28,6 +28,7 @@ from test_release_retire import (
     accepted_operations,
 )
 
+from training_kb.clock import to_iso
 from training_kb.content import (
     DIFF_CONTENT_TYPE,
     MARKDOWN_CONTENT_TYPE,
@@ -50,6 +51,7 @@ from training_kb.models import (
     TutorialVersion,
 )
 from training_kb.operations import AcceptOperation, OperationCoordinator
+from training_kb.pipelines import common
 from training_kb.pipelines.asl import (
     ASL_LOCAL_PATH,
     CATCH,
@@ -64,6 +66,7 @@ from training_kb.pipelines.common import Deps, task_name
 from training_kb.pipelines.release import (
     RELEASE_STATE_FIELDS,
     RELEASE_UPDATE_TASKS,
+    release_update_handler,
     run_release_update,
     task_prepare_update,
     task_publish_batch,
@@ -413,7 +416,10 @@ def test_publish_batch_writes_a_readable_publish_request(
     """Given 整批發布成功，Then `publish_request_ref` 指向**真的存在**的紀錄物件。
 
     review Important 1：這個 ref 以前指向一個 release-update 從來沒寫過的 key。
-    內容與 P48 `task_prepare_batch` 同形狀（`version_ids` ＋ `staged_keys`）。
+
+    **現況核對（修正波 2026-09-15，final review A#7／B#1）：** 本測試原本釘住兩個鍵的
+    形狀，但 docstring 一直宣稱「與 P48 同形狀」——P48 寫的是三個鍵（多一個
+    `prepared_at`），`feedback._restored` 也**要求**那一個鍵。所以這裡改釘三個鍵。
     """
     result = task_publish_batch(publish_state(), publish_deps)
 
@@ -424,7 +430,8 @@ def test_publish_batch_writes_a_readable_publish_request(
     assert json.loads(body.decode("utf-8")) == {
         "version_ids": [V2],
         "staged_keys": [f"operations/{OPERATION}/site/tutorials/{SLUG}/v2.diff.txt",
-                        f"operations/{OPERATION}/site/tutorials/{SLUG}/v2.html"]}
+                        f"operations/{OPERATION}/site/tutorials/{SLUG}/v2.html"],
+        "prepared_at": to_iso(NOW)}
     version = moto_repo.get_version(V2)
     assert version is not None and version.published_at == NOW
     tutorial = moto_repo.get_tutorial(SLUG)
@@ -450,3 +457,26 @@ def test_publish_batch_raises_when_the_transaction_is_rejected(
     assert [item.key for item in moto_repo.bucket.objects.filter(Prefix="site/")] == []
     # 失敗之後「本來要發布什麼」仍然留著，P59 的補償重送才有輸入
     assert moto_repo.get_object(operation_ref(OPERATION, "publish-request")) is not None
+
+
+# --- 修正波（final review B 的 minor）：handler 的一次一個 Task 分派 ----------
+
+
+def test_release_handler_runs_exactly_one_task_and_rejects_unknown_names(
+        moto_repo: RejectingRepository, publish_deps: Deps,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given ASL 一次只給一個 task，Then handler 只跑那一個；未知名稱是 `PermanentError`。
+
+    比照 `tests/unit/pipelines/test_ticket_flow.py` 的兩層分派測試；`release-update`
+    原本只有 ASL 與 Task 各自的測試，handler 本身沒有被守住。
+    """
+    monkeypatch.setitem(common._DEPS_BY_PIPELINE, "release-update", publish_deps)
+
+    state = release_update_handler(
+        {"pipeline": "release-update", "task": "publish_batch",
+         "state": publish_state()}, None)
+
+    assert state["publish_request_ref"] == operation_ref(OPERATION, "publish-request")
+    assert "alias_update" not in state      # UpdateAliases 沒有被一起跑掉
+    with pytest.raises(PermanentError, match="publish_everything"):
+        release_update_handler({"task": "publish_everything", "state": {}}, None)
