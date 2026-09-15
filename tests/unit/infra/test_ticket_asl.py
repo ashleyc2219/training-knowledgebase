@@ -225,7 +225,10 @@ def test_iam_covers_the_three_gaps_the_previous_batch_left(template: "Template")
     assert not any(action.endswith(":*") or action == "dynamodb:*"
                    for row in rows for action in actions(row) if action.startswith("dynamodb:"))
     assert any("states:DescribeExecution" in actions(row) for row in rows)
-    assert any("sts:GetCallerIdentity" in actions(row) for row in rows)
+    # 修正波（final review C#1）：`sts:GetCallerIdentity` 依 AWS 文件**不需要任何權限**，
+    # 所以整支 stack 一條都不該有——原本 webhook 那一條是 `Resource: "*"`，`check_iam`
+    # 逐字判 fail。P42 的 `_import_execution_arns` 早就寫下同一條理由。
+    assert not any("sts:GetCallerIdentity" in actions(row) for row in rows)
     assert any("s3:PutObject" in actions(row) and "site/" in json.dumps(row.get("Resource"))
                for row in rows)                                  # P24／P25 的公開前綴
 

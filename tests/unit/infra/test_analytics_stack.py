@@ -109,9 +109,13 @@ def test_analytics_role_stays_minimal(template: "Template") -> None:
             for statement in policy["PolicyDocument"]["Statement"]]
     assert rows, "analytics 角色應該有 table／bucket 的授權"
     granted = {action for row in rows for action in actions(row)}
+    # `dynamodb:PutItem` 是修正波（final review B#2）拿掉的：P55 的 `apply_rule_status`
+    # 只走 `update_meta`（UpdateItem）＋ S3；`PutItem` 會整筆取代 META item。
     assert not granted & {"states:StartExecution", "bedrock:InvokeModel",
-                          "dynamodb:DeleteItem", "sts:GetCallerIdentity"}
-    assert {"dynamodb:Query", "dynamodb:Scan", "s3:GetObject"} <= granted
+                          "dynamodb:DeleteItem", "sts:GetCallerIdentity",
+                          "dynamodb:PutItem"}
+    assert {"dynamodb:Query", "dynamodb:Scan", "dynamodb:UpdateItem",
+            "s3:GetObject"} <= granted
 
 
 def test_only_one_dynamodb_delete_statement_survives_the_new_lambda(

@@ -118,17 +118,22 @@ ANALYTICS_PREFIXES: tuple[str, ...] = (OPERATIONS_PREFIX,)
 """
 
 ANALYTICS_DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan",
-                         "dynamodb:PutItem", "dynamodb:UpdateItem"]
-"""四個讀 ＋ 兩個寫，逐一對得上程式：
+                         "dynamodb:UpdateItem"]
+"""三個讀 ＋ 一個寫，逐一對得上程式：
 
 | 動作 | 來源 |
 |---|---|
 | `GetItem` | `get_version`／`get_tutorial`／`list_feedback_of_version` 的回基表一致讀取 |
 | `Query` | `query_by_target`（GSI；`list_feedback_of_version` 的候選）、`query_pk` |
 | `Scan` | `list_views_of_version`／`list_tickets`／`list_rules` 的 `_scan_models` |
-| `PutItem`／`UpdateItem` | **Phase 55** 的 `apply_rule_status`（D-58：Phase 55 不再動 CDK） |
+| `UpdateItem` | **Phase 55** 的 `apply_rule_status`（D-58：Phase 55 不再動 CDK） |
 
-**沒有** `DeleteItem`（D-79 的那一條只屬於 task function）、沒有 `BatchGetItem`、
+**沒有** `PutItem`（修正波：final review B#2）：這一行原本用 P55 的 `apply_rule_status`
+當理由，但那支只走 `get_meta` → `update_meta`（`UpdateItem`）＋ S3 `put_object`，一次
+`PutItem` 都沒有。`PutItem` 是**整筆取代** META item 的動作，給了等於讓分析 Lambda 有能力
+把任何一個 `RULE#`／`TUTORIAL#` item 蓋成別的內容。
+
+也沒有 `DeleteItem`（D-79 的那一條只屬於 task function）、沒有 `BatchGetItem`、
 沒有 `ConditionCheckItem`、沒有 `bedrock:InvokeModel`（`metrics` 只讀 `CallTrace`，
 不呼叫模型）、沒有 `states:StartExecution`（它不啟動任何 pipeline）。
 """
@@ -534,14 +539,18 @@ class TrainingKbStack(Stack):
             actions=["dynamodb:DeleteItem"], resources=[table.table_arn]))
 
     def _grant_execution_lookup(self, function: lambda_.Function) -> None:
-        """缺口 3：P32 的續跑判斷要 `DescribeExecution`，`_build_wiring` 要 `GetCallerIdentity`。
+        """缺口 3：P32 的續跑判斷要 `DescribeExecution`。
 
         `release-update`／`feedback-review` 的 state machine 由 P52／P48 建立，那時同一支
         stack 再把它們的 execution ARN 加進來；現在只授權真的存在的這一條。
+
+        **不給 `sts:GetCallerIdentity`**（修正波：final review C#1）。webhook 這支確實會走
+        `ingress._build_wiring` → `get_caller_identity` 推導帳號，但 AWS 文件明示這個 API
+        「不需要任何權限」（no permissions are required；也無法用 IAM policy 拒絕它），
+        所以它不必進授權清單。原本那一條是 `Resource: "*"`，`check_iam` 逐字判 fail——
+        P42 的 `_import_execution_arns` 早就寫下同一條理由並沒有跟進，這裡補上一致。
         """
         function.add_to_role_policy(iam.PolicyStatement(
             actions=["states:DescribeExecution"],
             resources=[f"arn:aws:states:{self.region}:{self.account}:execution:"
                        f"{TICKET_ANALYSIS_MACHINE}:*"]))
-        function.add_to_role_policy(iam.PolicyStatement(
-            actions=["sts:GetCallerIdentity"], resources=["*"]))  # 沒有資源層級授權
