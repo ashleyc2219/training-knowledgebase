@@ -243,7 +243,7 @@ def validate_rules_action(event: dict, *, repository: "Repository",
 
 ### Task 1：批次評估、兩個差值與不可判定
 
-- [ ] **Step 1：先補自含 fixture，再寫失敗測試**
+- [x] **Step 1：先補自含 fixture，再寫失敗測試**
 
 在 `tests/unit/conftest.py` 追加三個 fixture，全部是明示合成資料（`approved_by` 只是欄位值，不是維護者核定）：
 
@@ -284,11 +284,11 @@ def test_evaluate_batch_is_undecidable_when_batch_is_not_approved(fake_repo, bat
     assert result.decidable is False
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 執行 `uv run pytest tests/unit/test_rule_validation.py -q`，預期 FAIL 且訊號包含 `cannot import name 'evaluate_batch'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def _batch_problems(batch, before, after):
@@ -336,7 +336,7 @@ def evaluate_batch(batch, *, approved, repository):
     return _result(batch, "improved" if improved else "not_improved", (), before, after)
 ```
 
-- [ ] **Step 4：補四個不可判定案例並跑綠燈**
+- [x] **Step 4：補四個不可判定案例並跑綠燈**
 
 ```python
 @pytest.mark.parametrize("prepare, reason", [
@@ -359,7 +359,7 @@ uv run pytest tests/unit/test_rule_validation.py -q
 
 預期：全部 PASS，且沒有任何案例回 `not_improved`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/analytics/validation.py tests/unit/conftest.py \
@@ -369,7 +369,7 @@ git commit -m "feat(analytics): 以同篇前後版本評估規則批次"
 
 ### Task 2：兩項嚴格改善、連續兩批退役、衝突與 curation
 
-- [ ] **Step 1：建立參數化失敗測試**
+- [x] **Step 1：建立參數化失敗測試**
 
 ```python
 from training_kb.analytics.validation import (RuleEvaluation, curation_groups, next_status,
@@ -402,11 +402,11 @@ def test_candidate_needs_improved_to_become_active():
     assert next_status("retired", [ev("b1", "improved")], None) == "retired"
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 執行 `uv run pytest tests/unit/test_rule_validation.py -q`，預期 FAIL 且訊號包含 `cannot import name 'next_status'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def _decisive(evaluations):
@@ -459,7 +459,7 @@ def curation_groups(rules):
 
 `next_status` 回的是 `RuleStatus`；它是 StrEnum，所以測試裡的 `== "active"` 仍然成立，回傳值也可以直接丟給 `apply_rule_status`。
 
-- [ ] **Step 4：補退役、重疊、衝突與 curation 測試並跑綠燈**
+- [x] **Step 4：補退役、重疊、衝突與 curation 測試並跑綠燈**
 
 ```python
 def test_two_non_overlapping_unimproved_batches_retire_the_rule():
@@ -504,7 +504,7 @@ uv run pytest tests/unit/test_rule_validation.py -q
 
 預期：全部 PASS；`retired` 輸入永遠回 `retired`，`curation_groups` 沒有任何寫入。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/analytics/validation.py tests/unit/test_rule_validation.py
@@ -515,7 +515,7 @@ git commit -m "feat(analytics): 實作規則狀態轉移條件與 curation 分�
 
 Phase 54 依 D-56 產出 `src/training_kb/handlers/analytics.py::handler(event, context)` 並處理 `action: "metrics"`；本 Task 只加第二個分支。**該檔不存在時停止**，先回 Phase 54 補入口。
 
-- [ ] **Step 1：建立失敗測試**（`tests/unit/test_rule_status_writer.py`，`NOW`／`APPROVED` 與 Task 1 同值）
+- [x] **Step 1：建立失敗測試**（`tests/unit/test_rule_status_writer.py`，`NOW`／`APPROVED` 與 Task 1 同值）
 
 ```python
 import json
@@ -565,11 +565,11 @@ def test_validate_rules_action_evaluates_and_writes_status(fake_repo, batch):
     assert "operations/analytics/rule-validation/R-007/fixture-b1.json" in fake_repo.objects
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 執行 `uv run pytest tests/unit/test_rule_status_writer.py -q`，預期 FAIL 且訊號包含 `cannot import name 'apply_rule_status'`。
 
-- [ ] **Step 3：建立最小實作**（`status_writer.py`，再加 handler 分支）
+- [x] **Step 3：建立最小實作**（`status_writer.py`，再加 handler 分支）
 
 ```python
 VALIDATED_AT_KEY = "operations/rules/validated_at.json"
@@ -636,7 +636,7 @@ def validate_rules_action(event, *, repository, approved):      # handlers/analy
 
 批次先依 `approved_at` 升序排序，`next_status` 的「最新一批」才有確定意義。`conflict` 固定傳 `None`：衝突判定要先由呼叫端取得 `ConflictJudgement` 並通過 `validated_conflict`，這個 action 不自行呼叫模型。`handler` 只需在 `event["action"] == "validate_rules"` 時轉呼叫它。
 
-- [ ] **Step 4：跑綠燈並用 rg 確認唯一寫入者**
+- [x] **Step 4：跑綠燈並用 rg 確認唯一寫入者**
 
 ```bash
 uv run pytest tests/unit/test_rule_status_writer.py tests/unit/test_rule_validation.py -q
@@ -649,7 +649,7 @@ rg -n 'update_meta\(.*status|"status":' src/training_kb --glob '!**/analytics/st
 
 預期：測試 PASS；命中的每一行都**不是** `RULE#` 的 `status`（`repository.py::rebuild_rule_projection` 動的是 RULE 的 `applied_to`，不是 `status`，不算違反）。Phase 47 只在**建立**新 RULE 時把 `status` 設為 `candidate`，那是建立不是修改。同一批次帶同一個 `now` 重跑兩次，RULE item、證據檔與 `validated_at.json` 完全相同；未知 `action` 仍由 Phase 54 的既有分支丟 `PermanentError`，不因本次修改變成靜默成功。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/analytics/status_writer.py src/training_kb/handlers/analytics.py \
@@ -706,11 +706,27 @@ git commit -m "feat(analytics): 規則狀態唯一寫入者與 validate_rules ac
 
 ## 11. 完成清單
 
-- [ ] §5 Produces 的十個名稱與簽名全部實作完成，且 `RuleEvaluation` 帶 `average_delta`、`rate_delta`、`decidable`。
-- [ ] `undecidable` 與 `not_improved` 分開；不可判定與未核定都不會導致退役，四個反例各有測試。
-- [ ] 啟用同時要求平均嚴格提高與 rate 嚴格下降；持平、單項改善、反向各有參數化案例，兩個差值有獨立斷言。
-- [ ] 退役需要兩個不重疊的已核定批次；重疊批次只算一批。衝突判定先過 `validated_conflict` 才退役 candidate，且不動既有 active；`curation_groups` 只分組。
-- [ ] `apply_rule_status` 是唯一寫 `RULE.status` 的位置（`rg` 已檢查），最近驗證時間只寫 `operations/rules/validated_at.json`，非法轉移丟 `PermanentError`。
-- [ ] 所有 fixture 自含、`AuthoringRule.evidence` 有五個不同 ID 且明示非核定；文件沒有宣稱 R-007 已 active 或 O7 已通過。
-- [ ] `analytics/status_writer.py` 的 Phase 40 讀取端（`VALIDATED_AT_KEY`、`load_validated_at` 的壞檔 `PermanentError` 處理）原封不動，只有追加，沒有覆寫。
-- [ ] 新增 `tests/unit/conftest.py` 的 `fake_repo` 之後，全套 `uv run pytest tests -q -W error` 仍綠（既有三處同名 fixture 未受影響）。
+> **本計畫選擇（2026-09-14，實作時補）：**
+> 1. **P54 的 `test_handler_rejects_unknown_action_before_touching_aws` 由本 Phase 代改一行。**
+>    它原本拿 `validate_rules` 當「未知 action」的例子，本 Phase 讓它成為第二個已知分支，
+>    那條測試必然轉紅。紅燈源自本 Phase 修改的共用檔（`handlers/analytics.py`），依 COMMON R3.5
+>    是本 Phase 的責任，因此把該測試的 action 名稱換成沒有任何 Phase 認領的 `"curation"`，
+>    其餘（`{}` 空事件、`_wiring` 會爆炸的守門）一字未動；`validate_rules` 走新分支的斷言改放在
+>    `tests/unit/test_rule_status_writer.py`。
+> 2. **`validate_rules_action` 放在 `handlers/analytics.py`**（依 §4 與 00A §6.10 的檔案歸屬），
+>    `SeedBatch` 的還原收在同檔的 `_seed_batch`，避免 `analytics/validation.py` 依賴 event 形狀。
+> 3. **雲端 invoke 不是本 Phase 的必要項，且本次沒有機會留下證據。** 收尾時
+>    `aws lambda get-function --function-name training-kb-analytics --region us-east-1
+>    --query 'Configuration.LastModified'` 回 `2026-09-15T05:06:03.000+0000`，早於本 Phase 的
+>    三個 commit，代表雲端跑的還是 Phase 54 的程式碼（沒有 `validate_rules` 分支）。
+>    真實 invoke 證據留給 P59／P60 下一次部署後補。
+
+
+- [x] §5 Produces 的十個名稱與簽名全部實作完成，且 `RuleEvaluation` 帶 `average_delta`、`rate_delta`、`decidable`。
+- [x] `undecidable` 與 `not_improved` 分開；不可判定與未核定都不會導致退役，四個反例各有測試。
+- [x] 啟用同時要求平均嚴格提高與 rate 嚴格下降；持平、單項改善、反向各有參數化案例，兩個差值有獨立斷言。
+- [x] 退役需要兩個不重疊的已核定批次；重疊批次只算一批。衝突判定先過 `validated_conflict` 才退役 candidate，且不動既有 active；`curation_groups` 只分組。
+- [x] `apply_rule_status` 是唯一寫 `RULE.status` 的位置（`rg` 已檢查），最近驗證時間只寫 `operations/rules/validated_at.json`，非法轉移丟 `PermanentError`。
+- [x] 所有 fixture 自含、`AuthoringRule.evidence` 有五個不同 ID 且明示非核定；文件沒有宣稱 R-007 已 active 或 O7 已通過。
+- [x] `analytics/status_writer.py` 的 Phase 40 讀取端（`VALIDATED_AT_KEY`、`load_validated_at` 的壞檔 `PermanentError` 處理）原封不動，只有追加，沒有覆寫。
+- [x] 新增 `tests/unit/conftest.py` 的 `fake_repo` 之後，全套 `uv run pytest tests -q -W error` 仍綠（既有三處同名 fixture 未受影響）。**實作紀錄（2026-09-14）：** 收尾時全套是 `1374 passed / 31 skipped / 11 xfailed`，另有兩筆紅燈**都不是本 Phase 造成的**，屬同波次仍在進行的 Phase 48：`tests/unit/test_feedback_review_flow.py` 當下 import 不到 `FEEDBACK_REVIEW_TASKS`（以 `--ignore` 排除），`tests/unit/pipelines/test_ticket_flow.py::test_module_without_its_handler_is_a_permanent_error` 則是它自己的 docstring 早就寫明「P48 落地 `feedback_review_handler` 之後自然失效、由 P48 改掉」。
