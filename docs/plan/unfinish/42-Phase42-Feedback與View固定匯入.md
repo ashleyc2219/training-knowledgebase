@@ -181,7 +181,7 @@ OperationCoordinator.accept
 
 ### Task 1：鎖定 Feedback 與 View 的欄位契約
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/test_fixed_import_validate.py
@@ -204,7 +204,7 @@ def test_missing_feedback_ts_defaults_but_missing_view_ts_fails() -> None:
     assert error.value.fields == ("ts",)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_fixed_import_validate.py -q
@@ -212,7 +212,7 @@ uv run pytest tests/unit/test_fixed_import_validate.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'validate_feedback'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def validate_feedback(payload: Mapping[str, object], *, now: datetime) -> Feedback:
@@ -238,11 +238,11 @@ def validate_feedback(payload: Mapping[str, object], *, now: datetime) -> Feedba
     return Feedback(id=feedback_id, rating=rating, ts=ts, **values)
 ```
 
-- [ ] **Step 4：以同樣形狀補 `validate_view` 並跑完整檔案**
+- [x] **Step 4：以同樣形狀補 `validate_view` 並跑完整檔案**
 
 `_text(payload, field, bad)` 取非空字串，缺值就把欄位名記入 `bad` 並回 `""`；`_optional_text` 只把空字串收斂成 `None`，非字串記入 `bad`；`_stable_user(payload, bad)` 先 `_text` 再交給 Phase 13 的 `stable_user_from_import`，它丟 `IngressError` 就把 `"user"` 記入 `bad`（現況核對 2026-09-14）。`VIEW_FIELDS` 固定為 `{"tutorial_version", "user", "ts", "project_id"}`，`tutorial_version` 走 `_text`、`user` 走 `_stable_user`，`ts` 另以 **`_parsed_ts`** 驗格式（現況核對 2026-09-14：原寫 `parse_iso`，它放行微秒會讓 `view_pk` 丟 `PermanentError`），**沒有**補值分支。再加四個案例：`id` 缺 `f_` 前綴、payload 多一個 `score` 欄位（`invalid_fields` 必須含 `"score"`）、`category` 與 `comment` 皆空但 `rating` 合法（必須成功）、View 的 `ts` 為 `"2026/08/02 09:00"`（必須 `("ts",)`）。另加兩個現況核對補上的案例（2026-09-14）：View 的 `ts` 為 `"2026-08-02T09:00:00.500Z"`（帶微秒，必須 `("ts",)`，否則 `view_pk` 會在下游丟 `PermanentError`）、`user` 為 `"U_01"`（大寫不符 `stable_user_from_import` 的 `^[a-z0-9_-]{2,64}$`，必須 `("user",)`）。跑 `uv run pytest tests/unit/test_fixed_import_validate.py -q` 應全綠。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/unit/test_fixed_import_validate.py
@@ -251,7 +251,7 @@ git commit -m "feat(ingress): 驗證回饋與瀏覽紀錄匯入欄位"
 
 ### Task 2：寫入圖譜、退役拒絕與重送去重
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/integration/test_fixed_import.py
@@ -269,7 +269,7 @@ def test_same_feedback_id_resent_is_duplicate(active_repo, operations) -> None:
     assert len(active_repo.list_feedback_of_version("prepare-meeting@v1")) == 1
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_fixed_import.py -q
@@ -277,7 +277,7 @@ uv run pytest tests/integration/test_fixed_import.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'import_feedback'`。
 
-- [ ] **Step 3：依固定順序實作 `import_feedback`**
+- [x] **Step 3：依固定順序實作 `import_feedback`**
 
 先 `try: feedback = validate_feedback(payload, now=now)` / `except IngressError as error: return _rejected(error.message, error.fields)`——00A §4.1 規定固定匯入把 `IngressError` 轉成 `rejected`，不讓例外往呼叫端冒。接著 `version = repository.get_version(...)`、`tutorial = repository.get_tutorial(version.slug)`，任一為 `None` 即 `_rejected("版本不存在於圖譜", ("tutorial_version",))` → 用 Phase 26 的檢查擋退役，**不自己比 `status`**：
 
@@ -302,11 +302,11 @@ def _dedupe(payload, feedback, repository, operations, now):
 
 `_assert_open` 回非 `None` 就直接回那個 `ImportResult`；`_dedupe` 回 `True` 就直接回 `ImportResult("duplicate", feedback.id, "相同 Feedback ID 已匯入，不再計一筆有效回饋", ())`；否則 `put_meta(feedback, create_only=True)` → `put_edge(feedback_pk(feedback.id), "REFERS_TO", version_pk(feedback.tutorial_version))` → `operations.complete(operation_id, now=now)` → `ImportResult("saved", feedback.id, _saved_message(payload, feedback), ())`。
 
-- [ ] **Step 4：補三個 helper 與兩個案例，再跑完整檔案**
+- [x] **Step 4：補三個 helper 與兩個案例，再跑完整檔案**
 
 `_rejected(message, fields)` 固定回 `ImportResult("rejected", None, message, tuple(fields))`；`_project_id` 取 payload 的 `project_id`，缺值用 `DEFAULT_PROJECT_ID`；`_saved_message` 只有在 `payload.get("ts") is None` 時才附加「來源未提供 ts，改記匯入時間 …，非使用者實際提交時間」。兩個新案例：版本不存在時 `rejected` 且圖譜零變動；同一 `u_01` 用 `f_12`、`f_13` 送同一版本，兩筆都 `saved` 且各計一筆。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/integration/test_fixed_import.py
@@ -315,7 +315,7 @@ git commit -m "feat(ingress): 保存回饋並以操作紀錄永久去重"
 
 ### Task 3：View 去重與未完成操作續跑
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_same_view_triple_is_deduplicated(active_repo, operations) -> None:
@@ -333,7 +333,7 @@ def test_accepted_but_unwritten_operation_is_resumed(active_repo, operations) ->
     assert len(active_repo.list_views_of_version("prepare-meeting@v1")) == 1
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_fixed_import.py::test_same_view_triple_is_deduplicated -q
@@ -341,11 +341,11 @@ uv run pytest tests/integration/test_fixed_import.py::test_same_view_triple_is_d
 
 預期：FAIL，訊號包含 `cannot import name 'import_view'`。
 
-- [ ] **Step 3：依固定順序實作 `import_view`**
+- [x] **Step 3：依固定順序實作 `import_view`**
 
 `accepted_at = now_utc() if now is None else now` → `validate_view`（同樣 `except IngressError` 轉 `rejected`）→ 版本不存在即 `_rejected("版本不存在於圖譜", ("tutorial_version",))`（**不**查 retired）→ `pk = view_pk(view.tutorial_version, view.user, view.ts)`、`canonical_id = parse_pk(pk)[1]` → `operations.accept(AcceptOperation(operation_id=operation_id_for("view", canonical_id), kind="view", canonical_id=canonical_id, project_id=_project_id(payload), now=accepted_at))` → duplicate 且 `repository.get_meta(pk, TutorialView)` 有值才回 `duplicate`，否則續跑 → `put_meta(view, create_only=True)` → `operations.complete(...)` → `ImportResult("saved", pk, "已保存瀏覽紀錄", ())`。View 沒有關係邊，設計 §9.2 明講不新增 `VIEWED`。
 
-- [ ] **Step 4：跑整份整合測試並核對副作用**
+- [x] **Step 4：跑整份整合測試並核對副作用**
 
 ```bash
 uv run pytest tests/integration/test_fixed_import.py -q
@@ -353,7 +353,7 @@ uv run pytest tests/integration/test_fixed_import.py -q
 
 逐一斷言：整個測試過程沒有任何 `StartExecution`、沒有 `PROC#` item、沒有新 `VERSION#` item、FakeWriter 呼叫數為 0。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/integration/test_fixed_import.py
@@ -362,7 +362,7 @@ git commit -m "feat(ingress): 保存瀏覽紀錄並以 view_pk 去重"
 
 ### Task 4：`training-kb-import` 的 Lambda 入口
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # 續寫 tests/integration/test_fixed_import.py
@@ -415,7 +415,7 @@ def test_import_lambda_is_wired_without_a_function_url():
             Match.object_like({"Action": "states:StartExecution"})])})})
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_fixed_import.py -q
@@ -423,7 +423,7 @@ uv run pytest tests/integration/test_fixed_import.py -q
 
 預期：FAIL，訊號包含 `No module named 'training_kb.handlers.import_'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/handlers/import_.py（00A D-56；handlers/__init__.py 由 Phase 30 建立）
@@ -499,7 +499,7 @@ machine.grant_start_execution(import_fn)      # ticket 分支要能啟動 ticket
 
 **不開 Function URL**：這支只給維護者用 boto3 `invoke` 呼叫，沒有公開入口就沒有驗簽需求（公開的只有 Phase 30 的 `training-kb-webhook`）。IAM 只到「table 讀寫、bucket 讀寫、`states:StartExecution`」三項，沒有 `bedrock:InvokeModel`——本 Phase 這條路徑不呼叫模型（[Phase 43](./43-Phase43-Feedback類別判定.md) 加留言分類時才會補上）。`timeout` 設 300 秒與 `IMPORT_DEADLINE_SECONDS` 對齊，數字改一邊就要改另一邊。
 
-- [ ] **Step 4：跑整份整合測試與 CDK 斷言確認綠燈**
+- [x] **Step 4：跑整份整合測試與 CDK 斷言確認綠燈**
 
 ```bash
 uv run pytest tests/integration/test_fixed_import.py tests/unit/infra/test_import_lambda.py -q
@@ -507,7 +507,7 @@ uv run pytest tests/integration/test_fixed_import.py tests/unit/infra/test_impor
 
 再補一個 `{"kind": "view", "items": [VIEW, VIEW]}` 的案例：兩筆結果是 `saved`、`duplicate`，`list_views_of_version` 仍只有一筆。多出第三支 Lambda 之後，Phase 41 的 `tests/unit/infra/test_ticket_asl.py::test_stack_has_one_standard_machine_and_two_named_lambdas` 仍要綠（**現況核對 2026-09-14**：原文只寫函式名，實際檔案是 `test_ticket_asl.py`；它已經是 `handlers[...]` 的包含式斷言，多一支 Lambda 不會轉紅）。若你看到它因為「字典**等於**兩筆」而轉紅，改那個斷言，**不要**刪掉本 Phase 的資源讓它變綠。另外，同波次的 P54 也會往同一支 stack 加 `training-kb-analytics`；若整套測試的紅燈來自 P54 進行中的檔案，用 `--ignore=` 排除並在報告寫明，不要去修別人的測試（R3.5）。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/handlers/import_.py infra/training_kb_stack.py \
@@ -559,15 +559,38 @@ git commit -m "feat(ingress): 建立固定匯入的 Lambda 入口"
 - 設計 §19 決策：D11（不允許沒有穩定使用者 ID）、D12（只有評分的回饋有效，不送模型分類）、D13（核定類別表，未知值進待分類，屬 Phase 43）、D14（每個新提交 ID 算一筆，只排除同提交重送）、D23（瀏覽／回饋／Ticket 共用同一個穩定使用者 ID）、D24（MVP 新增瀏覽事件，至少記版本、使用者與時間）、F39（退役後拒絕新回饋、保留既有回饋）、F51（立即拒絕並指出不合法欄位，不建立 FEEDBACK 或成功回執）。
 - [Pydantic v2 轉換表](https://pydantic.dev/docs/validation/latest/concepts/conversion_table/)：`int` 欄位收到 `bool` 在 strict 模式不允許、lax 模式會被轉換；本階段因此在入口自行擋 `bool`。
 
+> **實作結果（2026-09-14／15，Phase 42 實作者）：** 全部 Task 與完成清單都做到，並依 controller
+> 裁決**真的部署到 AWS**（原 brief §8 寫「本 Phase 不直接跑真實 AWS」，以 controller 的 dispatch
+> 為準）。與本文件片段不同、屬於**本計畫選擇**的地方：
+>
+> 1. **退役測試的位置**：`test_retired_tutorial_rejects_feedback_but_still_accepts_views`（00B
+>    引用的名字）放在 **Task 3**，因為它同時要 `import_feedback` 與 `import_view`，而後者在
+>    Task 3 才落地；Task 2 自己有一條只看回饋的 `test_retired_tutorial_rejects_new_feedback`。
+> 2. **`_dedupe` 是泛型的**（`def _dedupe[MetaT: StrictModel](...)`，PEP 695）：回饋與瀏覽共用
+>    同一份「accept → 目標物件是否真的存在 → 重複或續跑」邏輯，不各寫一份。
+> 3. **`import_feedback` 本 Phase 不宣告 `writer`**：00A 第 915 列的完整簽名含
+>    `writer: Writer | None = None`，但同一列註明「`writer` 由 P43 追加」。參數全是
+>    keyword-only，P43 追加時不會動到任何呼叫端（§5 Produces 已這樣寫）。
+> 4. **IAM 用 P41 的 `_grant_data` 而不是 CDK 的 `grant_read_write_data`**（本文件 §7 Task 4 的
+>    片段寫後者）：CDK 的 grant 會把 `DeleteItem` 混進同一條敘述，D-79 要的「只有一條
+>    `DeleteItem`」就守不住。範圍依 controller 2026-09-14 的補充交代收到最小：S3 只有
+>    `operations/*`（**沒有** `site/*`）、DynamoDB 只有 `GetItem`／`PutItem`／`UpdateItem`／`Scan`
+>    （`Scan` 是 `ticket`／`release` 分支的 `rote.list_procs` 要的），**不給索引**。
+> 5. **`missing_nonempty_strings` 也用在 `_text`**：單一欄位的必填檢查沿用同一份實作，
+>    「一次回報所有缺欄位」仍然只有一個地方決定什麼叫「缺」。
+> 6. **雲端證據**在 `docs/plan/report/phases/2026-09-14-Phase42-REP.md` §4：`training-kb-import`
+>    的 `aws lambda invoke` 回應原文（saved／duplicate／rejected 七種結果）、寫進真表的 item
+>    原文、IAM policy 原文、CloudWatch log 與「ticket-analysis 執行數 5 → 5」。
+
 ## 11. 完成清單
 
-- [ ] `ImportResult`、`validate_feedback`、`validate_view`、`import_feedback`、`import_view` 簽名與本文件一致；`operation_id_for` 與 `DEFAULT_PROJECT_ID` 都是 import 來的，沒有第二份定義。
-- [ ] rating 只接受 1..5 的嚴格整數，`bool`、字串與小數全部落在 `invalid_fields`。
-- [ ] `Feedback.ts` 缺值改記匯入時間且訊息明示；`TutorialView.ts` 必填；退役檢查呼叫 Phase 26 的 `assert_accepts_feedback`，同版瀏覽紀錄仍可匯入。
-- [ ] 同 ID／同三元組重送回 `duplicate`，已接受但未寫成的操作會續跑。
-- [ ] `src/training_kb/handlers/import_.py::handler` 存在且逐筆回結果，`kind` 不在四種內丟 `PermanentError`；`feedback`／`view` 分支零次 `StartExecution`。
-- [ ] `infra/training_kb_stack.py` 有 `training-kb-import` 這支 Lambda（handler `training_kb.handlers.import_.handler`、無 Function URL、IAM 只到 table／bucket／`states:StartExecution`），並有 `Template` 斷言。
-- [ ] `ticket`／`release` 分支呼叫 `normalize_then_accept` 的六個 keyword 參數（D-60），並正確處理它回傳的 **`list[Acceptance]`**（D-73，現況核對 2026-09-14）；缺 `domain`／`adapter`／`event_type` 時整筆 `PermanentError`。
-- [ ] `ts` 走既有的 `_parsed_ts`（aware、整秒；微秒被拒），`user` 走 Phase 13 的 `stable_user_from_import`，兩者都沒有第二份實作（現況核對 2026-09-14）。
-- [ ] 整條路徑零模型呼叫、零 Step Functions 啟動、零 PROC 變更；收集 Rule 1、2、3、7、8、9、10 與接入 Rule 28、29 各有直接 assertion。
-- [ ] 未把 moto 綠燈說成 O2 永久去重或 O6 穩定使用者契約已通過。
+- [x] `ImportResult`、`validate_feedback`、`validate_view`、`import_feedback`、`import_view` 簽名與本文件一致；`operation_id_for` 與 `DEFAULT_PROJECT_ID` 都是 import 來的，沒有第二份定義。
+- [x] rating 只接受 1..5 的嚴格整數，`bool`、字串與小數全部落在 `invalid_fields`。
+- [x] `Feedback.ts` 缺值改記匯入時間且訊息明示；`TutorialView.ts` 必填；退役檢查呼叫 Phase 26 的 `assert_accepts_feedback`，同版瀏覽紀錄仍可匯入。
+- [x] 同 ID／同三元組重送回 `duplicate`，已接受但未寫成的操作會續跑。
+- [x] `src/training_kb/handlers/import_.py::handler` 存在且逐筆回結果，`kind` 不在四種內丟 `PermanentError`；`feedback`／`view` 分支零次 `StartExecution`。
+- [x] `infra/training_kb_stack.py` 有 `training-kb-import` 這支 Lambda（handler `training_kb.handlers.import_.handler`、無 Function URL、IAM 只到 table／bucket／`states:StartExecution`），並有 `Template` 斷言。
+- [x] `ticket`／`release` 分支呼叫 `normalize_then_accept` 的六個 keyword 參數（D-60），並正確處理它回傳的 **`list[Acceptance]`**（D-73，現況核對 2026-09-14）；缺 `domain`／`adapter`／`event_type` 時整筆 `PermanentError`。
+- [x] `ts` 走既有的 `_parsed_ts`（aware、整秒；微秒被拒），`user` 走 Phase 13 的 `stable_user_from_import`，兩者都沒有第二份實作（現況核對 2026-09-14）。
+- [x] 整條路徑零模型呼叫、零 Step Functions 啟動、零 PROC 變更；收集 Rule 1、2、3、7、8、9、10 與接入 Rule 28、29 各有直接 assertion。
+- [x] 未把 moto 綠燈說成 O2 永久去重或 O6 穩定使用者契約已通過。
