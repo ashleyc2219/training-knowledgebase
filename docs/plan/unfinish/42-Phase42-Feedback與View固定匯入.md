@@ -479,7 +479,7 @@ def _import_one(kind, payload) -> ImportResult:
 
 **現況核對（2026-09-14）—— 型別註記**：`mypy` 是 strict 且 `files = ["src", "infra"]`，上面的片段是示意，實際要照 `handlers/github_webhook.py` 的寫法標註完整型別：`def handler(event: dict[str, Any], context: object) -> dict[str, object]`、`_DEPS: Deps | None = None`、`def _import_one(kind: str, payload: Mapping[str, object]) -> ImportResult`。`build_deps` 由 P41 在 W1 建立於 `pipelines/common.py`（若你在 W2 開工時它還不存在，那是 P41 未完成，回報 controller，不要自己在本 Phase 造一份）。
 
-`handler` 逐筆處理、逐筆回結果：一筆 `rejected` 不影響其他筆，這正是設計 §7.1「指出欄位、允許修正」（F51）的形狀。`ticket`／`release` 只是把原始事件交給 `normalize_then_accept`（那條路徑才有 Rote 與 `StartExecution`），本 Phase 不重寫也不改它的 deadline 語意——八秒是公開 webhook 的限制，受控匯入用自己的 `IMPORT_DEADLINE_SECONDS`。那六個 keyword 參數是 00A D-60 固定的：匯入檔的每一筆自己帶 `domain`／`adapter`／`event_type`／`headers`／`payload`（維護者匯出時就填好），**不從 payload 反推**，缺了就整筆 `PermanentError`。`_DEPS` 快取讓 Lambda 暖啟動不重建連線，測試直接 monkeypatch 它。
+`handler` 逐筆處理、逐筆回結果：一筆 `rejected` 不影響其他筆，這正是設計 §7.1「指出欄位、允許修正」（F51）的形狀。`ticket`／`release` 只是把原始事件交給 `normalize_then_accept`（那條路徑才有 Rote 與 `StartExecution`），本 Phase 不重寫也不改它的 deadline 語意——八秒是公開 webhook 的限制，受控匯入用自己的 `IMPORT_DEADLINE_SECONDS`。那六個 keyword 參數是 00A D-60 固定的：匯入檔的每一筆自己帶 `domain`／`adapter`／`event_type`／`headers`／`payload`（維護者匯出時就填好），**不從 payload 反推**，缺了就整批 `PermanentError`（**現況核對 2026-09-15**：原寫「整筆」，實作是**整批零寫入**——形狀檢查在寫入迴圈之前整批做完，否則壞在第 n 筆時前 n-1 筆已經 `StartExecution` 了）。`_DEPS` 快取讓 Lambda 暖啟動不重建連線，測試直接 monkeypatch 它。
 
 同一個 Step 在 [Phase 41](./41-Phase41-Ticket-Analysis雲端流程驗收.md) 建立的 `infra/training_kb_stack.py` 裡加這支 Lambda（00A D-58：`training-kb-import` 的 CDK 接線歸本 Phase）：
 
@@ -599,7 +599,7 @@ git commit -m "feat(ingress): 建立固定匯入的 Lambda 入口"
 - [x] 同 ID／同三元組重送回 `duplicate`，已接受但未寫成的操作會續跑。
 - [x] `src/training_kb/handlers/import_.py::handler` 存在且逐筆回結果，`kind` 不在四種內丟 `PermanentError`；`feedback`／`view` 分支零次 `StartExecution`。
 - [x] `infra/training_kb_stack.py` 有 `training-kb-import` 這支 Lambda（handler `training_kb.handlers.import_.handler`、無 Function URL、IAM 只到 table／bucket／`states:StartExecution`），並有 `Template` 斷言。
-- [x] `ticket`／`release` 分支呼叫 `normalize_then_accept` 的六個 keyword 參數（D-60），並正確處理它回傳的 **`list[Acceptance]`**（D-73，現況核對 2026-09-14）；缺 `domain`／`adapter`／`event_type` 時整筆 `PermanentError`。
+- [x] `ticket`／`release` 分支呼叫 `normalize_then_accept` 的六個 keyword 參數（D-60），並正確處理它回傳的 **`list[Acceptance]`**（D-73，現況核對 2026-09-14）；缺 `domain`／`adapter`／`event_type`（或 `payload` 不是物件）時**整批** `PermanentError`、一筆都不寫（現況核對 2026-09-15：原寫「整筆」）。
 - [x] `ts` 走既有的 `_parsed_ts`（aware、整秒；微秒被拒），`user` 走 Phase 13 的 `stable_user_from_import`，兩者都沒有第二份實作（現況核對 2026-09-14）。
 - [x] 整條路徑零模型呼叫、零 Step Functions 啟動、零 PROC 變更；收集 Rule 1、2、3、7、8、9、10 與接入 Rule 28、29 各有直接 assertion。
 - [x] 未把 moto 綠燈說成 O2 永久去重或 O6 穩定使用者契約已通過。
