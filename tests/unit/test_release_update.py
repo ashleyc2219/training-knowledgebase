@@ -15,6 +15,7 @@
 """
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -23,7 +24,7 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from training_kb.clock import to_iso
+from training_kb.clock import now_utc, to_iso
 from training_kb.content import (
     TutorialContent,
     diff_key,
@@ -31,7 +32,12 @@ from training_kb.content import (
     parse_markdown,
     render_markdown,
 )
-from training_kb.errors import ContentError, PermanentError, TransientError
+from training_kb.errors import (
+    ContentError,
+    CoordinationError,
+    PermanentError,
+    TransientError,
+)
 from training_kb.keys import META, operation_ref
 from training_kb.models import (
     AuthoringRule,
@@ -43,6 +49,7 @@ from training_kb.models import (
     TutorialVersion,
 )
 from training_kb.operations import AcceptOperation, OperationCoordinator
+from training_kb.pipelines.feedback import LEASE_TTL_SECONDS
 from training_kb.pipelines.release import (
     REWRITE_NODE,
     StepHit,
@@ -611,3 +618,153 @@ def test_removed_release_never_enters_update(
                        operations=ops, operation_id=OPERATION)
     assert repo.created_versions == []
     assert fake_writer.request_attempts == 0
+
+
+# --- Task 3：lease 串行、同 operation 重送與整批交付 --------------------------
+
+
+@pytest.fixture
+def lease_store(repo: UpdateRepository) -> OperationCoordinator:
+    """另一個持有者用的 O2 帳本；`hold` 就是真的去搶同一把 `LEASE#TUTORIAL#<slug>`。"""
+    return OperationCoordinator(repo)
+
+
+def hold(lease_store: OperationCoordinator, scope: str, *, owner: str) -> None:
+    assert lease_store.acquire_lease(scope, owner, ttl_seconds=LEASE_TTL_SECONDS,
+                                     now=now_utc())
+
+
+def test_lease_conflict_raises_transient_error(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter,
+        lease_store: OperationCoordinator) -> None:
+    """Given 同一篇教學已被別的操作持有租約，When 跑 `prepare_update`，
+    Then `TransientError` 交 ASL 有限重試，不自行迴圈等待，也不呼叫模型（F35、設計 §8.3）。"""
+    hold(lease_store, f"TUTORIAL#{A}", owner="op-other")
+    with pytest.raises(TransientError, match=A):
+        prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                       operations=ops, operation_id=OPERATION)
+    assert repo.created_versions == []
+    assert fake_writer.request_attempts == 0
+
+
+def test_lease_is_returned_even_when_the_rewrite_fails(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter,
+        lease_store: OperationCoordinator) -> None:
+    """Given 改寫因越界被拒，When 例外往外拋，
+    Then 租約已在 `finally` 歸還——別人立刻搶得到，不必等 TTL（設計 §8.3）。"""
+    fake_writer.reply = {"steps": [rewrite(3, NEW_STEP3), rewrite(1, "偷改的第一步。")]}
+    with pytest.raises(ContentError):
+        prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                       operations=ops, operation_id=OPERATION)
+    assert lease_store.acquire_lease(f"TUTORIAL#{A}", "op-other",
+                                     ttl_seconds=LEASE_TTL_SECONDS, now=now_utc()) is True
+
+
+def test_same_operation_reuses_version_and_model_output(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter) -> None:
+    """Given 同一個 `operation_id` 重送，When 第二次跑 `prepare_update`，
+    Then 取回同一個 `version_id`，而且模型只被呼叫過一次（D26、設計 §14.2）。"""
+    first = prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                           operations=ops, operation_id=OPERATION)
+    second = prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                            operations=ops, operation_id=OPERATION)
+    assert [plan.version_id for plan in second] == [plan.version_id for plan in first]
+    assert fake_writer.request_attempts == 1
+    assert repo.created_versions == [f"{A}@v3"]
+
+
+def test_resend_after_an_interrupted_edge_write_keeps_the_version(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter) -> None:
+    """Given 第一次在寫關係邊時中斷，When 同 `operation_id` 重送，
+    Then 沿用同一個版號、不再呼叫模型，而且這一次關係核對通過（D26、F36）。"""
+    repo.fail_next_edge_write()
+    with pytest.raises(TransientError, match="寫關係時中斷"):
+        prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                       operations=ops, operation_id=OPERATION)
+    resumed = prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                             operations=ops, operation_id=OPERATION)
+    assert [plan.version_id for plan in resumed] == [f"{A}@v3"]
+    assert fake_writer.request_attempts == 1
+
+
+def test_two_hit_tutorials_return_one_batch(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter,
+        hits_two_tutorials: tuple[StepHit, ...]) -> None:
+    """Given 一次 Release 命中兩篇教學（刻意反序傳入），When 跑 `prepare_update`，
+    Then 回一整組依 `slug` 升序的 `VersionPlan`，而且一個版本都沒有被發布（F49）。"""
+    fake_writer.replies_by_marker = both_replies()
+    fake_writer.reply = None
+    plans = prepare_update(RELEASE_R42, hits_two_tutorials, repository=repo,
+                           writer=fake_writer, operations=ops, operation_id=OPERATION)
+    assert [plan.slug for plan in plans] == [A, B]
+    assert [plan.version_id for plan in plans] == [f"{A}@v3", f"{B}@v2"]
+    assert repo.published_version_ids == []
+    assert step_of(repo.saved_content(f"{B}@v2"), 2).text == NEW_STEP2_OF_B
+
+
+def test_each_slug_gets_its_own_sub_operation(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter,
+        hits_two_tutorials: tuple[StepHit, ...]) -> None:
+    """Given 一次 Release 命中兩篇教學，When 跑 `prepare_update`，
+    Then 每篇各 `accept` 一筆 `op-release-update-<release_id>--<slug>`，
+    版號各自獨立，父 operation 不佔版號（D-59）。"""
+    fake_writer.replies_by_marker = both_replies()
+    fake_writer.reply = None
+    plans = prepare_update(RELEASE_R42, hits_two_tutorials, repository=repo,
+                           writer=fake_writer, operations=ops, operation_id=OPERATION)
+    assert ops.accepted_ids == [f"op-release-update-r_42--{A}", f"op-release-update-r_42--{B}"]
+    for plan, sub_id in zip(plans, ops.accepted_ids, strict=True):
+        record = ops.load(sub_id)
+        assert record is not None and record.version_id == plan.version_id
+        assert record.project_id == PROJECT
+    parent = ops.load(OPERATION)
+    assert parent is not None and parent.version_id is None
+
+
+def test_retired_tutorial_is_skipped_with_a_reason(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter,
+        caplog: pytest.LogCaptureFixture) -> None:
+    """Given `find_release_hits` 連退役教學的步驟也命中（Phase 27 不看 `status`，D-38 也
+    不准包裝層再篩一次），When 跑 `prepare_update`，
+    Then 退役那一篇被跳過並記下原因，active 那一篇照常改版（設計 §8.1）。"""
+    hits = (StepHit(RETIRED, RETIRED_V1, 2), StepHit(A, A_V2, 3))
+    with caplog.at_level(logging.INFO, logger="training_kb.pipelines.release"):
+        plans = prepare_update(RELEASE_R42, hits, repository=repo, writer=fake_writer,
+                               operations=ops, operation_id=OPERATION)
+    assert [plan.slug for plan in plans] == [A]
+    assert repo.created_versions == [f"{A}@v3"]
+    assert ops.accepted_ids == [f"op-release-update-r_42--{A}"]
+    assert repo.get_tutorial(RETIRED) is not None
+    assert repo.get_version(f"{RETIRED}@v2") is None
+    assert any(RETIRED in record.getMessage() and "retired" in record.getMessage()
+               for record in caplog.records)
+
+
+def test_unknown_tutorial_is_a_content_error(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter) -> None:
+    """Given 命中指向一篇表裡沒有的教學，When 跑 `prepare_update`，
+    Then `ContentError`：那是資料不一致，不可以當成「這篇跳過」。"""
+    with pytest.raises(ContentError, match="找不到教學"):
+        prepare_update(RELEASE_R42, (StepHit("ghost", "ghost@v1", 1),), repository=repo,
+                       writer=fake_writer, operations=ops, operation_id=OPERATION)
+
+
+def test_parent_operation_must_be_accepted_first(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter) -> None:
+    """Given 呼叫端給了一個沒有經過 O2 接受的 `operation_id`，When 跑 `prepare_update`，
+    Then `CoordinationError`：`project_id` 只能沿用父 operation 紀錄（D-59）。"""
+    with pytest.raises(CoordinationError, match="尚未被 O2 接受"):
+        prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                       operations=ops, operation_id="op-never-accepted")
+    assert repo.created_versions == []
+
+
+def test_no_hits_means_no_work(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter) -> None:
+    """Given `hits` 是空的，When 跑 `prepare_update`，
+    Then 回 `()`：呼叫端 KEEP，不建版、不呼叫模型、不取租約。"""
+    assert prepare_update(RELEASE_R42, (), repository=repo, writer=fake_writer,
+                          operations=ops, operation_id=OPERATION) == ()
+    assert repo.created_versions == []
+    assert fake_writer.request_attempts == 0
+    assert ops.accepted_ids == []
