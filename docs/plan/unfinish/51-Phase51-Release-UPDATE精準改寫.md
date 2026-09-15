@@ -2,6 +2,39 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **（a）已存在、直接重用（file:function）**
+> - `src/training_kb/pipelines/release.py` — controller 已預建 docstring 空殼（commit `5f8a430`，R4）；W1 的 **P49／P50 已在檔內留下自己的區段**，本 Phase 只 `Edit` 追加 `# ---- Phase 51 ----`。
+> - `src/training_kb/content.py`：`VersionPlan`（frozen dataclass，欄位 `version_id`／`slug`／`number`／`supersedes`／`reason`／`rules_applied: tuple[str, ...]`／`operation_id`）、`allocate_version(tutorial_id, operation_id, operations, *, repository, reason, rules_applied) -> VersionPlan`（重送會走 `_replay_plan`）、`validate_content(content, known_feature_ids: frozenset[str]) -> None`、`parse_markdown`／`render_markdown`／`make_diff`、`create_version(plan, content, repository) -> TutorialVersion`、`verify_version_complete(version_id, repository) -> bool`、`markdown_key`／`diff_key`。
+> - `src/training_kb/operations.py`：`AcceptOperation(operation_id, kind, canonical_id, project_id, now)`、`OperationCoordinator.accept(request) -> Acceptance`（`status` 是 `"accepted"`／`"duplicate"`）、`load(operation_id) -> OperationRecord | None`、`record_model_output`、`acquire_lease(scope, owner, *, ttl_seconds, now) -> bool`、`release_lease(scope, owner)`；`OperationKind` **已含** `"release-update"`。
+> - `src/training_kb/rules.py`：`select_active_rules`／`render_rules_block`（輸出 `[<rule_id>] applies_when=<type>\n<rule>`）／`applied_rule_ids`／`rules_for_content(rules, step_types, validated_at_by_rule) -> dict[StepType, list[AuthoringRule]]`（**每個 step_type 最多一條**）。
+> - `src/training_kb/analytics/status_writer.py:load_validated_at(repository) -> dict[str, datetime]`（檔案不存在回 `{}`，壞檔丟 `PermanentError`；D-28 禁止第二份私有副本）。
+> - `src/training_kb/writing/validators.py:step_rewrite_validator(*, allowed_steps: frozenset[int], allowed_features: frozenset[str]) -> BusinessValidator`（`BusinessValidator = Callable[[dict[str, Any]], None]`）、`src/training_kb/writing/schemas.py:StepRewrite`（`required: ["steps"]`，每個 step 需要 `number`／`type`／`text`／`feature_id`）。
+> - `src/training_kb/keys.py:operation_ref(operation_id, name) -> "operations/<op>/<name>.json"`、`src/training_kb/repository.py:put_object(key, body, content_type, *, if_none_match)`（412 → `ObjectAlreadyExists`、409 → `TransientError`）／`get_object(key) -> bytes | None`。
+> - `src/training_kb/ingress.py:operation_id_for(kind, canonical_id) -> "op-<kind>-<canonical_id>"`、`src/training_kb/clock.py:now_utc`／`to_iso`。
+>
+> **（b）因上一批裁決／實作而修正的點**
+> 1. §5 Consumes 的 `Repository.list_rules(status=None) / scan_entity(entity) / item_to_model(item, model)` 排版會讓人以為 `item_to_model` 是方法。**`item_to_model` 是 `repository.py` 的模組函式**（`item_to_model[T: StrictModel](item: DynamoItem, model: type[T]) -> T`，00A §6.3），要 `from training_kb.repository import item_to_model`。
+> 2. §7 Task 1 的測試片段用 `base_v2.step(number)` 與 `base_v2.sections()`：**`TutorialContent` 沒有這兩個方法**（欄位只有 `title`／`problem`／`prerequisites`／`steps`／`expected_outcome`，`StrictModel` 且 `extra="forbid"`）。請在測試檔內自己寫 helper（例如 `def step(content, n): return next(s for s in content.steps if s.number == n)`），不要為了讓片段能跑而去改 `models.py`（R5）。
+> 3. §7 的 `fake_writer`（帶 `.reply` 單數、`.json_calls`）**不是**共用 fixture：`tests/unit/conftest.py` 的 `RecordingWriter` 用的是 `replies`（list，依序 pop）與 `calls`（dict 清單），`request_attempts` 倒是有。該檔依 COMMON.md R3.6 **只有 P55 可以修改**——請在自己的測試檔內定義區域 fixture。
+> 4. `LEASE_TTL_SECONDS` 的 owner 是 **P46**（`src/training_kb/pipelines/feedback.py`，00A §5.4／§6.9）。`pipelines/feedback.py` 現在**只有 docstring 空殼**，所以 `from training_kb.pipelines.feedback import LEASE_TTL_SECONDS` 在 P46 落地前會 `ImportError`。**這是跨群組相依**：本 Phase 排在 G4 的 W2，P46 在另一組——開工前先確認 P46 已提交；若尚未落地，回報 controller，**不得**在 `release.py` 自己宣告第二份 `LEASE_TTL_SECONDS`。
+> 5. §7 Task 2 Step 2 的紅燈訊號寫「`load_validated_at` 在 Phase 40 就已經存在，不會是紅燈訊號」——核對通過（`src/training_kb/analytics/status_writer.py:36`）。
+> 6. §6 的 `_rewrite_once` 用 `put_object(..., if_none_match=True)`：`get_object` 先讀過所以正常路徑不會撞，但**併發重送**會拿到 `ObjectAlreadyExists`（`PermanentError` 子類）。本 Phase 選擇不吞它（讓 Catch 收），若要改成「撞到就讀回既有輸出」請寫成明確的**本計畫選擇**並加測試。
+> 7. §2 說「同一個 `operation_id` 重送時取回同一個 `prepare-meeting@v3`」：實際機制是 `allocate_version` 對 **子 operation** `op-release-update-r_42--prepare-meeting` 走 `_replay_plan`（D-59），父 operation 不佔版號——§6／§7 已寫對，§2 的敘述請照這個理解。
+> 8. §5 其他 Consumes 簽名逐一核對通過（`Publisher`／`PublishRequest` 本 Phase 不呼叫，只交回 `VersionPlan` 給 P52）。
+>
+> **（c）gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - **O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`）→ `StepRewrite` 的 `generate_json` 只能用假 writer；真實 AWS 執行時 `PrepareUpdate` 節點會走 `PermanentError → Catch → PipelineFailed`（BLOCKED 證據，由 P52 取得）。
+> - **O2 PASS**（P11）→ 「同 `operation_id` 重送取回同一版號」可以依賴；但 `tests/integration/test_release_update_retry.py` 跑在 **moto**（`tests/integration/conftest.py`，region `us-west-2`），綠燈只證明資料形狀，真實帳號證據移交 **P52**。文件原寫「若 O2 尚未通過真實整合驗證，本 Task 標為 BLOCKED」——O2 現況是 PASS，改為「照做、但不得把 moto 綠燈說成真實併發證據」。
+> - **O3 FAIL**（`docs/plan/report/o3-20260914t181109z.md`）→ 本 Phase **本來就不發布**，只產出 `published_at=None` 的私有版本，交付物不受影響；不得放寬 F49、不得在本 Phase 加任何 publish 呼叫。
+> - **O6 未核定 `github.com/pull_request`** → 不影響本 Phase 的純函式路徑。
+> - 前置：P01–P40 完成；**同批的 P49／P50 必須先落地**（本 Phase 直接 import 它們的 `StepHit` 與 `normalize_feature_name` 所在模組）。
+>
+> **（d）適用的 controller 裁決**：R3（`pipelines/release.py`、`writing/prompts.py` 共用檔；W2 時 P49／P50 已完成，但 `prompts.py` 仍可能有 P43／P45–P47 並行）、R5、R6、R7（`docs/plan/report/phases/2026-09-14-Phase51-REP.md`）、R8、R10。
+>
+> **實作波次**：W1（P49 ∥ P50）→ **W2（P51，本 Phase）** → W3（P52）。
+
 **目標：** 對 Phase 50 命中的每一篇教學，只重寫命中的步驟，其餘步驟與段落逐字複製到下一版，並留下 `release:<id>` 的原因、正確的 diff 與本次真正注入的規則 ID。
 
 **架構：** `prepare_update` 逐篇取 lease 後串行處理：選 active 規則、配版號、呼叫 `StepRewrite`、由程式核對改寫範圍，最後建立未發布版本。發布交給 Phase 25 的 `Publisher`，多篇一次整批提交，全有或全無。
@@ -17,7 +50,7 @@
 - 只有 `renamed` 與 `changed` 走 UPDATE；`hits` 為空時不呼叫本函式，由呼叫端 KEEP。
 - 一般 UPDATE 只注入 active 規則；複製的原文不新增 `rules_applied`（F29）。
 - O1–O7 是設計文件第 18 節的七個待確認事項，F 與 D 開頭的編號（F29、D26…）是第 19 節的決策編號；本文件引用它們只是指出依據，不代表已驗證。
-- O1–O7 狀態：O2 未通過時不得宣稱同 operation 重送必得同版號；O3 未通過時整條公開發布路徑停止，`prepare_update` 只能產生私有未發布版本。本 Phase 不得宣稱任何 gate 已核定。
+- O1–O7 狀態（現況核對 2026-09-14）：**O2 PASS**（P11）→ 「同 operation 重送必得同版號」可依賴，但 moto 綠燈不等於真實併發；**O3 FAIL**（`docs/plan/report/o3-20260914t181109z.md`）→ 公開發布路徑停止，`prepare_update` 本來就只產生私有未發布版本，不受影響、也不得放寬 F49；**O5 BLOCKED** → `StepRewrite` 只能用假 writer。本 Phase 不得宣稱任何 gate 已核定。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -68,10 +101,10 @@ Phase 52 發布成功後才呼叫 Phase 49 的 update_feature_aliases
 | 動作 | 路徑 | 責任 |
 |---|---|---|
 | 修改 | `src/training_kb/pipelines/release.py` | `assert_unchanged`、`prepare_update` 與其 private helper。 |
-| 修改 | `src/training_kb/writing/prompts.py` | `prompt_release_rewrite`：規則區與不可信證據分區。 |
+| 修改 | `src/training_kb/writing/prompts.py` | `prompt_release_rewrite`：規則區與不可信證據分區。（現況核對 2026-09-14：owner 是 P17，00A §3.2 列出 P39／P40／P43／P45–P47／P50／P51 都會追加；只 `Edit` 加自己的區段，`_as_data` 用模組內既有那一份，不複製。） |
 | 測試 | `tests/unit/test_release_update.py` | 改寫範圍、逐字相同、reason、diff、lease 與重送。 |
 | 測試 | `tests/unit/test_release_update_rules.py` | 只記本次注入、candidate 與別型態規則不入選。 |
-| 測試 | `tests/integration/test_release_update_retry.py` | O2 重送同版號、重用模型輸出。 |
+| 測試 | `tests/integration/test_release_update_retry.py` | O2 重送同版號、重用模型輸出（跑在 **moto**；現況核對 2026-09-14：真實帳號證據移交 P52）。 |
 
 ## 5. 固定介面
 
@@ -85,10 +118,13 @@ OperationCoordinator.acquire_lease(scope, owner, *, ttl_seconds, now) -> bool /
 AcceptOperation ; OperationCoordinator.accept / load / record_model_output ;
     operation_ref(op, name)                                                            # Phase 10
 operation_id_for(kind: OperationKind, canonical_id: str) -> str                        # Phase 32
-LEASE_TTL_SECONDS = 120  # pipelines/feedback.py，只 import 不重新宣告              # Phase 46
+LEASE_TTL_SECONDS = 120  # pipelines/feedback.py，只 import 不重新宣告（owner P46；
+                         # 現況核對 2026-09-14：該檔目前只有 docstring 空殼，
+                         # 開工前先確認 P46 已提交，否則 ImportError）        # Phase 46
 Repository.get_tutorial / get_version                                                  # Phase 06
 Repository.get_object / put_object(key, body, content_type, *, if_none_match)          # Phase 07
-Repository.list_rules(status=None) / scan_entity(entity) / item_to_model(item, model)   # Phase 08
+Repository.list_rules(status=None) / Repository.scan_entity(entity)                     # Phase 08
+item_to_model(item: DynamoItem, model: type[T]) -> T   # Phase 08，repository.py 的模組函式（不是方法）
 select_active_rules / render_rules_block / applied_rule_ids / rules_for_content         # Phase 19
 allocate_version(tutorial_id, operation_id, operations, *, repository, reason, rules_applied) -> VersionPlan  # Phase 20
 validate_content(content, known_feature_ids) -> None                                   # Phase 21
@@ -184,6 +220,8 @@ def test_only_hit_steps_change_and_others_are_byte_for_byte(base_v2, fake_writer
     plans = prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
                            operations=ops, operation_id="op-release-r_42")
     draft = repo.saved_content(plans[0].version_id)
+    # 現況核對 2026-09-14：`TutorialContent` 沒有 `.step()`／`.sections()`，
+    # 下面兩行的 helper 要自己寫在測試檔裡（不要改 models.py）。
     assert [step.number for step in draft.steps if step.text != base_v2.step(step.number).text] == [3]
     for number in (1, 2, 4):
         assert draft.step(number).model_dump() == base_v2.step(number).model_dump()
@@ -431,7 +469,9 @@ uv run pytest tests/unit/test_release_update.py -q
 uv run pytest tests/integration/test_release_update_retry.py -q
 ```
 
-預期兩者 PASS，並保存 operation record 的 `model_output_refs` 與 `version_id`。若 O2 尚未通過真實整合驗證，本 Task 標為 BLOCKED，不得把記憶體 fake 的綠燈當成 O2 已驗證。
+預期兩者 PASS，並保存 operation record 的 `model_output_refs` 與 `version_id`。
+
+（現況核對 2026-09-14：**O2 已 PASS**（P11），所以本 Task **不標 BLOCKED**，照做；但整合檔跑在 **moto**，綠燈只證明資料形狀——真實帳號的重送證據移交 **P52 雲端驗收**，報告要寫清楚哪一段是 moto、哪一段是真實 AWS。仍然不得把記憶體 fake 的綠燈當成 O2 或 O5 已驗證。）
 
 - [ ] **Step 5：提交** `git add src/training_kb/pipelines/release.py tests/unit/test_release_update.py tests/integration/test_release_update_retry.py`，再 `git commit -m "test(release): 驗證改版重送與整批交付"`。
 
@@ -448,7 +488,10 @@ uv run pytest tests/integration/test_release_update_retry.py -q
 | Retry | 同 `operation_id` 重送 | 同一個 `version_id`，模型呼叫次數仍為 1；B、C 未命中則完全不進入本函式。 |
 | Boundary | 一個 Release 命中兩篇教學 | 兩篇各 `accept` 一筆 `op-release-update-<release_id>--<slug>` 子 operation，版號互不相干（D-59）。 |
 
-人工驗收：打開 `tutorials/prepare-meeting/v2.md` 與 `v3.md`，用 `diff` 指令逐行比較，親眼確認只有第 3 步不同；再讀 operation record 的 `version_id` 與 `model_output_refs`，確認重送沒有新增第二筆。不能只看測試顯示 PASS。
+人工驗收（現況核對 2026-09-14：拆成兩條路徑，照 COMMON.md §2）：
+
+- **可實證路徑（本 Phase 交付）**：在 moto 整合測試裡把 `tutorials/prepare-meeting/v2.md` 與 `v3.md` 兩份 bytes 取出來寫到本機暫存檔，用 `diff` 指令逐行比較，親眼確認只有第 3 步不同；再讀子 operation `op-release-update-r_42--prepare-meeting` 的 `version_id` 與父 operation 的 `model_output_refs`，確認重送沒有新增第二筆、父 operation 的 `version_id` 仍是 `None`。不能只看測試顯示 PASS。
+- **BLOCKED／移交路徑**：真實 S3 上 `aws s3 cp` 兩份 `.md` 再 `diff` 的證據由 **P52 雲端驗收**取得；`StepRewrite` 的真實 Bedrock 輸出因 **O5 BLOCKED** 取不到（`docs/plan/report/o5-20260915T030245Z.md`）。
 
 ## 9. 常見錯誤與停止條件
 
