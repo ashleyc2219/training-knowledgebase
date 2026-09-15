@@ -6,26 +6,54 @@ Owner：Phase 49（Feature 定位與 alias）；Phase 50（步驟反查與 Safet
 controller 2026-09-14 預建空殼：讓同一波次的 Phase 只用 Edit 追加各自區段。
 """
 
+import json
+import logging
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from typing import Any
 
+from training_kb.analytics.status_writer import load_validated_at
+from training_kb.clock import now_utc
 from training_kb.config import Thresholds
-from training_kb.content import parse_version_id
-from training_kb.errors import ContentError, PermanentError
-from training_kb.keys import META, feature_pk
+from training_kb.content import (
+    VersionPlan,
+    allocate_version,
+    create_version,
+    parse_markdown,
+    parse_version_id,
+    validate_content,
+    verify_version_complete,
+)
+from training_kb.errors import (
+    ContentError,
+    CoordinationError,
+    PermanentError,
+    TransientError,
+)
+from training_kb.ingress import operation_id_for
+from training_kb.keys import META, feature_pk, operation_ref
 from training_kb.models import (
+    AuthoringRule,
     Feature,
     Release,
     ReleaseKind,
+    RuleStatus,
+    StepDraft,
+    StepType,
     Tutorial,
+    TutorialContent,
     TutorialStatus,
     TutorialStep,
 )
+from training_kb.operations import AcceptOperation, OperationCoordinator
+from training_kb.pipelines.feedback import LEASE_TTL_SECONDS
 from training_kb.repository import DynamoValue, Repository, item_to_model
+from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
 from training_kb.vectors import cosine
 from training_kb.writing.client import Writer
-from training_kb.writing.prompts import prompt_safety_net_confirm
-from training_kb.writing.schemas import StepConfirmation
+from training_kb.writing.prompts import prompt_release_rewrite, prompt_safety_net_confirm
+from training_kb.writing.schemas import StepConfirmation, StepRewrite
+from training_kb.writing.validators import step_rewrite_validator
 
 # ---- Phase 49：Feature 定位與 alias（設計 §7.4、§9.1、D06／D07／F15） ----
 
@@ -350,3 +378,261 @@ def safety_net(release: Release, *, repository: Repository, writer: Writer,
         confirmed |= {StepHit(slug, version_id, number)
                       for number in reply["confirmed_step_numbers"] if number in steps}
     return tuple(sorted(confirmed, key=lambda hit: (hit.slug, hit.number)))
+
+
+# ---- Phase 51：UPDATE 精準改寫（設計 §7.4、§8.1–§8.3；REL Rule 8／10／11／13／14、APL Rule 8）----
+# 交付 `REWRITE_NODE`、`assert_unchanged`、`prepare_update` 與五個 module-private helper。
+# 停止點是 `tuple[VersionPlan, ...]`（依 slug 升序），每個對應一個 `published_at=None` 的私有
+# 版本：**不發布、不切 `current_version`、不更新 aliases、不退役、不處理 `removed`**。
+
+_log = logging.getLogger(__name__)
+"""被跳過的教學唯一的去處；只寫 slug 與狀態，不寫教學內容或證據原文（00A §3.8）。"""
+
+REWRITE_NODE = "release_rewrite"
+"""改寫節點寫進 Phase 15 `CallTrace` 的名字；`generate_json` 的 `node=` 一律傳它（00A §6.9）。"""
+
+
+def _apply_rewrite(base: TutorialContent, reply: dict[str, Any],
+                   targets: frozenset[int]) -> TutorialContent:
+    """把模型回的改寫套到基底上；**未命中步驟整個物件原樣帶過**（REL Rule 10、11）。
+
+    先比對「改寫集合」與「命中集合」是否相等：多回是越界改寫、漏回是沒做完，兩種都不可
+    默默放行——只驗「不多」會讓漏改的版本被當成功發布。`step_rewrite_validator`（Phase 18）
+    已經擋過「編號不在命中集合」與「feature_id 不存在」，這裡再擋一次數量與 Feature 是否
+    **被搬走**：改名不搬移 Feature 主鍵（D06），第 3 步改指別的 Feature 一律 `ContentError`。
+
+    `model_copy(update=...)` 在 pydantic v2 **不做驗證**，所以 `type` 一定要先經
+    `StepType(...)` 轉過再塞，否則會寫出一個 `type` 是裸字串的 `StepDraft`；不合法的值
+    收斂成 `ContentError`（裸 `ValueError` 不在 00A §4.1 的錯誤契約裡）。
+    """
+    changed = {int(item["number"]): item for item in reply["steps"]}
+    if len(changed) != len(reply["steps"]):
+        raise ContentError(f"改寫集合有重複的步驟編號：{sorted(changed)}")
+    if set(changed) != set(targets):
+        raise ContentError(f"改寫集合 {sorted(changed)} 不等於命中集合 {sorted(targets)}")
+    steps: list[StepDraft] = []
+    for step in base.steps:
+        item = changed.get(step.number)
+        if item is None:
+            steps.append(step)
+            continue
+        if item["feature_id"] != step.feature_id:
+            raise ContentError(f"步驟 {step.number} 不可改變引用的 Feature")
+        text = str(item["text"]).strip()
+        if not text:
+            raise ContentError(f"步驟 {step.number} 的新文字是空的")
+        try:
+            step_type = StepType(item["type"])
+        except ValueError as error:
+            raise ContentError(f"步驟 {step.number} 的 type 不合法：{item['type']!r}") from error
+        steps.append(step.model_copy(update={"text": text, "type": step_type}))
+    return base.model_copy(update={"steps": steps})
+
+
+def assert_unchanged(base: TutorialContent, draft: TutorialContent,
+                     changed: frozenset[int]) -> None:
+    """命中步驟以外的一切都必須 byte-for-byte 相同，否則 `ContentError`（REL Rule 11）。
+
+    三道檢查：四個段落（title／problem／prerequisites／expected_outcome）、步驟數量、
+    以及每個未命中步驟的 `model_dump()`。比的是**物件**不是「看起來差不多」：連空白與
+    標點都要一樣，否則這一版的 diff 會變成「整篇都改了」，讀者也會看到沒人審過的改動。
+
+    `_apply_rewrite` 走完之後步驟數量必定相同，這裡仍然再驗一次：`assert_unchanged` 是
+    公開介面（00A §6.9），Phase 52 也可能拿別的來源組出來的 draft 進來核對。
+    """
+    if (base.title, base.problem, base.prerequisites, base.expected_outcome) != (
+        draft.title, draft.problem, draft.prerequisites, draft.expected_outcome
+    ):
+        raise ContentError("UPDATE 不可改動命中步驟以外的段落")
+    if len(base.steps) != len(draft.steps):
+        raise ContentError(f"步驟數量由 {len(base.steps)} 變成 {len(draft.steps)}")
+    for left, right in zip(base.steps, draft.steps, strict=True):
+        if left.number not in changed and left.model_dump() != right.model_dump():
+            raise ContentError(f"未命中步驟 {left.number} 的原文必須逐字相同")
+
+
+def _rules_for_hits(base: TutorialContent, targets: frozenset[int], *,
+                    repository: Repository) -> list[AuthoringRule]:
+    """本次要注入的 active 規則：**只看命中步驟的 `type`**（F29、APL Rule 8）。
+
+    未命中步驟的原文是複製過來的，沿用原文不算本次套用，所以第 1 步就算同樣是
+    `click_ui`，也不會讓 `R-007` 進 `rules_applied`。`rules_for_content`（Phase 19）每個
+    `step_type` 最多回一條；這裡照 `step_types` 的**出現順序**遍歷並用 `seen` 去重，
+    注入順序與 `applied_rule_ids` 的順序因此完全一致（prompt 與版本紀錄不分叉）。
+
+    驗證時間一律走 `analytics/status_writer.load_validated_at(repository)`（00A D-28），
+    本模組**沒有**第二份 `_load_validated_at`；缺值時 Phase 19 丟 `PermanentError`，
+    這裡不補預設時間。candidate 與 retired 由 `list_rules(RuleStatus.ACTIVE)` 擋在門外。
+    """
+    step_types = [step.type for step in base.steps if step.number in targets]
+    by_type = rules_for_content(repository.list_rules(RuleStatus.ACTIVE), step_types,
+                                load_validated_at(repository))
+    selected: list[AuthoringRule] = []
+    seen: set[str] = set()
+    for step_type in step_types:
+        for item in by_type[step_type]:
+            if item.rule_id not in seen:
+                seen.add(item.rule_id)
+                selected.append(item)
+    return selected
+
+
+def _sub_operation(release: Release, slug: str, *, operations: OperationCoordinator,
+                   operation_id: str) -> str:
+    """每篇教學各一筆子 operation；`allocate_version` 以 `operation_id` 為唯一鍵（D-59）。
+
+    `OperationRecord.version_id` 是**單值**，一個 Release 命中兩篇教學時共用父 operation 會
+    互相搶同一個版號，所以固定用 `operation_id_for("release-update", f"{release.id}--{slug}")`
+    ——兩個連字號當分隔，slug 裡本來就有的單一連字號才不會造成混淆。同一個 Release 重送時
+    `sub_id` 逐字相同，`accept` 回 `duplicate`，版號沿用原本那一個。
+
+    `project_id` 沿用**父** operation 紀錄上的值（`Release` 模型沒有 `project_id` 欄位，
+    不在這裡另外讀 `Settings`）；父 operation 讀不到代表呼叫端沒有先經 O2 接受，那是協調
+    錯誤而不是內容錯誤，一律 `CoordinationError`。
+    """
+    parent = operations.load(operation_id)
+    if parent is None:
+        raise CoordinationError(f"{operation_id} 尚未被 O2 接受")
+    canonical_id = f"{release.id}--{slug}"
+    sub_id = operation_id_for("release-update", canonical_id)
+    operations.accept(AcceptOperation(operation_id=sub_id, kind="release-update",
+                                      canonical_id=canonical_id,
+                                      project_id=parent.project_id, now=now_utc()))
+    return sub_id
+
+
+def _rewrite_once(release: Release, base: TutorialContent, slug: str, targets: frozenset[int],
+                  rules: Sequence[AuthoringRule], *, repository: Repository, writer: Writer,
+                  operations: OperationCoordinator, operation_id: str) -> dict[str, Any]:
+    """整個流程裡**唯一**呼叫模型的地方；重送先讀回既有輸出（設計 §14.2、F45）。
+
+    模型輸出的 ref 是 **per-slug** 的 `operations/<父 operation_id>/rewrite-<slug>.json`，
+    不是 `model_output_refs[-1]`：一個 `operation_id` 可能命中多篇教學，用 `[-1]` 會分不清
+    是誰的輸出（**本計畫選擇（2026-09-14）**）。ref 掛在**父** operation 底下，因為它本來
+    就已經 per-slug、兩篇不會互相覆蓋；只有版號分配走子 operation（D-59）。
+
+    `put_object(..., if_none_match=True)` 在併發重送會丟 `ObjectAlreadyExists`
+    （`PermanentError` 子類）；本 Phase **不吞它**，讓 ASL 的 Catch 收——正常重送已經被
+    上面那次 `get_object` 涵蓋，會撞到就代表兩個執行同時在改同一篇，那本來就該停。
+
+    `inferenceConfig` 不在這裡決定：`generate_json` 用 `StepRewrite` 這份 schema 查
+    Phase 18 的 `inference_config`，`temperature` 固定 0.1、截斷（`stopReason ==
+    "max_tokens"`）由 Phase 15 判成 `PermanentError`，不靠調高上限救（00A §3.7）。
+    """
+    ref = operation_ref(operation_id, f"rewrite-{slug}")
+    saved = repository.get_object(ref)
+    if saved is not None:
+        replayed: dict[str, Any] = json.loads(saved.decode("utf-8"))
+        return replayed
+    system, user = prompt_release_rewrite(release, base, sorted(targets),
+                                          render_rules_block(rules))
+    validate = step_rewrite_validator(
+        allowed_steps=frozenset(targets),
+        allowed_features=frozenset(step.feature_id for step in base.steps))
+    reply = writer.generate_json(system, user, StepRewrite,
+                                 operation_id=operation_id, node=REWRITE_NODE)
+    validate(reply)
+    body = json.dumps(reply, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    repository.put_object(ref, body, "application/json", if_none_match=True)
+    operations.record_model_output(operation_id, ref)
+    return reply
+
+
+def _prepare_one(release: Release, tutorial: Tutorial, targets: frozenset[int], *,
+                 repository: Repository, writer: Writer, operations: OperationCoordinator,
+                 operation_id: str) -> VersionPlan:
+    """一篇教學的完整改版順序；每一步的先後都有理由，不可對調。
+
+    ```text
+    子 operation -> 基底全文 -> 選規則 -> 配版號 -> 模型 -> 程式核對 -> create_version -> verify
+    ```
+
+    **規則選取排在 `allocate_version` 之前**：Phase 19 要求 prompt 與 `rules_applied` 用
+    同一份 selected list，而 `allocate_version` 的參數就包含 `rules_applied`（本計畫選擇，
+    Phase 46 的 REFINE 採同一順序）。基底是**最近已發布版本**（`current_version`）的 S3
+    原文，不是最新版本，也不是模型重新生成的全文——否則 diff 會變成整篇差異。
+
+    `tutorial` 由 `prepare_update` 讀好傳進來（狀態過濾在那一層做），這裡不再讀一次表。
+    `known_feature_ids` 用 `scan_entity("FEATURE")` 配 `item_to_model`（00A D-29、§3.6）；
+    `verify_version_complete` 回 `False` 代表關係不完整，依 F36 不得發布，這裡就停住。
+    """
+    slug = tutorial.slug
+    if tutorial.current_version is None:
+        raise ContentError(f"{slug} 沒有已發布版本可以當基底")
+    sub_id = _sub_operation(release, slug, operations=operations, operation_id=operation_id)
+    base_version = repository.get_version(tutorial.current_version)
+    if base_version is None:
+        raise ContentError(f"找不到 {slug} 的基底版本 {tutorial.current_version}")
+    body = repository.get_object(base_version.s3_key)
+    if body is None:
+        raise ContentError(f"{base_version.version_id} 缺少 S3 全文 {base_version.s3_key}")
+    base = parse_markdown(body.decode("utf-8"))
+    rules = _rules_for_hits(base, targets, repository=repository)
+    plan = allocate_version(slug, sub_id, operations, repository=repository,
+                            reason=f"release:{release.id}",
+                            rules_applied=applied_rule_ids(rules))
+    reply = _rewrite_once(release, base, slug, targets, rules, repository=repository,
+                          writer=writer, operations=operations, operation_id=operation_id)
+    draft = _apply_rewrite(base, reply, targets)
+    assert_unchanged(base, draft, targets)
+    known = frozenset(item_to_model(row, Feature).feature_id
+                      for row in repository.scan_entity("FEATURE"))
+    validate_content(draft, known)
+    create_version(plan, draft, repository)
+    if not verify_version_complete(plan.version_id, repository):
+        raise ContentError(f"{plan.version_id} 的關係不完整")
+    return plan
+
+
+def prepare_update(release: Release, hits: Sequence[StepHit], *, repository: Repository,
+                   writer: Writer, operations: OperationCoordinator,
+                   operation_id: str) -> tuple[VersionPlan, ...]:
+    """對每一篇命中的教學只重寫命中步驟，回一整組**未發布**版本（依 `slug` 升序）。
+
+    入口只接受 `renamed` 與 `changed`（REL Rule 8）：`removed` 走 Phase 52 的退役路徑，
+    誤接進來是呼叫端接錯線，`PermanentError` 讓 ASL 的 Catch 導向失敗終點。`hits` 為空時
+    回 `()`，呼叫端 KEEP。
+
+    **退役教學一律跳過。** `find_release_hits`（Phase 50）用的 Phase 27 反查只看「是不是
+    current 而且已發布」，不看 `Tutorial.status`（D-38 也禁止包裝層自己再篩一次），所以
+    退役教學**會**出現在 `hits` 裡。UPDATE 不得替退役教學建新版（設計 §8.1：退役的教學
+    不再維護），因此過濾放在這一層：跳過並寫一行 log 說明原因，不丟例外——那是別篇教學
+    的正常結果，不該讓整次改版失敗（**本計畫選擇（2026-09-14）**，controller 2026-09-14
+    裁決）。
+
+    每篇先取 `TUTORIAL#<slug>` 的租約（`LEASE#` 前綴由 Phase 11 自己補）再串行處理；拿不到
+    就 `TransientError` 交 ASL 有限重試，**不自行迴圈等待**——租約不是接受順序的保證，TTL
+    也不是準時解鎖，真正的順序保證仍屬 O2。`try/finally` 讓 `ContentError` 也會歸還租約，
+    否則同一篇要等 `LEASE_TTL_SECONDS` 才解得開。`prepare_update` 的簽名沒有 `now`，所以
+    到期時間由函式內部的 `now_utc()` 決定（租約是執行資訊，`published_at` 仍由 Phase 24 的
+    `now` 決定）。
+
+    多篇時回一整組 `VersionPlan`，呼叫端（Phase 52）把整組 `version_id` 包成**一個**
+    `PublishRequest` 交給 Phase 25：第二篇 inspect 失敗時第一篇也不得被發布（F49）。
+    本函式沒有任何 publish 呼叫，也不碰 `current_version` 與 aliases。
+    """
+    if release.kind not in (ReleaseKind.RENAMED, ReleaseKind.CHANGED):
+        raise PermanentError(f"UPDATE 只處理 renamed 與 changed，收到 {release.kind}")
+    by_slug: dict[str, set[int]] = {}
+    for hit in hits:
+        by_slug.setdefault(hit.slug, set()).add(hit.number)
+    plans: list[VersionPlan] = []
+    for slug in sorted(by_slug):
+        tutorial = repository.get_tutorial(slug)
+        if tutorial is None:
+            raise ContentError(f"找不到教學：{slug}")
+        if tutorial.status is not TutorialStatus.ACTIVE:
+            _log.info("release update skipped retired tutorial slug=%s status=%s release=%s",
+                      slug, tutorial.status.value, release.id)
+            continue
+        scope = f"TUTORIAL#{slug}"
+        if not operations.acquire_lease(scope, operation_id,
+                                        ttl_seconds=LEASE_TTL_SECONDS, now=now_utc()):
+            raise TransientError(f"{slug} 正由另一個操作改寫，稍後重試")
+        try:
+            plans.append(_prepare_one(release, tutorial, frozenset(by_slug[slug]),
+                                      repository=repository, writer=writer,
+                                      operations=operations, operation_id=operation_id))
+        finally:
+            operations.release_lease(scope, operation_id)
+    return tuple(plans)
