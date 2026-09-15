@@ -778,7 +778,7 @@ def task_retire(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]
     """RETIRE 分支：退役每一篇命中教學 → 重寫它們的索引頁（D-83）→ 寫退役紀錄。
 
     **順序不可顛倒**：索引頁的內容取自 `repository.get_tutorial(slug)`，`status` 還沒變成
-    `retired` 之前寫出去的頁面不會有退役區塊。`Publisher._write_tutorial_index` 走
+    `retired` 之前寫出去的頁面不會有退役區塊。`Publisher.write_tutorial_index` 走
     `_put_index` → `_put_public_object(..., if_none_match=False)`，索引是可重建的投影所以
     允許覆寫；**已發布的版本頁一個 byte 都不動**（協定 A 下不可覆寫），也不呼叫
     `prepare`／`inspect`／`commit`、不建立任何新版本。直接用既有的私有方法是
@@ -805,7 +805,7 @@ def task_retire(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]
                                successor_by_slug=successors, now=now)
     publisher = Publisher(repository, SiteRenderer(), deps.operations)
     for slug in slugs:
-        publisher._write_tutorial_index(slug)      # D-83：只重寫索引頁，不重發版本頁
+        publisher.write_tutorial_index(slug)       # D-83：只重寫索引頁，不重發版本頁
     ref = operation_ref(operation_id, RETIRE_RECORD_NAME)
     body = [{"slug": slug, "reason": f"release:{release.id}", "retired_at": to_iso(now),
              "successor": successors.get(slug)} for slug in slugs]

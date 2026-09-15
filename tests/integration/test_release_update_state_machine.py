@@ -248,7 +248,7 @@ def seeded(repository: Repository, table: Any) -> Iterator[dict[str, str]]:
                                "SK": f"REFERENCES#{feature_pk(feature_id + 'Other')}"})
     table.delete_item(Key={"PK": feature_pk(f"{feature_id}Other"), "SK": "META"})
     # 站台索引是可重建的投影，清完資料就重建一次，不留指向已刪教學的連結
-    Publisher(repository, SiteRenderer(), operations)._write_site_index()
+    Publisher(repository, SiteRenderer(), operations).write_site_index()
 
 
 def run_to_completion(client: Any, machine_arn: str, name: str,

@@ -531,3 +531,4 @@ def test_single_publish_writes_no_pending_promote_list(
     """00A §6.7：單篇不寫 `pending-promote.json`（P59 用 ledger 的版號 + `site_key` 重算）。"""
     publisher.commit(publisher.prepare(PublishRequest((A3,), OPERATION), now=NOW), now=NOW)
     assert PENDING_KEY not in repo.objects
+

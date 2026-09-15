@@ -353,8 +353,15 @@ def _put_public_object(repository: Repository, relative: str, body: bytes,
             raise PublishError(f"公開物件已存在且內容不同，不覆寫：{key}") from None
 
 
-def _promote_version(version_id: str, operation_id: str, repository: Repository) -> None:
-    """把一篇的 staging bytes 複製到公開 `site/`：版本頁先、公開 diff 副本後。"""
+def _promote_version(version_id: str, operation_id: str,
+                     repository: Repository) -> tuple[str, ...]:
+    """把一篇的 staging bytes 複製到公開 `site/`：版本頁先、公開 diff 副本後。
+
+    回傳**這一次實際寫出去的**公開 key（含 `site/` 前綴），順序與 `_public_pairs` 相同。
+    回傳值由迴圈累積而不是事後重算一次 `public_site_keys(...)`：那樣兩邊都由同一個算式
+    產生，回傳值就只是同義反覆，看不出「寫了什麼」（修正波：final review C#7）。
+    """
+    written: list[str] = []
     for relative, content_type in _public_pairs(version_id):
         staged = _staging_key(operation_id, relative)
         body = repository.get_object(staged)
@@ -362,6 +369,8 @@ def _promote_version(version_id: str, operation_id: str, repository: Repository)
             raise PublishError(
                 f"{version_id} 的 staging 物件不見了，停止 promote：{relative}")
         _put_public_object(repository, relative, body, content_type)
+        written.append(_public_key(relative))
+    return tuple(written)
 
 
 def _cut_point(prepared: PreparedPublish) -> str:
@@ -390,9 +399,10 @@ def promote_site_objects(prepared: PreparedPublish, *,
     `prepared` 與 `repository`，不必再傳一個 renderer 進來。
     """
     operation_id = prepared.request.operation_id
+    written: list[str] = []
     for version_id in prepared.version_ids:
-        _promote_version(version_id, operation_id, repository)
-    return public_site_keys(prepared.version_ids)
+        written.extend(_promote_version(version_id, operation_id, repository))
+    return tuple(written)
 
 
 # --- 5. Publisher ------------------------------------------------------------
@@ -674,6 +684,19 @@ class Publisher:
         """
         _promote_version(version_id, operation_id, self._repository)
 
+    def write_tutorial_index(self, slug: str) -> None:
+        """重建一篇教學的版本紀錄頁（公開方法）。
+
+        修正波（final review C 的 minor）：`_write_tutorial_index` 有兩個**外部**呼叫端
+        （`release.task_retire` 的 D-83 重寫、`resume_publish` 的收尾），所以它不是私有的。
+        方法本體維持不動，這裡只是把名字提成公開的，兩個呼叫端改用它。
+        """
+        self._write_tutorial_index(slug)
+
+    def write_site_index(self) -> None:
+        """重建站台索引（公開方法）；同 `write_tutorial_index` 的理由。"""
+        self._write_site_index()
+
     def _write_tutorial_index(self, slug: str) -> None:
         """重建一篇教學的版本紀錄頁；只列已發布版本，版號大的在前。
 
@@ -706,7 +729,7 @@ class Publisher:
         """站台索引要看到**全部** `TUTORIAL` item，所以走基表 `scan_entity`
         （設計 §10 已接受 MVP 的 Scan 取捨）；Phase 27 沒有對應的固定查詢。
 
-        版本清單不再經過這裡：`_write_tutorial_index` 改用
+        版本清單不再經過這裡：`write_tutorial_index` 改用
         `Repository.list_versions_of_tutorial`（見該方法說明）。
         """
         return [item_to_model(row, Tutorial)
@@ -775,13 +798,27 @@ def resume_publish(operation_id: str, *, operations: OperationCoordinator,
     走完之後才會落到本函式的第一列。
 
     **不得**在已發布的情況再呼叫 `commit`（`inspect` 會以「版本已發布」擋下）、**不得**
-    刪除既有公開物件、**不得**重新 `allocate_version`。實際補出的 key 與待補清單逐字比對，
-    對不上就 `CoordinationError`：那代表兩份真相已經分岔，靜靜通過會讓復原「看起來成功」。
+    刪除既有公開物件、**不得**重新 `allocate_version`。
+
+    `written != expected` 這一道是 **`pending-promote.json` 自身的一致性檢查**，不是
+    「實際補出來的東西對不對」的檢查（修正波：final review C#7 更正原本的說法）。
+    `written` 來自 `promote_site_objects`——它逐篇累積這次真的寫出去的 key，而那些 key 由
+    `_public_pairs(version_id)` 決定，所以只要 `version_ids` 相同就必然等於
+    `public_site_keys(version_ids)`。`expected` 在單篇是同一個算式算出來的（永遠相等），
+    在多篇才是讀自待補清單的 `site_keys` 欄位。因此這道守門實際攔得住的只有一種情況：
+    待補清單被手動改壞，`site_keys` 與 `version_ids` 對不起來。那仍然值得攔——那時候
+    「補完了」這句話已經沒有意義——但它**不保證** `site/` 上真的有那些物件（要保證得逐 key
+    `object_exists`，那是另一件事，本函式不做）。
 
     **本計畫選擇（2026-09-14）：** 補完版本頁與 diff 副本之後**接著重建教學索引與站台索引**。
     `Publisher._publish_site` 的第 4、5 步就是它們，00A 第 1230 列說 `resume_publish` 要
     「把中斷的發布接著做完」；只補版本頁會讓公開站永遠沒有連到新版的路徑，那是半完成的
     復原。索引是可重建投影（`if_none_match=False`），重寫多少次結果都一樣。
+
+    **切點 1／2／5 的復原機制**（修正波：把 P59 的文件 nit 併在這裡講清楚）：那三個切點
+    不從本函式進來，復原方式是**以同一個 `operation_id` 重走完整路徑**——`allocate_version`
+    對同一筆 operation 沿用 ledger 的版號、`create_version` 對同一份 plan 冪等，所以重跑
+    不會產生第二個版號，走完之後才會落到本函式的第一列。
     """
     version_ids, expected = _resume_targets(operation_id, operations=operations,
                                             repository=repository)
@@ -799,6 +836,6 @@ def resume_publish(operation_id: str, *, operations: OperationCoordinator,
     if written != expected:
         raise CoordinationError(f"補寫的公開 key 與待補清單不一致：{operation_id}")
     for slug in dict.fromkeys(version.slug for version in versions):
-        publisher._write_tutorial_index(slug)
-    publisher._write_site_index()
+        publisher.write_tutorial_index(slug)
+    publisher.write_site_index()
     return PublishResult(published=version_ids, failed=None, reasons=())

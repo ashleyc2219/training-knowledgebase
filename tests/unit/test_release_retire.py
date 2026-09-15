@@ -5,7 +5,7 @@
 - `repo` 是一個**真的** `Repository`，只有底下的表換成 `FakeTable`、bucket 換成 `FakeBucket`
   （形狀照 `tests/unit/test_release_update.py`，那支檔證明過 `put_meta`／`update_meta` 的
   compare-and-swap 與 `IfNoneMatch` 都跑得起來）。所以 `retire_tutorial`（P26）、
-  `resolve_successor`、`Publisher._write_tutorial_index`（P24）跑的都是真程式。
+  `resolve_successor`、`Publisher.write_tutorial_index`（P24）跑的都是真程式。
 - `ops` 是真的 `OperationCoordinator`，父 operation `op-release-r_43` 在 fixture 就接受好
   （雲端由 P32 的接入層寫，本機自己補）。
 - **一個模型呼叫都不會發生**：`deps.writer` 是 `NoModelWriter`，任何一次 `embed`／

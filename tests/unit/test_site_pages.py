@@ -318,7 +318,7 @@ def test_tutorial_index_keeps_the_order_it_was_given(renderer: SiteRenderer) -> 
     """Given 呼叫端已排好序／When 渲染索引／Then renderer 不重排。
 
     本計畫選擇（2026-09-14）：Phase 57 文件的 Task 2 Step 3 寫「依版號升序排序」，但
-    `Publisher._write_tutorial_index` 已經用 `list_versions_of_tutorial`（升序）再 `[::-1]`
+    `Publisher.write_tutorial_index` 已經用 `list_versions_of_tutorial`（升序）再 `[::-1]`
     反轉成「版號大的在前」，而且 `test_publisher_single.py` 正在斷言那個順序。兩份排序邏輯
     遲早分岔，所以 renderer 不排序、只過濾（00A R5：既有程式優先）。
     """
