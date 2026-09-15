@@ -578,7 +578,16 @@ git commit -m "feat(ingress): 建立固定匯入的 Lambda 入口"
 >    （`Scan` 是 `ticket`／`release` 分支的 `rote.list_procs` 要的），**不給索引**。
 > 5. **`missing_nonempty_strings` 也用在 `_text`**：單一欄位的必填檢查沿用同一份實作，
 >    「一次回報所有缺欄位」仍然只有一個地方決定什麼叫「缺」。
-> 6. **雲端證據**在 `docs/plan/report/phases/2026-09-14-Phase42-REP.md` §4：`training-kb-import`
+> 6. **`id` 必須以 `f_` 開頭是本計畫選擇**：00A 沒有這條規則（它只要求 `bare_id`），本文件
+>    §7 Task 1 Step 3 的片段有寫，所以實作照做並在 `validate_feedback` 用
+>    `FEEDBACK_ID_PREFIX` 常數表達。P57 的 widget 產出 `f_site-<slug>-<user>-<epoch>`，
+>    通過這條檢查。若日後有不帶前綴的歷史匯入檔要收，改的是這一個常數。
+> 7. **重送要冪等收尾**（review 修正回合 1 的 Critical）：一筆回饋是「metadata item ＋
+>    `REFERS_TO` 邊」兩筆寫入，中間斷掉會留下「item 在、邊不在、ledger 停在 accepted」的
+>    狀態，而 `list_feedback_of_version` 只走 `by_target` GSI，沒有邊就永遠查不到。所以
+>    `import_feedback` 的 duplicate 路徑仍然無條件 `put_edge` ＋ `complete`（兩者都冪等），
+>    `import_view` 的 duplicate 路徑也補 `complete`。
+> 8. **雲端證據**在 `docs/plan/report/phases/2026-09-14-Phase42-REP.md` §4：`training-kb-import`
 >    的 `aws lambda invoke` 回應原文（saved／duplicate／rejected 七種結果）、寫進真表的 item
 >    原文、IAM policy 原文、CloudWatch log 與「ticket-analysis 執行數 5 → 5」。
 
