@@ -170,10 +170,16 @@ def test_generation_request_sets_max_tokens_timeout_and_low_temperature() -> Non
 
 @pytest.mark.parametrize("name", sorted(SCHEMAS))
 def test_every_schema_gets_max_tokens_and_low_temperature(name: str) -> None:
-    """八個 schema 一個都不能漏；教學寫作 2048，其餘判斷類 512（00A §3.7）。"""
+    """八個 schema 一個都不能漏；教學寫作 2048，其餘判斷類 512（00A §3.7）。
+
+    教學寫作有兩個 schema：`TutorialDraft`（CREATE 整篇）與 `StepRewrite`（P46 REFINE 與
+    P51 UPDATE 的命中步驟改寫）。**controller 核准的 R3.6 例外（2026-09-14）**：本行原本
+    只認 `TutorialDraft`，是 P18 當時的假設；00A §3.7 明列 P46／P51 屬教學寫作類，以 00A
+    為準。截斷（`stopReason == "max_tokens"`）仍然是驗證失敗，不靠調高上限救。
+    """
     config = inference_config(SCHEMAS[name])
     assert config["temperature"] == 0.1 and "topP" not in config
-    assert config["maxTokens"] == (2048 if name == "TutorialDraft" else 512)
+    assert config["maxTokens"] == (2048 if name in ("TutorialDraft", "StepRewrite") else 512)
 
 
 def test_bedrock_writer_sends_the_schema_specific_inference_config() -> None:

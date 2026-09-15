@@ -32,7 +32,7 @@ JUDGEMENT_INFERENCE_CONFIG: dict[str, object] = {"maxTokens": 512, "temperature"
 
 # 教學寫作類的唯一例外（設計 §14.3、00A §3.7）：其餘七個 schema 都留在判斷類的 512。
 # 截斷（`stopReason == "max_tokens"`）一律是驗證失敗，不靠調高上限救，見 `_parse_schema_json`。
-WRITING_MAX_TOKENS: dict[str, int] = {"TutorialDraft": 2048}
+WRITING_MAX_TOKENS: dict[str, int] = {"TutorialDraft": 2048, "StepRewrite": 2048}
 
 # 「向量幾維」這個數字的唯一一份（00A §5.4）：送出的 body 與收回的回應都拿它比。
 TITAN_DIMENSIONS = 1024
