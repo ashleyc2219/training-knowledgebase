@@ -66,7 +66,7 @@ from training_kb.content import (
     parse_version_id,
     verify_version_complete,
 )
-from training_kb.errors import ObjectAlreadyExists, PublishError
+from training_kb.errors import CoordinationError, ObjectAlreadyExists, PublishError
 from training_kb.faults import maybe_fail
 from training_kb.keys import META, OPERATIONS_PREFIX, operation_ref, tutorial_pk, version_pk
 from training_kb.models import Tutorial, TutorialContent, TutorialVersion, bare_id
@@ -711,3 +711,88 @@ class Publisher:
         """
         return [item_to_model(row, Tutorial)
                 for row in self._repository.scan_entity("TUTORIAL")]
+
+
+# ---- Phase 59 ----------------------------------------------------------------
+
+
+def _string_tuple(operation_id: str, payload: object, field: str) -> tuple[str, ...]:
+    """從 `pending-promote.json` 取一個字串陣列欄位；形狀不對是協調錯誤，不是程式錯誤。"""
+    values = payload.get(field) if isinstance(payload, Mapping) else None
+    if not isinstance(values, list) or not values:
+        raise CoordinationError(f"{operation_id} 的待補清單缺少 {field}")
+    return tuple(str(item) for item in values)
+
+
+def _resume_targets(operation_id: str, *, operations: OperationCoordinator,
+                    repository: Repository) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """這次要復原哪幾篇、應該補出哪幾個公開 key；兩種輸入互補（00A §6.7）。
+
+    ```text
+    多篇  operations/<op>/pending-promote.json   <- Publisher._record_pending_promote
+    單篇  ledger 的 OPS#<op>.version_id          <- Publisher._record_versions
+    ```
+
+    待補清單優先：父 operation 依 D-59 不持有版號，所以多篇只有這一份輸入；清單裡的
+    `site_keys` 與 `public_site_keys(version_ids)` 同一套算法，不會分岔。兩個都沒有代表這
+    筆 operation 根本還沒走到交易，沒有東西可以補，直接 `CoordinationError` 交人工看。
+    """
+    body = repository.get_object(operation_ref(operation_id, PENDING_PROMOTE_NAME))
+    if body is not None:
+        payload = json.loads(body.decode("utf-8"))
+        return (_string_tuple(operation_id, payload, "version_ids"),
+                _string_tuple(operation_id, payload, "site_keys"))
+    record = operations.load(operation_id)
+    if record is None or record.version_id is None:
+        raise CoordinationError(f"沒有可沿用的操作紀錄：{operation_id}")
+    return (record.version_id,), public_site_keys((record.version_id,))
+
+
+def resume_publish(operation_id: str, *, operations: OperationCoordinator,
+                   repository: Repository, publisher: Publisher,
+                   now: datetime) -> PublishResult:
+    """同 operation 的**補償重送**：沿用原版號，交易已提交時只補公開物件。
+
+    **順序是硬性的（00A §6.7、上一批 REP §8 第 9 項）：先 `prepare` 再
+    `promote_site_objects`。** 切點 4 之前留下的 staging 是交易**前**渲染的，那時
+    `published_at` 還是 `None`，頁面帶著 `UNPUBLISHED_MARKER`；直接 promote 會被
+    `_put_public_object` 的 runtime 守門擋下並丟 `PublishError`——擋得好，但那代表**復原
+    失敗**而不是成功。重跑 `prepare` 時表裡的 `published_at` 已經有值，重新渲染出來的
+    staging 才是 `data-published="true"`。
+
+    三條路：
+
+    | 版本狀態 | 做什麼 | 對應切點 |
+    |---|---|---|
+    | `published_at is None` | 照正常路徑 `commit`（`inspect` 會再檢查一次） | 1、2、3、5 |
+    | 全部已發布 | 只 `promote_site_objects` 補公開物件，再重建兩層索引 | 4 |
+    | 版本不存在 | `CoordinationError` | 資料不完整 |
+
+    **不得**在已發布的情況再呼叫 `commit`（`inspect` 會以「版本已發布」擋下）、**不得**
+    刪除既有公開物件、**不得**重新 `allocate_version`。實際補出的 key 與待補清單逐字比對，
+    對不上就 `CoordinationError`：那代表兩份真相已經分岔，靜靜通過會讓復原「看起來成功」。
+
+    **本計畫選擇（2026-09-14）：** 補完版本頁與 diff 副本之後**接著重建教學索引與站台索引**。
+    `Publisher._publish_site` 的第 4、5 步就是它們，00A 第 1230 列說 `resume_publish` 要
+    「把中斷的發布接著做完」；只補版本頁會讓公開站永遠沒有連到新版的路徑，那是半完成的
+    復原。索引是可重建投影（`if_none_match=False`），重寫多少次結果都一樣。
+    """
+    version_ids, expected = _resume_targets(operation_id, operations=operations,
+                                            repository=repository)
+    versions: list[TutorialVersion] = []
+    for version_id in version_ids:
+        version = repository.get_version(version_id)
+        if version is None:
+            raise CoordinationError(f"操作紀錄指向不存在的版本：{version_id}")
+        versions.append(version)
+    prepared = publisher.prepare(
+        PublishRequest(version_ids=version_ids, operation_id=operation_id), now=now)
+    if any(version.published_at is None for version in versions):
+        return publisher.commit(prepared, now=now)
+    written = promote_site_objects(prepared, repository=repository)
+    if written != expected:
+        raise CoordinationError(f"補寫的公開 key 與待補清單不一致：{operation_id}")
+    for slug in dict.fromkeys(version.slug for version in versions):
+        publisher._write_tutorial_index(slug)
+    publisher._write_site_index()
+    return PublishResult(published=version_ids, failed=None, reasons=())
