@@ -10,6 +10,7 @@
 """
 
 import importlib
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -83,10 +84,29 @@ def _reset_wiring() -> None:
 # ---- Phase 55 ----
 
 
-def _seed_batch(raw: dict[str, Any]) -> SeedBatch:
-    """把 event 裡的一筆批次還原成 `SeedBatch`；`approved_at` 走 ISO 字串。"""
-    approved_at: datetime | None = parse_iso(raw["approved_at"]) if raw.get("approved_at") else None
-    return SeedBatch(**{**raw, "approved_at": approved_at})
+def _seed_batch(raw: object) -> SeedBatch:
+    """把 event 裡的一筆批次還原成 `SeedBatch`；`approved_at` 走 ISO 字串。
+
+    形狀不對一律 `PermanentError`（修正波：final review B 的 minor）：`SeedBatch(**raw)`
+    對缺欄位／多欄位丟的是 `TypeError`、`parse_iso` 對壞字串丟 `ValueError`，兩者都不是
+    `PermanentError`，呼叫端（維護者的 `lambda invoke`）看到的會是看不出原因的 runtime
+    例外，也不符合本模組 docstring 承諾的「未知形狀原樣丟 `PermanentError`」。
+    """
+    if not isinstance(raw, Mapping):
+        raise PermanentError(f"validate_rules 的每一筆 batch 都必須是物件：{type(raw).__name__}")
+    row = dict(raw)
+    try:
+        approved_at: datetime | None = (parse_iso(str(row["approved_at"]))
+                                        if row.get("approved_at") else None)
+        return SeedBatch(**{**row, "approved_at": approved_at})
+    except (TypeError, ValueError) as error:
+        raise PermanentError(f"validate_rules 的 batch 欄位不合法：{error}") from error
+
+
+def _approved_at_key(raw: object) -> str:
+    """批次排序鍵：`approved_at` 的字串（缺值排最前）。形狀不對留給 `_seed_batch` 去報錯。"""
+    value = raw.get("approved_at") if isinstance(raw, Mapping) else None
+    return str(value) if value else ""
 
 
 def validate_rules_action(event: dict[str, Any], *, repository: Repository,
@@ -100,10 +120,37 @@ def validate_rules_action(event: dict[str, Any], *, repository: Repository,
     `approved` 是 Phase 43 的**回饋類別**核定表（`_approved_categories`），與批次的
     `approved_by` 無關；未核定的批次會被 `evaluate_batch` 判成 `undecidable`，
     `next_status` 就不會動狀態，`apply_rule_status` 也不會被呼叫。
+
+    **呼叫端義務（本計畫選擇 2026-09-15，修正波：final review B#4）：一次 invoke 要帶上
+    這條規則的完整決定性歷史。** `next_status` 的兩條判定都看「清單的最後兩筆」
+    （VAL Rule 5／6 的「連續兩批未改善且不重疊」與「最新一批 improved」），而本 action
+    只看**這一次 event 帶進來的** `batches`。所以把同一條規則的兩個批次拆成兩次 invoke，
+    第二次的清單長度是 1，`_two_unimproved` 永遠回 `False`，規則**永遠不會退役**。
+
+    為什麼不回頭讀 `record_evaluation` 寫下的證據檔（controller 裁決 10 的「較好版本」）：
+
+    ```text
+    1 沒有前綴列舉  `Repository` 只有 get_object／put_object／object_exists，沒有
+                    list_objects；要讀回同一條規則的全部批次得先知道每個 batch_id。
+    2 排不出順序    證據檔的內容是 asdict(RuleEvaluation)，**沒有** approved_at；
+                    而「最新一批」的定義正是依 approved_at 升序的最後一筆。
+    ```
+
+    兩件事都要動到 `Repository` 與證據檔格式（跨 Phase 的介面變更），超出修正波的範圍，
+    所以照裁決 10 的後備做法：把義務寫進 docstring 並用測試釘住這個限制
+    （`tests/unit/test_rule_status_writer.py::test_validate_rules_only_sees_the_batches_in_this_event`）。
+
+    `event` 形狀不對一律 `PermanentError`，不讓 `KeyError`／`TypeError` 漏出去。
     """
-    now = parse_iso(event["now"])
+    batches = event.get("batches")
+    if not isinstance(event.get("now"), str) or not isinstance(batches, list):
+        raise PermanentError("validate_rules 需要字串 now 與陣列 batches")
+    try:
+        now = parse_iso(str(event["now"]))
+    except ValueError as error:
+        raise PermanentError(f"validate_rules 的 now 不是合法的 ISO 時間：{error}") from error
     by_rule: dict[str, list[RuleEvaluation]] = {}
-    for raw in sorted(event["batches"], key=lambda item: item.get("approved_at") or ""):
+    for raw in sorted(batches, key=_approved_at_key):
         batch = _seed_batch(raw)
         evaluation = evaluate_batch(batch, approved=approved, repository=repository)
         record_evaluation(evaluation, repository=repository)

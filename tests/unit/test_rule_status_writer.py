@@ -153,3 +153,58 @@ def test_handler_dispatches_validate_rules_and_still_rejects_unknown_actions(
     assert result["results"][0]["status"] == "active"
     with pytest.raises(PermanentError):
         analytics_handler.handler({"action": "curation"}, None)
+
+
+# --- 修正波（final review B#4）：呼叫端義務與 event 形狀 ----------------------
+
+
+def not_improved_event(batch, batch_id: str, when: str) -> dict:
+    """同一條規則的一個「未改善」批次；`batch_id` 不同代表是不同的觀察窗口。"""
+    return {"action": "validate_rules", "now": when,
+            "batches": [asdict(batch) | {"batch_id": batch_id, "approved_at": when}]}
+
+
+def test_validate_rules_only_sees_the_batches_in_this_event(fake_repo, batch) -> None:
+    """Given 同一條規則的兩批分兩次 invoke，Then 第二次的判定只看得到自己那一批。
+
+    `next_status` 的兩條判定都看「清單的最後兩筆」（VAL Rule 5／6），而本 action 只吃
+    event 帶進來的 `batches`，**不回讀** `record_evaluation` 寫下的證據檔——證據檔沒有
+    `approved_at`（排不出「最新」），`Repository` 也沒有前綴列舉（列不出同一條規則的全部
+    批次），見 `validate_rules_action` 的 docstring。
+
+    所以呼叫端有義務「一次帶上完整的決定性歷史」。這條測試把限制釘住，讓它是被記錄的
+    契約，不是沒人發現的靜默失效：兩份證據檔都寫出來了，第二次的 `verdicts` 卻只有一筆。
+    """
+    fake_repo.seed_metrics(4.0, 3.0, 0.5, 0.5)      # 平均變差、rate 持平 -> not_improved
+
+    validate_rules_action(not_improved_event(batch, "hist-b1", "2026-09-01T00:00:00Z"),
+                          repository=fake_repo, approved=APPROVED)
+    result = validate_rules_action(
+        not_improved_event(batch, "hist-b2", "2026-09-02T00:00:00Z"),
+        repository=fake_repo, approved=APPROVED)
+
+    assert result["results"][0]["verdicts"] == ["not_improved"]   # 只有這一次那一筆
+    assert result["results"][0]["status"] == "candidate"          # 拆成兩次就退不了役
+    assert fake_repo.rules["R-007"].status is RuleStatus.CANDIDATE
+    for batch_id in ("hist-b1", "hist-b2"):                      # 兩份證據檔都在
+        assert f"operations/analytics/rule-validation/R-007/{batch_id}.json" in fake_repo.objects
+
+
+@pytest.mark.parametrize("event", [
+    {"action": "validate_rules", "batches": []},
+    {"action": "validate_rules", "now": "2026-09-01T00:00:00Z"},
+    {"action": "validate_rules", "now": 20260901, "batches": []},
+    {"action": "validate_rules", "now": "not-a-time", "batches": []},
+])
+def test_a_malformed_validate_rules_event_is_a_permanent_error(fake_repo, event) -> None:
+    """Given event 少欄位或型別不對，Then `PermanentError`（不是 KeyError／ValueError）。"""
+    with pytest.raises(PermanentError):
+        validate_rules_action(event, repository=fake_repo, approved=APPROVED)
+
+
+@pytest.mark.parametrize("bad", ["不是物件", {"batch_id": "只有一個欄位"}])
+def test_a_malformed_batch_is_a_permanent_error(fake_repo, bad) -> None:
+    """Given 一筆 batch 形狀不對，Then `PermanentError`（不是 TypeError）。"""
+    event = {"action": "validate_rules", "now": "2026-09-01T00:00:00Z", "batches": [bad]}
+    with pytest.raises(PermanentError):
+        validate_rules_action(event, repository=fake_repo, approved=APPROVED)

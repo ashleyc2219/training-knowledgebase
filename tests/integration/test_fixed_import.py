@@ -29,7 +29,12 @@ import pytest
 from training_kb import ingress
 from training_kb.clock import to_iso
 from training_kb.config import DEFAULT_PROJECT_ID
-from training_kb.errors import IngressError, PermanentError, TransientError
+from training_kb.errors import (
+    CoordinationError,
+    IngressError,
+    PermanentError,
+    TransientError,
+)
 from training_kb.handlers import import_
 from training_kb.ingress import (
     import_feedback,
@@ -861,3 +866,69 @@ def test_a_feedback_batch_is_unaffected_by_the_ticket_shape_rules(
     body = import_.handler({"kind": "feedback", "items": [FEEDBACK]}, None)
     results = body["results"]
     assert isinstance(results, list) and results[0]["status"] == "saved"
+
+
+# --- 修正波（final review A#6）：逐筆的失敗界線 -------------------------------
+
+
+def test_a_permanent_error_only_rejects_its_own_item(
+        wired_handler: Repository, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 中間那筆 `normalize_then_accept` 丟 `PermanentError`／Then 只有它 `rejected`。
+
+    `normalize_then_accept` 在「沒有任何 canonical id」時丟的是 `PermanentError`（不是
+    `IngressError`），原本會整批中止，前面已經寫進去、甚至已經 `StartExecution` 的那幾筆
+    留在表裡——與 docstring 承諾的「整批 `PermanentError` 零寫入」矛盾（final review A#6）。
+    """
+    calls = {"n": 0}
+
+    def fake(**kwargs: Any) -> list[Acceptance]:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise PermanentError("沒有任何 canonical id")
+        return [_acceptance(f"op-ticket-t_{calls['n']}")]
+
+    monkeypatch.setattr(import_, "normalize_then_accept", fake)
+    body = import_.handler({"kind": "ticket", "items": [TICKET_ITEM] * 3}, None)
+    results = body["results"]
+    assert isinstance(results, list)
+    assert [row["status"] for row in results] == ["saved", "rejected", "saved"]
+    assert results[1]["invalid_fields"] == ()
+    assert "canonical id" in str(results[1]["message"])
+
+
+def test_a_coordination_error_only_rejects_its_own_item(
+        wired_handler: Repository, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given `put_meta` 的 create_only 競態丟 `CoordinationError`／Then 只有那一筆 `rejected`。"""
+    calls = {"n": 0}
+
+    def fake(**kwargs: Any) -> list[Acceptance]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise CoordinationError("同一個 canonical id 被別人先建立了")
+        return [_acceptance(f"op-ticket-t_{calls['n']}")]
+
+    monkeypatch.setattr(import_, "normalize_then_accept", fake)
+    body = import_.handler({"kind": "ticket", "items": [TICKET_ITEM] * 2}, None)
+    results = body["results"]
+    assert isinstance(results, list)
+    assert [row["status"] for row in results] == ["rejected", "saved"]
+
+
+def test_a_transient_error_still_aborts_the_whole_invocation(
+        wired_handler: Repository, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 中間那筆丟 `TransientError`／Then 整次 invoke 失敗（呼叫端重送整批）。
+
+    `TransientError` 是「重送有機會成功」，收斂成 `rejected` 會把一次可回復的故障寫成
+    永久的資料錯誤；維護者重送整批時 O2 會把已寫入的那幾筆判成 `duplicate`。
+    """
+    calls = {"n": 0}
+
+    def fake(**kwargs: Any) -> list[Acceptance]:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise TransientError("DynamoDB 節流")
+        return [_acceptance(f"op-ticket-t_{calls['n']}")]
+
+    monkeypatch.setattr(import_, "normalize_then_accept", fake)
+    with pytest.raises(TransientError):
+        import_.handler({"kind": "ticket", "items": [TICKET_ITEM] * 3}, None)

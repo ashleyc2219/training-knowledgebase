@@ -10,6 +10,11 @@
 允許修正」（F51）的形狀。`kind` 不在 `IMPORT_KINDS` 內、或 `items` 不是陣列，屬於呼叫
 方式錯誤而不是資料錯誤，整個事件丟 `PermanentError`，一筆都不寫。
 
+**「整批零寫入」只涵蓋形狀錯誤**（修正波：final review A#6）：形狀的檢查全部在第 1 段
+做完，所以那一類確實一筆都沒寫。進到第 3 段之後，逐筆的 `PermanentError`（含
+`IngressError`）與 `CoordinationError` 一律收斂成那一筆的 `rejected`；只有
+`TransientError` 會中止整次 invoke，讓呼叫端重送整批（O2 會把已寫的判成 `duplicate`）。
+
 四個 `kind` 分成兩條路：
 
 ```text
@@ -35,7 +40,7 @@ from time import monotonic
 from typing import Any, cast
 
 from training_kb.config import load_settings
-from training_kb.errors import IngressError, PermanentError
+from training_kb.errors import CoordinationError, IngressError, PermanentError
 from training_kb.ingress import (
     ImportResult,
     import_feedback,
@@ -160,11 +165,35 @@ def _import_one(kind: str, payload: Mapping[str, object], deps: Deps,
                 deadline: float) -> ImportResult:
     """一筆的分派；四種 `kind` 的**資料**錯誤一律收斂成 `rejected`，不影響同一批的其他筆。
 
-    `feedback`／`view` 由 `ingress` 自己收斂，所以那兩條不用 try；`ticket`／`release`
-    的 `IngressError` 是從 `normalize_then_accept` 冒上來的，在這裡轉成同一種
-    `rejected` row（review 修正回合 1）。**形狀**問題不在此列：缺可信入口設定、`payload`
-    不是物件，都已經由 `_checked` 在整批預檢時擋掉了（整批 `PermanentError`、零寫入）。
+    **形狀**問題不在此列：缺可信入口設定、`payload` 不是物件，都已經由 `_checked` 在整批
+    預檢時擋掉了（整批 `PermanentError`、零寫入）。
+
+    收斂的界線（修正波：final review A#6）：
+
+    ```text
+    IngressError            -> rejected（帶 fields，這一筆的欄位不合法）
+    其他 PermanentError     -> rejected（例如 normalize_then_accept 判定沒有 canonical id）
+    CoordinationError       -> rejected（put_meta 的 create_only 競態）
+    TransientError          -> **往外丟**，整次 invoke 失敗，維護者重送整批（O2 會判重複）
+    ```
+
+    原本只攔 `IngressError`，但 `normalize_then_accept` 會丟 `PermanentError`、
+    `import_feedback` 會丟 `CoordinationError`，兩者都會在迴圈中途中止——前面幾筆已經
+    寫進表、甚至已經 `StartExecution`，與 handler docstring 承諾的「整批 `PermanentError`
+    零寫入／資料錯只拒那一筆」直接矛盾。`TransientError` 維持往外丟：它是「重送有機會
+    成功」，收斂成 `rejected` 等於把可回復的故障寫成永久的資料錯誤。
     """
+    try:
+        return _dispatch(kind, payload, deps, deadline)
+    except IngressError as error:
+        return ImportResult("rejected", None, error.message, error.fields)
+    except (PermanentError, CoordinationError) as error:
+        return ImportResult("rejected", None, str(error), ())
+
+
+def _dispatch(kind: str, payload: Mapping[str, object], deps: Deps,
+              deadline: float) -> ImportResult:
+    """四種 `kind` 的實際處理；例外的收斂全部留在 `_import_one`。"""
     repository, operations = deps.need_repository(), deps.operations
     if kind == "feedback":
         # Phase 43：`writer` 直接讀屬性、**不用** `need_writer()`——沒接線時的語意是
@@ -175,13 +204,10 @@ def _import_one(kind: str, payload: Mapping[str, object], deps: Deps,
     if kind == "view":
         return import_view(payload, repository=repository, operations=operations,
                            now=deps.now())
-    try:
-        accepted = normalize_then_accept(      # 00A D-60：六個參數全是 keyword
-            domain=str(payload["domain"]), adapter=str(payload["adapter"]),
-            event_type=str(payload["event_type"]), headers=_lower_headers(payload),
-            payload=_event_payload(payload), deadline=deadline)
-    except IngressError as error:
-        return ImportResult("rejected", None, error.message, error.fields)
+    accepted = normalize_then_accept(      # 00A D-60：六個參數全是 keyword
+        domain=str(payload["domain"]), adapter=str(payload["adapter"]),
+        event_type=str(payload["event_type"]), headers=_lower_headers(payload),
+        payload=_event_payload(payload), deadline=deadline)
     # `normalize_then_accept` 回 **list[Acceptance]**（D-73）：一個 PR 可展開成 n 筆子
     # Release，各自一個 operation。與 P30 的 handler 同口徑：`object_id` 取第一筆，
     # 訊息列出全部 operation ID，不丟掉其餘幾筆。
