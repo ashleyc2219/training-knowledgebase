@@ -2,6 +2,35 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **（a）已存在、直接重用（file:function）**
+> - `src/training_kb/pipelines/release.py` — controller 已預建**只有 docstring 的空殼**（commit `5f8a430`，COMMON.md R4）。本 Phase 用 `Edit` 追加 `# ---- Phase 50 ----` 區段。
+> - `src/training_kb/repository.py:Repository.find_current_published_steps_referencing(feature_id) -> list[TutorialStep]`（P27；**反查的唯一實作**，A=GSI `query_by_target` 候選、B=基表 `scan_entity("TUTORIAL")` + `_is_current_published` + `get_steps`，GSI 有而基表讀不到時丟 `PermanentError(f"GSI 候選在基表讀不到對應步驟：{pk}")`）。
+> - `src/training_kb/repository.py`：`scan_entity(entity, *, consistent=True, meta_only=True)`（**`meta_only` 預設就是 `True`**）、`get_steps(version_id)`（依 `number` 升序）、`get_version`、`get_tutorial`、模組函式 `item_to_model`。
+> - `src/training_kb/content.py:parse_version_id(value) -> tuple[str, int]`、`src/training_kb/vectors.py:cosine`、`src/training_kb/writing/schemas.py:StepConfirmation`（`required: ["confirmed_step_numbers", "reason"]`、`additionalProperties: False`、`confirmed_step_numbers` 的 items 是 `{"type": "integer", "minimum": 1}`）。
+> - `src/training_kb/writing/prompts.py`：目前**只有** `_TUTORIAL_SYSTEM`、`_as_data`、`prompt_write_tutorial`、`_GAP_SYSTEM`、`prompt_name_gap`。`_as_data` 就是 `html.escape(text, quote=False)`，直接用模組內那一份（D-67）。
+> - `src/training_kb/models.py:TutorialStatus.ACTIVE`／`TutorialStep`（欄位 `tutorial_version`、`number`、`type`、`text`、`feature_id`）、`src/training_kb/keys.py:META`、`src/training_kb/errors.py:ContentError`（是 `PermanentError` 的子類）。
+>
+> **（b）因上一批裁決／實作而修正的點**
+> 1. §4「修改 `pipelines/release.py`」成立，但要補一句：**同一波次 P49 也在改這支檔**（W1：P49 ∥ P50）。只用 `Edit`、各自 `# ---- Phase NN ----` 區段、不重排也不 `ruff format` 整支檔；`git add` 只加自己的檔案路徑（COMMON.md R3）。
+> 2. `writing/prompts.py` 是 **P17 owner 的高度共用檔**（00A §3.2：P39、P40、P43、P45–P47、P50、P51 都會追加）。本 Phase 只 `Edit` 追加 `prompt_safety_net_confirm` 與它自己的 `_SAFETY_NET_SYSTEM` 常數，**不動** `_as_data` 與別人的 renderer。W1 期間 P43／P45–P47 也可能在同一支檔追加。
+> 3. §7 Task 3 的 `fake_writer`（帶 `scores`、`replies`、`default_reply`、`json_calls`）**不是**共用 fixture：`tests/unit/conftest.py` 的 `RecordingWriter` 只有 `calls`／`replies`（list，依序 pop）／`request_attempts` 與固定 `FIXED_EMBEDDING`，而該檔依 COMMON.md R3.6 **只有 P55 可以修改**。請在 `tests/unit/test_release_safety_net.py` 內自備區域 fixture（同名覆寫即可），**不要**改 conftest，也**不要**與 P49 共用同一份（兩個 Phase 並行，共用會互相卡住）。
+> 4. §7 Task 3 的 `fake_writer.json_calls[0].user`／`call.node` 是屬性存取；共用 `RecordingWriter` 記的是 **dict**（`{"kind", "operation_id", "node", "system", "user", "schema"}`）。自備 fixture 時請沿用 dict 形狀或自己定義 dataclass，並在測試裡寫清楚。
+> 5. §7 Task 3 Step 4 的 `tests/integration/test_release_hits_consistency.py` 跑在 **moto**（`tests/integration/conftest.py`，region `us-west-2`，`by_target` 是 KEYS_ONLY GSI）。moto 的 GSI 沒有真實的最終一致落後，所以「GSI 延遲」只能用 fixture 主動 `gsi_hide` 模擬；`aws dynamodb query --index-name by_target` 的**真實**輸出取不到，移交 **P52 §6 證據表**（COMMON.md R1）。
+> 6. §6 的「`meta_only` 預設 `True`」與現況一致（`repository.py:539`）；`_current_published` 仍自己再濾一次 `SK == META` 是對的（與 `Repository._meta_models` 同一套防禦）。
+> 7. §5 Consumes 的其他簽名逐一核對通過，未發現需要改寫的簽名。
+>
+> **（c）gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - **O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`：Titan／Claude 皆 `ValidationException: Operation not allowed`）→ `safety_net` 的 `embed` 與 `generate_json` 一律走假 writer；真實 AWS 執行時 `SafetyNet` 節點會走 `PermanentError → Catch → PipelineFailed`，那是 **BLOCKED 證據**不是 bug（證據由 P52 取得）。`find_release_hits`／`needs_safety_net` 不碰模型，不受影響。
+> - **O2 PASS**（P11）：反查結果的完整性可以依賴永久去重與同版號；但 moto 綠燈仍不等於真實併發，報告照實寫。
+> - **O3 FAIL**、**O6 未核定 `github.com/pull_request`**：本 Phase 不發布也不吃 webhook payload，兩者不影響交付物，但不得宣稱已核定。
+> - 前置 P01–P40 全部完成；**P49 與本 Phase 同波次並行**，`normalize_feature_name` 由 P49 在同一支檔提供——先寫自己的 Task 1（`find_release_hits` 不需要它），Task 2 需要時若 P49 尚未落地，**不得自己複製一份**，改為等待或暫時 import 失敗留紅燈（00A §6.9 owner 是 P49）。
+>
+> **（d）適用的 controller 裁決**：R3（`pipelines/release.py`、`writing/prompts.py` 兩支共用檔同波次併行）、R4、R5、R6、R7（`docs/plan/report/phases/2026-09-14-Phase50-REP.md`）、R8、R10。
+>
+> **實作波次**：W1（P49 ∥ P50 同時進行）→ W2（P51，需要本 Phase 的 `StepHit` 型別）→ W3（P52）。
+
 **目標：** 從 Phase 49 定位到的 Feature，找出所有「目前已發布版本」中真的引用它的步驟；反查為零或重大改名時，再用步驟文字相似度提出候選並交 Claude 逐一確認。
 
 **架構：** 反查本身由 Phase 27 的 `find_current_published_steps_referencing` 完成（`by_target` GSI 取候選、基表一致讀取雙向核對）；本 Phase 只**包裝**它，把 `TutorialStep` 轉成下游要的 `StepHit` 座標並固定排序，不重寫一份 GSI 邏輯。Safety Net 是獨立的補漏路徑，只新增確認過的命中，永遠不會刪掉已經明確反查到的命中。
@@ -15,7 +44,7 @@
 - 下一階段是 [Phase 51：Release UPDATE 精準改寫](./51-Phase51-Release-UPDATE精準改寫.md)。
 - 本階段不做：不改寫步驟、不配置版號、不建立版本、不發布、不退役、不更新 aliases。
 - 只處理每篇教學目前已發布的 `current_version`；歷史版與未發布版的命中只供追溯（F17）。Safety Net 全數未確認、無候選或無法確認時回傳空 tuple，由呼叫端記未命中並 KEEP（F18）。
-- O1–O7 狀態：O5 未通過時 Safety Net 保持 blocked；O2 未通過時不得宣稱反查結果在併發寫入下仍完整。本 Phase 不得宣稱任何 gate 已核定。
+- O1–O7 狀態（現況核對 2026-09-14）：**O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`）→ Safety Net 的模型路徑保持 blocked，只能用假 writer 驅動；**O2 PASS**（P11）→ 可以依賴永久去重與同版號，但 moto 綠燈仍不等於真實併發，報告照實寫。本 Phase 不得宣稱任何 gate 已核定。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -66,11 +95,11 @@ find_release_hits("Prepare", repository=repo)
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 修改 | `src/training_kb/pipelines/release.py` | `StepHit`、`find_release_hits`、`needs_safety_net`、`safety_net`。 |
-| 修改 | `src/training_kb/writing/prompts.py` | `prompt_safety_net_confirm`：只放候選版的步驟文字。 |
+| 修改 | `src/training_kb/pipelines/release.py` | `StepHit`、`find_release_hits`、`needs_safety_net`、`safety_net`。（同一波次 P49 也在改這支檔：只 `Edit`、各自 `# ---- Phase NN ----` 區段。） |
+| 修改 | `src/training_kb/writing/prompts.py` | `prompt_safety_net_confirm`：只放候選版的步驟文字。（現況核對 2026-09-14：這支檔 owner 是 P17，00A §3.2 列出 P39／P40／P43／P45–P47／P50／P51 都會追加；只 `Edit` 加自己的區段，不動 `_as_data` 與別人的 renderer。） |
 | 測試 | `tests/unit/test_release_hits.py` | current／已發布篩選、GSI 漏邊補齊、缺邊拋錯、排序。 |
 | 測試 | `tests/unit/test_release_safety_net.py` | 觸發條件、候選排序、確認驗證與空結果。 |
-| 測試 | `tests/integration/test_release_hits_consistency.py` | 真實 GSI 延遲下的一致讀取核對。 |
+| 測試 | `tests/integration/test_release_hits_consistency.py` | **moto** GSI 下的一致讀取核對（GSI 落後用 fixture 主動隱藏來模擬）。（現況核對 2026-09-14：原寫「真實 GSI 延遲」，`tests/integration/conftest.py` 是 moto、`by_target` 是 KEYS_ONLY，沒有真實落後；真實 GSI 證據移交 P52 §6。） |
 
 ## 5. 固定介面
 
@@ -306,7 +335,7 @@ def test_safety_net_returns_empty_when_nothing_confirmed(
                       writer=fake_writer, operation_id="op-release-r_42") == ()
 ```
 
-`renamed_release` 是 `r_42`（`kind="renamed"`、`feature="Prepare"`、`old_name="Meeting Summary"`、`new_name="Prepare"`）。`fake_writer` 與 Phase 49 同一支：`embed` 把查詢文字回成 `[1.0] + [0.0] * 1023`、把分數為 `s` 的步驟回成 `[s, sqrt(1 - s * s)] + [0.0] * 1022`，所以 Phase 16 的真 `cosine` 算出來剛好等於 `s`，排序不會被浮點誤差推翻；`generate_json` 依 `user` 裡出現的 `version_id` 從 `replies` 取回覆（沒設就用 `default_reply`），並把 `(system, user, schema, node)` 記進 `json_calls`。八個步驟裡分數最高的五個是 A 的四步加 B 的第 1 步，剛好等於 `SAFETY_NET_CANDIDATES`，所以會有兩次確認呼叫、依 `(slug, version_id)` 升序先 A 後 B。
+`renamed_release` 是 `r_42`（`kind="renamed"`、`feature="Prepare"`、`old_name="Meeting Summary"`、`new_name="Prepare"`）。`fake_writer` 與 Phase 49 同型（**現況核對 2026-09-14：各自在自己的測試檔內定義，不共用、不改 `tests/unit/conftest.py`**——那支檔依 COMMON.md R3.6 只有 P55 可以動，而且 P49／P50 同波次並行，共用會互相卡住）：`embed` 把查詢文字回成 `[1.0] + [0.0] * 1023`、把分數為 `s` 的步驟回成 `[s, sqrt(1 - s * s)] + [0.0] * 1022`，所以 Phase 16 的真 `cosine` 算出來剛好等於 `s`，排序不會被浮點誤差推翻；`generate_json` 依 `user` 裡出現的 `version_id` 從 `replies` 取回覆（沒設就用 `default_reply`），並把 `(system, user, schema, node)` 記進 `json_calls`（共用 `RecordingWriter` 記的是 **dict**；自備 fixture 要用屬性存取就自己定義 dataclass，別假設共用那支有 `json_calls`）。八個步驟裡分數最高的五個是 A 的四步加 B 的第 1 步，剛好等於 `SAFETY_NET_CANDIDATES`，所以會有兩次確認呼叫、依 `(slug, version_id)` 升序先 A 後 B。
 
 - [ ] **Step 2：執行 `uv run pytest tests/unit/test_release_safety_net.py -q` 並確認紅燈**，訊號包含 `cannot import name 'safety_net'`。
 
@@ -393,7 +422,9 @@ uv run pytest tests/unit/test_release_safety_net.py tests/unit/test_release_hits
 uv run pytest tests/integration/test_release_hits_consistency.py -q
 ```
 
-預期 PASS，並保存 `aws dynamodb query --index-name by_target` 與 `get-item --consistent-read` 的原始輸出。若 O2 尚未通過真實整合驗證，這個整合檔標為 blocked，不得用記憶體 fake 的綠燈宣稱併發下反查已完整。
+預期 PASS。
+
+（現況核對 2026-09-14：原寫「保存 `aws dynamodb query --index-name by_target` 與 `get-item --consistent-read` 的原始輸出」——本檔跑在 **moto** 上，產不出真實帳號的輸出，**真實 GSI／基表比對移交 P52 §6 證據表**（COMMON.md R1）。**O2 現況是 PASS**（P11），但 moto 綠燈仍只證明資料形狀，不得用它宣稱真實併發下反查已完整。）
 
 - [ ] **Step 5：提交**
 
@@ -415,7 +446,10 @@ git commit -m "feat(release): 補漏候選與逐版確認"
 | Boundary | Claude 全部未確認／回傳不存在的編號 99 | 前者回 `()` 並由呼叫端 KEEP（F18）；後者丟棄該編號、不重問模型。 |
 | Failure | Claude 回的 `reason` 只有空白 | `ContentError`；依設計 §7.4 當成模型輸出違規，不降級成 KEEP。 |
 
-人工驗收：用 `aws dynamodb query --index-name by_target` 與 `aws dynamodb get-item --consistent-read` 各讀一次，比較兩邊差異再對照 `find_release_hits` 的輸出；另讀出 FakeWriter 捕捉的確認 prompt，確認只含候選版的步驟文字。不能只看測試顯示 PASS。
+人工驗收（現況核對 2026-09-14：拆成兩條路徑，照 COMMON.md §2）：
+
+- **可實證路徑（本 Phase 交付）**：在 moto 整合測試裡分別呼叫 `repository.query_by_target(feature_pk("Prepare"))` 與 `repository.get_steps(...)`／`scan_entity("TUTORIAL")`，比較兩邊差異再對照 `find_release_hits` 的輸出；另讀出自備 fake writer 捕捉的確認 prompt，親眼確認只含候選版的步驟文字、且不可信文字已被 `_as_data` 轉義。不能只看測試顯示 PASS。
+- **BLOCKED／移交路徑**：真實帳號的 `aws dynamodb query --index-name by_target --region us-east-1` 與 `get-item --consistent-read` 由 **P52 雲端驗收**取得；`safety_net` 的真實 Bedrock 證據因 **O5 BLOCKED** 取不到（`docs/plan/report/o5-20260915T030245Z.md`），報告記 BLOCKED。
 
 ## 9. 常見錯誤與停止條件
 
