@@ -49,17 +49,22 @@ from training_kb.models import (
     TutorialStatus,
 )
 from training_kb.operations import Acceptance, AcceptOperation, OperationCoordinator
-from training_kb.pipelines.common import Deps
+from training_kb.pipelines.common import Deps, task_name
 from training_kb.pipelines.feedback import (
     FEEDBACK_REVIEW_PIPELINE,
+    FEEDBACK_REVIEW_TASKS,
     CandidateGroup,
     candidate_rule_id,
+    feedback_review_handler,
     refine_operation_id,
     review_operation_id,
+    run_feedback_review,
     select_weak_targets,
     task_evaluate_targets,
     task_list_targets,
+    task_prepare_batch,
 )
+from training_kb.publishing import MAX_BATCH_VERSIONS
 from training_kb.repository import Repository
 
 PROJECT = "demo"
@@ -348,3 +353,164 @@ def test_state_never_carries_comments_or_full_text(review_deps: ReviewWorld) -> 
                                   review_deps.deps)
     dumped = json.dumps(state, ensure_ascii=False)
     assert "找不到那顆按鈕" not in dumped and _STEP_TEXTS[0] not in dumped
+
+
+# --- Task 2：整批 prepare／inspect／commit 與 F49 ------------------------------
+
+
+@pytest.fixture
+def review_deps_two_weak(repository: Repository, fake_writer: Any) -> ReviewWorld:
+    """b 與 c 都是弱教學且診斷都有命中；d 兩條分支都沒命中。
+
+    回覆順序＝`task_evaluate_targets` 的走法（逐篇先 candidate 再 REFINE）：
+    b candidate、b 診斷、b 改寫、c candidate、c 診斷、c 改寫。
+    """
+    repository.put_meta(Feature(feature_id=FEATURE, name=FEATURE, aliases=[], first_seen=NOW))
+    for slug in ("b", "c", "d"):
+        seed_tutorial(repository, slug)
+    seed_feedback(repository, "b@v1", B_IDS + tuple(f"f_b{index}" for index in range(6, 11)),
+                  rating=2)
+    seed_feedback(repository, "c@v1", C_IDS, rating=2)
+    return build_world(repository, fake_writer,
+                       [rule_proposal(), weak_diagnosis(), step_rewrite("b"),
+                        rule_proposal(), weak_diagnosis(), step_rewrite("c")])
+
+
+@pytest.fixture
+def review_deps_no_target(repository: Repository, fake_writer: Any) -> ReviewWorld:
+    """沒有任何 active 已發布版本：只有一篇已退役的教學。"""
+    repository.put_meta(Feature(feature_id=FEATURE, name=FEATURE, aliases=[], first_seen=NOW))
+    seed_tutorial(repository, "a", status=TutorialStatus.RETIRED)
+    return build_world(repository, fake_writer, [])
+
+
+def shift_the_base(world: ReviewWorld, slug: str) -> None:
+    """讓某一篇的基底位移：把 `TUTORIAL.current_version` 換掉，不再等於新版的 `supersedes`。
+
+    這是 `Publisher.inspect` 三類問題之一（「基底已位移」），也是併發下真的會發生的情況
+    ——另一條流程在這段期間把這篇切到別的版本。挑它當切點是因為它**只有 `inspect` 擋得
+    住**：`prepare` 照樣把兩篇的 staging 都寫出來，所以測試證的是「檢查失敗時零篇公開」，
+    不是「產物根本沒做出來」。
+
+    **不動** staging 物件：`_prepared` 每個 Task 都重跑一次 `prepare`，刪掉的 staging 會被
+    重新寫回來，製造不出「檢查不通過」這個狀態。
+    """
+    pk = tutorial_pk(slug)
+    world.repository.update_meta(pk, {"current_version": f"{slug}@v9"},
+                                 expected_revision=world.repository.revision_of(pk))
+
+
+def run_tasks(world: ReviewWorld, state: dict[str, Any], *, after: str = "",
+              corrupt: Any = None) -> dict[str, Any]:
+    """照 ASL 的走法逐個 Task 跑（雲端就是這樣，不經 `run_sequence`）。
+
+    `after`／`corrupt` 讓測試在**兩個 Task 之間**動手腳，重現「`EvaluateTargets` 已經建好
+    未發布版本，`InspectBatch` 之前產物被改壞」這個切點。
+    """
+    for task in FEEDBACK_REVIEW_TASKS:
+        state = task(state, world.deps)
+        if corrupt is not None and task_name(task) == after:
+            corrupt(world)
+    return state
+
+
+def test_task_order_and_names_are_fixed() -> None:
+    """Given 五個 Task，Then 名稱與順序逐字等於 00A §7 的一條直線。"""
+    assert [task_name(task) for task in FEEDBACK_REVIEW_TASKS] == [
+        "list_targets", "evaluate_targets", "prepare_batch", "inspect_batch", "commit_batch"]
+
+
+def test_two_prepared_versions_commit_together(review_deps_two_weak: ReviewWorld) -> None:
+    """Given 兩篇都產生 `RefinePlan`，Then 兩篇在同一次 `commit` 一起切 `published_at`。"""
+    result = run_feedback_review({"mode": "formal"}, review_deps_two_weak.deps)
+    published = review_deps_two_weak.object_of(str(result["result_ref"]))
+    assert result["prepared_version_ids"] == ["b@v2", "c@v2"]
+    assert published["published_version_ids"] == ["b@v2", "c@v2"]
+    assert published["reviewed_version_ids"] == ["b@v1", "c@v1", "d@v1"]
+    assert published["no_change_reasons"] == {"d@v1": "不是弱教學"}
+    repository = review_deps_two_weak.repository
+    assert repository.get_tutorial("b").current_version == "b@v2"
+    assert repository.get_tutorial("c").current_version == "c@v2"
+    assert "site/tutorials/b/v2.html" in review_deps_two_weak.site_keys()
+
+
+def test_second_version_failing_inspection_publishes_nothing(
+        review_deps_two_weak: ReviewWorld) -> None:
+    """Given 第二篇的產物在 `InspectBatch` 之前被改壞，Then 第一篇也**不會**發布（F49）。
+
+    `PrepareBatch` 只寫私有 staging，`CommitBatch` 才一次交易切 2N 個欄位，所以停在
+    `InspectBatch` 時兩篇的 `current_version` 都還是舊值、`site/` 一個物件都沒有。
+    """
+    with pytest.raises(PermanentError):
+        run_tasks(review_deps_two_weak, {"mode": "formal"}, after="evaluate_targets",
+                  corrupt=lambda world: shift_the_base(world, "c"))
+    repository = review_deps_two_weak.repository
+    assert repository.get_tutorial("b").current_version == "b@v1"   # 第一篇也沒被發布
+    assert repository.get_version("b@v2").published_at is None
+    assert review_deps_two_weak.site_keys() == []
+
+
+def test_empty_batch_succeeds_without_touching_publisher(
+        review_deps_no_target: ReviewWorld) -> None:
+    """Given 沒有任何 active 已發布版本，Then `SUCCEEDED`、零次模型呼叫、不碰 `Publisher`。"""
+    result = run_feedback_review({"mode": "formal"}, review_deps_no_target.deps)
+    assert result["publish_request_ref"] is None and result["prepared_version_ids"] == []
+    assert result["target_version_ids"] == []
+    assert review_deps_no_target.writer.calls == []
+    assert review_deps_no_target.site_keys() == []
+    assert review_deps_no_target.object_of(
+        str(result["result_ref"]))["published_version_ids"] == []
+
+
+def test_resend_does_not_call_the_model_or_allocate_a_new_version(
+        review_deps_two_weak: ReviewWorld) -> None:
+    """Given 同一天、同 operation 重送，Then 不重打模型、不提第二條規則、不配新版號。
+
+    **本計畫選擇 2026-09-14：** Phase 文件原本斷言兩次的 `publish_request_ref` 相同。
+    第一次已經把 b@v2／c@v2 發布出去，`current_version` 因此前進，第二次的目標變成
+    b@v2／c@v2（它們身上沒有回饋），`prepare_refine` 也會在 `_guard` 判定
+    `no_new_evidence`（F23）而回 `None`——所以第二次本來就**不該**再有 publish request。
+    §11 真正要守的是「不重複提案、不重打模型、不配新版號」，這裡直接斷言那三件事。
+    """
+    first = run_feedback_review({"mode": "formal"}, review_deps_two_weak.deps)
+    calls = list(review_deps_two_weak.writer.calls)
+    rules = {row["PK"] for row in review_deps_two_weak.repository.scan_entity("RULE")}
+    second = run_feedback_review({"mode": "formal"}, review_deps_two_weak.deps)
+
+    assert second["result_ref"] == first["result_ref"]          # 同一天＝同一筆 operation
+    assert review_deps_two_weak.writer.calls == calls           # 不重打模型
+    assert {row["PK"] for row in review_deps_two_weak.repository.scan_entity("RULE")} == rules
+    versions = {str(row["version_id"])
+                for row in review_deps_two_weak.repository.scan_entity("VERSION")}
+    assert versions == {"b@v1", "b@v2", "c@v1", "c@v2", "d@v1"}  # 沒有 v3
+
+
+def test_a_batch_over_the_transaction_limit_is_rejected_before_any_write(
+        review_deps_no_target: ReviewWorld) -> None:
+    """Given 超過 `MAX_BATCH_VERSIONS` 的一批，Then `PrepareBatch` 直接拒絕，不寫 staging。"""
+    state = {"operation_id": OP, "project_id": PROJECT, "mode": "formal",
+             "target_version_ids": [], "candidate_rule_ids": [],
+             "prepared_version_ids": [f"x{index}@v2" for index in range(MAX_BATCH_VERSIONS + 1)]}
+    with pytest.raises(PermanentError):
+        task_prepare_batch(state, review_deps_no_target.deps)
+    assert review_deps_no_target.repository.get_object(
+        f"operations/{OP}/publish-request.json") is None
+
+
+def test_handler_rejects_unknown_task() -> None:
+    """Given ASL 傳來不存在的 task 名稱，Then `PermanentError`（部署錯誤，重試不會變好）。"""
+    with pytest.raises(PermanentError):
+        feedback_review_handler({"task": "publish_everything", "state": {}}, None)
+
+
+def test_handler_runs_exactly_one_task(review_deps: ReviewWorld,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 雲端逐個 Task 呼叫，Then handler 只跑 `event["task"]` 那一個，不跑整條序列。"""
+    from training_kb.pipelines import feedback as feedback_module
+
+    monkeypatch.setattr(feedback_module, "_DEPS", review_deps.deps)
+    state = feedback_review_handler({"pipeline": "feedback-review", "task": "list_targets",
+                                     "state": {"mode": "formal"}}, None)
+    assert state["target_version_ids"] == ["b@v1", "c@v1", "d@v1"]
+    assert "candidate_rule_ids" not in state        # EvaluateTargets 沒有被一起跑掉
+    assert review_deps.writer.calls == []

@@ -8,6 +8,7 @@ controller 2026-09-14 預建空殼：讓同一波次的 Phase 只用 Edit 追加
 
 import hashlib
 import json
+import os
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from typing import Any, Literal
 
 from training_kb.analytics.ratings import average_rating
 from training_kb.analytics.status_writer import load_validated_at
-from training_kb.config import Thresholds
+from training_kb.config import Thresholds, load_settings
 from training_kb.content import (
     allocate_version,
     create_version,
@@ -44,9 +45,25 @@ from training_kb.models import (
     TutorialStatus,
 )
 from training_kb.operations import AcceptOperation, OperationCoordinator, OperationRecord
-from training_kb.pipelines.common import Deps, JSONValue, PipelineName
+from training_kb.pipelines.common import (
+    Deps,
+    JSONValue,
+    PipelineName,
+    TaskFn,
+    build_deps,
+    run_sequence,
+    task_name,
+)
+from training_kb.publishing import (
+    MAX_BATCH_VERSIONS,
+    PreparedPublish,
+    Publisher,
+    PublishRequest,
+    assert_batch_publishable,
+)
 from training_kb.repository import Repository, item_to_model
 from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
+from training_kb.site import SiteRenderer
 from training_kb.writing.client import Writer
 from training_kb.writing.prompts import (
     prompt_diagnose_weak,
@@ -870,3 +887,136 @@ def task_evaluate_targets(state: dict[str, JSONValue], deps: Deps) -> dict[str, 
                           "application/json", if_none_match=False)
     return {**state, "candidate_rule_ids": _ids(sorted(rule_ids)),
             "prepared_version_ids": _ids(sorted(prepared))}
+
+
+def _publisher(deps: Deps) -> Publisher:
+    """本 pipeline 的 `Publisher`；`SiteRenderer()` 無參數建構是既定用法（P24）。"""
+    return Publisher(deps.need_repository(), SiteRenderer(), deps.operations)
+
+
+def _prepared(state: Mapping[str, Any], deps: Deps) -> PreparedPublish | None:
+    """這一批的 staging 產物；沒有要發布的版本時回 `None`。
+
+    同一個 operation 重跑會得到**同一批** staging 產物（設計 §14.2：`prepare` 只寫私有
+    前綴、同 bytes 覆寫），所以不必把 `PreparedPublish` 塞進 state——state 只放 ID 與
+    S3 key（00A §7）。三個 Task 各自重算一次，代價是重寫同一份 bytes。
+
+    超過 `MAX_BATCH_VERSIONS` 在**寫第一個 staging 物件之前**就擋下來：交易上限是 100 個
+    action、每篇兩個，拆成兩次交易就不再是全有或全無（F49）。
+    """
+    version_ids = tuple(_listed(state.get("prepared_version_ids")))
+    if not version_ids:
+        return None
+    if len(version_ids) > MAX_BATCH_VERSIONS:
+        raise PermanentError(f"單批最多 {MAX_BATCH_VERSIONS} 個版本，本次 {len(version_ids)} 個")
+    request = PublishRequest(version_ids=version_ids, operation_id=str(state["operation_id"]))
+    return _publisher(deps).prepare(request, now=deps.now())
+
+
+def task_prepare_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """`PrepareBatch`：把整批的公開產物寫進**私有** staging，並記下這次的請求。
+
+    這個 Task 結束時**一個公開物件都還沒寫**；`publish_request_ref` 指向的
+    `operations/<op>/publish-request.json` 只是可追溯紀錄，不是發布。
+    """
+    prepared = _prepared(state, deps)
+    if prepared is None:
+        return {**state, "publish_request_ref": None}
+    assert_batch_publishable(prepared)
+    key = f"operations/{state['operation_id']}/publish-request.json"
+    deps.need_repository().put_object(
+        key, json.dumps({"version_ids": list(prepared.version_ids),
+                         "staged_keys": list(prepared.staged_keys)},
+                        ensure_ascii=False).encode("utf-8"), "application/json",
+        if_none_match=False)
+    return {**state, "publish_request_ref": key}
+
+
+def task_inspect_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """`InspectBatch`：整批只讀不寫的檢查；任一篇不過就整批停在這裡（F49）。
+
+    停在這裡的時候 `published_at` 與 `current_version` 都還沒動、`site/` 也還是空的，
+    所以「第二篇檢查失敗」一定發生在任何公開前綴寫入**之前**。
+    """
+    prepared = _prepared(state, deps)
+    if prepared is None:
+        return dict(state)
+    inspection = _publisher(deps).inspect(prepared)
+    if not inspection.ok:
+        raise PermanentError("整批未通過檢查：" + "；".join(inspection.problems))
+    return dict(state)
+
+
+def task_commit_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """`CommitBatch`：一次交易切完整批，再把本次結果寫成 `review-result.json`。
+
+    `PublishResult.failed` 有值代表 DynamoDB 擋下了這次切換（兩個欄位都沒變、`site/` 也
+    沒有新檔），那是**失敗**不是「發布了一部分」：丟 `PermanentError` 交給 Catch，
+    不回一個看起來正常的結果（比照 P41 review 必修 3 的 `task_publish_version`）。
+
+    這是整條流程的停止點：寫出 `review-result.json` 並 `operations.complete(...)`。
+    逐篇的「沒有改動」理由在這裡才從 `review-no-change.json` 併進來。
+    """
+    repository, operation_id = deps.need_repository(), str(state["operation_id"])
+    published: tuple[str, ...] = ()
+    prepared = _prepared(state, deps)
+    if prepared is not None:
+        result = _publisher(deps).commit(prepared, now=deps.now())
+        if result.failed is not None:
+            raise PermanentError(f"整批提交失敗：{result.failed}；{'；'.join(result.reasons)}")
+        published = result.published
+    body = repository.get_object(f"operations/{operation_id}/review-no-change.json")
+    key = f"operations/{operation_id}/review-result.json"
+    repository.put_object(key, json.dumps({
+        "reviewed_version_ids": _listed(state.get("target_version_ids")),
+        "candidate_rule_ids": _listed(state.get("candidate_rule_ids")),
+        "prepared_version_ids": _listed(state.get("prepared_version_ids")),
+        "published_version_ids": list(published),
+        "no_change_reasons": json.loads((body or b"{}").decode("utf-8")),
+    }, ensure_ascii=False).encode("utf-8"), "application/json", if_none_match=False)
+    deps.operations.complete(operation_id, now=deps.now())
+    return {**state, "result_ref": key}
+
+
+FEEDBACK_REVIEW_TASKS: tuple[TaskFn, ...] = (task_list_targets, task_evaluate_targets,
+                                             task_prepare_batch, task_inspect_batch,
+                                             task_commit_batch)
+"""五個 Task 的固定順序（00A §7 的一條直線）；`task_name(...)` 就是 ASL 的 `Parameters.task`。
+
+**沒有 Choice、沒有 Map**：把逐篇處理拆進 Map 會讓「第一篇已 publish、第二篇失敗」變成
+可能，那正是 F49 禁止的形狀。
+"""
+
+_TASK_BY_NAME: dict[str, TaskFn] = {task_name(task): task for task in FEEDBACK_REVIEW_TASKS}
+"""ASL `Parameters.task` -> Task 函式；名稱由 `task_name` 導出，不另打一份字串表。"""
+
+_DEPS: Deps | None = None
+"""Lambda 容器層級的相依快取：同一個容器只組一次 boto3 client 與 `BedrockWriter`。"""
+
+
+def run_feedback_review(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """本機與測試用的整條序列；雲端由 Step Functions 逐個 Task 呼叫 handler。
+
+    `run_sequence` 會先檢查 payload 有非空 `operation_id`（D-07），但 `feedback-review`
+    沒有外部事件、ASL input 只有 `mode`，所以這裡先把當日 id 補進 payload 再交給它。
+    雲端路徑不經 `run_sequence`，因此不受這個前置檢查影響。
+    """
+    payload: dict[str, JSONValue] = {**state, "mode": _review_mode(state),
+                                     "operation_id": review_operation_id(state, deps)}
+    return run_sequence(FEEDBACK_REVIEW_PIPELINE, payload, FEEDBACK_REVIEW_TASKS, deps)
+
+
+def feedback_review_handler(event: dict[str, Any], context: object) -> dict[str, JSONValue]:
+    """`feedback-review` 的直接入口：**只跑 `event["task"]` 指定的那一個 Task**。
+
+    不 try／except：`TransientError` 要讓 ASL 的 Retry 抓到，`PermanentError` 要讓 Catch
+    抓到（設計 §14.2）。相依在第一次 invoke 時才組，之後同一個容器沿用。
+    """
+    global _DEPS
+    task = _TASK_BY_NAME.get(str(event.get("task")))
+    if task is None:
+        raise PermanentError(f"feedback-review 沒有名為 {event.get('task')!r} 的 task")
+    if _DEPS is None:
+        _DEPS = build_deps(load_settings(os.environ))
+    state = event.get("state")
+    return task(dict(state) if isinstance(state, dict) else {}, _DEPS)
