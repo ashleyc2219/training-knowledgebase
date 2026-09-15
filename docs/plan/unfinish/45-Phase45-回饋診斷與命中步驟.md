@@ -158,11 +158,28 @@ WeakDiagnosis schema 通過（Phase 17／18 負責）
 
 原因不同的重複編號不能任選一個，否則重送結果不穩定；這是**本計畫選擇**的業務驗證，對應設計 §7.6「schema 通過仍要業務驗證」與 §14.1「有限重試後失敗」。空結果由 Phase 46 記錄 `NO_STEP`（設計 §14.1：這是業務結果，不是模型服務故障）。證據集合固定用 `sorted(set(target.feedback_ids))`、步驟依 `number` 升序，所以同一份輸入重送兩次會得到逐欄相同的 `DiagnosisResult`。`generate_json` 在整個函式裡只出現一次，`node` 固定 `DIAGNOSE_NODE`；依 F45，每一次真實 attempt 都會被 Phase 15 的 `CallTrace` 計入。
 
+**本計畫選擇（2026-09-14，實作時）：**
+
+1. **`prompt_diagnose_weak` 連 `version_id` 也轉義**：§7 Task 3 的示意片段只轉義 `text`、
+   `category` 與 `comment`。實作把 `version_id` 也走一次 `_as_data`，與同一支檔的
+   `prompt_propose_rule`（P47）一致——多轉義一次不會壞，漏轉義才會；`version_id` 是裸 ID，
+   轉義後逐字不變，測試的 `"prepare-meeting@v2" not in user` 不受影響。
+2. **測試的 `weak_target` 直接用 P44 的 `WeakTarget`**：同波次 W1 的 P44 已在
+   `pipelines/feedback.py` 交付 `WeakTarget`，所以 `diagnose_weak` 的參數就標 00A §6.9 的
+   `target: WeakTarget`（不另立 Protocol），測試也用真的 `WeakTarget` 建 target。
+3. **多加兩個斷言／測試**（驗收矩陣沒列，但設計 §7.6、00A D-67 要求）：`generate_json` 拿到的
+   `schema["$id"] == "WeakDiagnosis"`（證明傳的是 schema 字典本身，不是 pydantic 類別）；
+   `test_untrusted_comment_cannot_close_the_data_block` 證明留言裡偽造的 `</source_data>`
+   會被轉義成 `&lt;/source_data&gt;`，資料區關不掉。
+4. **`max_tokens 512`／`temperature 0.1` 不在本 Phase 設定**：判斷類參數由 Phase 15 的
+   `inference_config(schema)` 依 schema `$id` 決定（`WeakDiagnosis` 不在 `WRITING_MAX_TOKENS`
+   裡，所以落在 `JUDGEMENT_INFERENCE_CONFIG` 的 512／0.1），本節點不自己調參數。
+
 ## 7. TDD Tasks
 
 ### Task 1：鎖定有效診斷的資料契約
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from training_kb.pipelines.feedback import DiagnosisResult, diagnose_weak
@@ -188,7 +205,7 @@ def test_diagnose_weak_keeps_only_existing_steps(fake_repo, fake_writer, weak_ta
 
 **（現況核對 2026-09-14：`tests/unit/conftest.py` 已經有一個名叫 `fake_writer` 的 fixture，回 Phase 15 的 `RecordingWriter`。）** 在本檔定義同名 fixture 會無聲覆蓋它（`tests/unit/pipelines/conftest.py` 的檔頭已為同一個陷阱留警語）。**本計畫選擇：本檔的替身另取名 `diagnosis_writer`，或直接用 `RecordingWriter(replies=[...])`。** 沿用區域 fake 時形狀必須與 `RecordingWriter` 相容（00A §6.5）：它把每次呼叫記成 **dict**（`calls[0]["user"]`、`calls[0]["node"]`），不是屬性存取。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_diagnosis.py::test_diagnose_weak_keeps_only_existing_steps -q
@@ -196,7 +213,7 @@ uv run pytest tests/unit/test_feedback_diagnosis.py::test_diagnose_weak_keeps_on
 
 預期：FAIL，訊號包含 `cannot import name 'diagnose_weak'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from collections.abc import Mapping
@@ -249,7 +266,7 @@ def diagnose_weak(target, *, repo, writer, operation_id):
 
 `prompt_diagnose_weak` 先在 `src/training_kb/writing/prompts.py` 放一個回 `("", "")` 的空殼，Task 3 才補內容；這樣 Task 1 只驗資料契約，不一次做完兩件事。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_diagnosis.py -q
@@ -257,7 +274,7 @@ uv run pytest tests/unit/test_feedback_diagnosis.py -q
 
 預期：PASS；步驟 99 被丟掉，只留下步驟 3。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py src/training_kb/writing/prompts.py tests/unit/test_feedback_diagnosis.py
@@ -266,7 +283,7 @@ git commit -m "feat(feedback): 驗證弱教學診斷步驟"
 
 ### Task 2：鎖定 `NO_STEP` 與重複編號邊界
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -311,7 +328,7 @@ def test_same_number_with_conflicting_reason_is_rejected(fake_repo, fake_writer,
 
 `True` 這個案例不能省：Python 的 `bool` 是 `int` 的子類，`True in frozenset({1})` 會成立，只比對「編號在不在」擋不掉它。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_diagnosis.py -q
@@ -319,7 +336,7 @@ uv run pytest tests/unit/test_feedback_diagnosis.py -q
 
 預期：FAIL 三筆——空白原因、布林編號兩個 `AssertionError`，衝突原因是 `Failed: DID NOT RAISE`；Task 1 的兩個案例仍是 PASS。
 
-- [ ] **Step 3：把三道業務驗證補進最小實作**
+- [x] **Step 3：把三道業務驗證補進最小實作**
 
 ```python
 from training_kb.errors import ContentError
@@ -347,7 +364,7 @@ def _validated_items(
 
 相同 `number`、相同原因只能去重；相同 `number`、不同原因必須拋 `ContentError`，不可偷偷選第一筆或最後一筆。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_diagnosis.py -q
@@ -355,7 +372,7 @@ uv run pytest tests/unit/test_feedback_diagnosis.py -q
 
 預期：有效案例、空結果、非法編號、空白原因與重複衝突全部 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/unit/test_feedback_diagnosis.py
@@ -364,7 +381,7 @@ git commit -m "feat(feedback): 鎖定無有效步驟與重複編號邊界"
 
 ### Task 3：驗證 prompt 沒有跨版與跨類洩漏
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_prompt_only_contains_target_version_and_evidence(
@@ -386,7 +403,7 @@ def test_prompt_only_contains_target_version_and_evidence(
 
 `fake_repo_two_versions` 同時放 v1 的四步與八筆「找不到按鈕」、v2 的十筆「缺少資訊」；`weak_target` 只指 v1 的八個 ID。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_diagnosis.py::test_prompt_only_contains_target_version_and_evidence -q
@@ -394,7 +411,7 @@ uv run pytest tests/unit/test_feedback_diagnosis.py::test_prompt_only_contains_t
 
 預期：FAIL，`AssertionError`（空殼 renderer 回 `("", "")`，user 不含任何證據）。
 
-- [ ] **Step 3：把 `prompt_diagnose_weak` 的空殼換成真的 renderer**
+- [x] **Step 3：把 `prompt_diagnose_weak` 的空殼換成真的 renderer**
 
 ```python
 from collections.abc import Sequence
@@ -426,7 +443,7 @@ def prompt_diagnose_weak(
 
 它只接收呼叫端已篩好的 `steps` 與 `feedback`，自己不查 `Repository`；所有不可信文字（留言、步驟文字、類別）一律經 Phase 17 的 `_as_data` 轉義後才放進 `<source_data>`（00A D-67：全套 `prompt_<node>` 共用同一個函式與同一個分區標記，都在 `writing/prompts.py`，可直接呼叫），偽造的 `</source_data>` 會變成 `&lt;/source_data&gt;`，資料區無法提前結束（Phase 17 的三分區規則）。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_diagnosis.py -q
@@ -434,7 +451,7 @@ uv run pytest tests/unit/test_feedback_diagnosis.py -q
 
 預期：PASS；`fake_writer.calls` 長度是 1，代表整條路徑只有一個真實模型呼叫位置。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/writing/prompts.py tests/unit/test_feedback_diagnosis.py
@@ -474,11 +491,11 @@ git commit -m "feat(feedback): 限制診斷 prompt 只含本版證據"
 
 ## 11. 完成清單
 
-- [ ] `DiagnosisResult`、`DIAGNOSE_NODE` 與 `diagnose_weak` 簽名符合本文件與 00A §6.9。
-- [ ] `WeakDiagnosis` 以 schema 字典傳入、拿回 `dict`；全檔沒有 `model_validate`／`model_dump` 這類把 schema 當模型用的寫法。
-- [ ] 模型輸出欄位一律 `items[].number`，程式與測試都沒有 `index` 這個鍵名。
-- [ ] 只讀 target 指定的版本步驟與 target 指定的 Feedback ID，沒有寫入任何 item 或 S3 物件。
-- [ ] 合法步驟依 `number` 升序，非法步驟與空白原因不流入 REFINE；無有效步驟可觀察為 `NO_STEP`，沒有新版本。
-- [ ] `REV` Rule 5、6 有直接 assertion，並在 §10 標明 primary 在本 Phase。
-- [ ] 單元測試已實際執行並保存輸出，且未把假 Writer 的 PASS 說成 Bedrock、O5 或 AWS 已通過（O5 現況是 **BLOCKED**，不是「待驗證」）。
-- [ ] 測試替身沒有用 `fake_writer` 這個名字覆蓋 `tests/unit/conftest.py` 的同名 fixture；`pipelines/feedback.py` 與 `writing/prompts.py` 只用 Edit 追加自己的區段，沒有動 P44／P47 的程式。
+- [x] `DiagnosisResult`、`DIAGNOSE_NODE` 與 `diagnose_weak` 簽名符合本文件與 00A §6.9。
+- [x] `WeakDiagnosis` 以 schema 字典傳入、拿回 `dict`；全檔沒有 `model_validate`／`model_dump` 這類把 schema 當模型用的寫法。
+- [x] 模型輸出欄位一律 `items[].number`，程式與測試都沒有 `index` 這個鍵名。
+- [x] 只讀 target 指定的版本步驟與 target 指定的 Feedback ID，沒有寫入任何 item 或 S3 物件。
+- [x] 合法步驟依 `number` 升序，非法步驟與空白原因不流入 REFINE；無有效步驟可觀察為 `NO_STEP`，沒有新版本。
+- [x] `REV` Rule 5、6 有直接 assertion，並在 §10 標明 primary 在本 Phase。
+- [x] 單元測試已實際執行並保存輸出，且未把假 Writer 的 PASS 說成 Bedrock、O5 或 AWS 已通過（O5 現況是 **BLOCKED**，不是「待驗證」）。
+- [x] 測試替身沒有用 `fake_writer` 這個名字覆蓋 `tests/unit/conftest.py` 的同名 fixture；`pipelines/feedback.py` 與 `writing/prompts.py` 只用 Edit 追加自己的區段，沒有動 P44／P47 的程式。
