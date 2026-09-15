@@ -2,6 +2,36 @@
 
 > **給實作者：** 依 checkbox 做 TDD；每個 Task 先建立失敗測試，再寫最小實作，每個 Task 都要留下可單獨審查的提交。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **(a) 已存在、可直接重用（不要重寫）**
+> - `src/training_kb/writing/schemas.py:66` `RuleProposal` **已經完整**：`required = ["rule", "applies_when", "evidence", "derived_from"]`、`applies_when` 是 `{"enum": ["click_ui","input","read"]}`、`evidence` 是 `{"type":"array","minItems":5,"items":{"type":"string","minLength":1}}`、`derived_from` 是非空字串、`additionalProperties: False`。
+> - `src/training_kb/models.py:397` `AuthoringRule(rule_id, rule, applies_when: StepType, evidence: list[str], status: RuleStatus, applied_to: list[str], derived_from)`，**含 D-66 的 `evidence_has_five_distinct_ids` validator**（少於 5 個不同 ID 直接 `ValidationError`）。
+> - `src/training_kb/keys.py:79` `rule_pk(rule_id) -> "RULE#<rule_id>"`；`src/training_kb/repository.py:357` `get_meta(pk, model, *, consistent=True) -> T | None`、`:240` `put_meta(entity, *, create_only=True) -> None`（撞鍵丟 `CoordinationError`）、`:579` `list_feedback_of_version`。
+> - `src/training_kb/writing/prompts.py:29` `_as_data(text)` 與 `<source_data>` 分區契約（D-67）已存在；同檔目前只有 `prompt_write_tutorial`、`prompt_name_gap`。
+> - `src/training_kb/writing/client.py:51` `Writer.generate_json(system, user, schema, *, operation_id, node) -> dict[str, Any]`；`tests/unit/conftest.py:13` `RecordingWriter`。
+> - `src/training_kb/errors.py:12` `ContentError`；`models.py:43` `RuleStatus`、`:38`（同檔）`StepType`。
+> - `src/training_kb/pipelines/feedback.py`：**controller 已預建空殼**（只有 docstring，commit `5f8a430`）。
+>
+> **(b) 文件因上一批裁決／實作而修正的點**
+> 1. §4「修改 `src/training_kb/writing/schemas.py`｜只在 `RuleProposal` 缺欄位時補齊」→ **`RuleProposal` 已經齊全（含 `minItems: 5`），本 Phase 不需要改 `schemas.py`**。若實作時確認無需補欄位，就不要 `git add` 這支檔。
+> 2. §4「修改 `src/training_kb/pipelines/feedback.py`（檔案 owner 是 Phase 44）」→ controller 已預建空殼（COMMON.md R4）；本 Phase 與 P44、P45 在 **同一波次 W1 併行**追加，只用 Edit、各自區段。
+> 3. **兩個 `candidate_rule_id` 期望值都已實測正確**（2026-09-14 以文件片段的實作重算）：八個 ID（`f_12`…`f_40`）那組是 `R-ad0afde8`（§2）、五個 ID（`f_1`…`f_5`）那組是 `R-f6c7a0d2`（Task 3）；換成 `prepare-meeting@v2` 得 `R-7e16d4f3`。改動 `separators`、`ensure_ascii` 或排序方式都會讓這三個值改變。
+> 4. **本 Phase 對 Phase 43 沒有程式相依**：`candidate_groups(feedback, approved)` 的核定類別表是**參數**，測試直接給 `frozenset({"找不到按鈕","缺少資訊"})`。`approved_categories(repository)`（P43 追加在 `ingress.py`，目前尚未存在）是 **Phase 48 的呼叫端責任**；§5 Consumes 列它只是說明來源，本 Phase 不 import 它。
+> 5. `Feedback` 有 D-66 的 `carries_signal`（`rating`／`category`／`comment` 至少一項非空）與 `rating_is_strict_int`（拒 `bool`、只收 1..5）。`fb(..., category=None)` 的案例必須另外給非空 `comment`，否則造 fixture 時就 `ValidationError`（文件的 `fb` helper 有 `comment="第三步沒有指出按鈕在哪一頁與位置"`，已滿足）。
+>
+> **(c) gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - O1 provisionally accepted（D-71）；**O2 PASS**（P11，`docs/plan/report/o2-20260914t182824z.md`）；**O3 FAIL**（P12）；**O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`）；O6 待核定；O4 未到；**O7 未到**（P56 首驗）。
+> - 原「全域限制」寫「**O2** 操作紀錄未 PASS 前……不得宣稱永久去重已驗證」→ **O2 已 PASS**。但本 Phase 的「重送不重複提案」本來就**不靠** O2：它靠決定性 `rule_id` ＋ `put_meta(create_only=True)` ＋ 寫入前 `get_meta` 檢查，這一條不變。
+> - **O5 BLOCKED**：只能用假 `Writer` 做單元測試，`TKB_GENERATION_MODEL_ID` 不得填猜測值；真實 AWS 上 `propose_rule` 節點會走 `PermanentError → Catch → PipelineFailed`，那是 BLOCKED 證據。
+> - **O7 未到**：candidate 只能寫「已提出、待驗證」，不得寫成「已驗證有效」，也不得自動變 active（只有 P55 能改 `status`）。
+>
+> **(d) controller 裁決 R1–R11 的適用項**
+> - **R3（同檔併行）**：`pipelines/feedback.py` 在 W1 由 **P44 ∥ P45 ∥ P47** 同時追加；`writing/prompts.py` 在 W1 由 **P45 ∥ P47** 同時追加。只用 Edit 不用 Write；自己的程式放 `# ---- Phase 47 ----` 區段；不重排、不重格式化、不改名別人的程式；共用檔只跑 `ruff format --check`；`git add` 只加自己的檔案路徑；整套測試紅燈若來自別的 Phase 進行中的測試檔，用 `--ignore=` 排除並在報告寫明。
+> - **R4**：空殼已建，直接 Edit。**R5**：文件片段是示意，簽名以 00A ＋ 既有程式為準。
+> - **R6／R7／R8**：逐 Task 先紅燈再綠燈；報告寫 `docs/plan/report/phases/2026-09-14-Phase47-REP.md`；commit trailer 照 COMMON.md R8。
+> - 測試檔照 00A §3.3 平放：`tests/unit/test_rule_proposal.py`（全專案唯一）。
+
 **目標：** 從同一個已發布版本、同一個核定類別的至少五筆不同 Feedback，提出一條可逐筆回查的 candidate 規則。
 
 **架構：** Feedback Review 的 candidate 分支與弱教學分支完全獨立。固定程式先形成 `CandidateGroup` 並驗證證據範圍，再呼叫模型產生 `RuleProposal`；模型只決定 `rule` 與 `applies_when` 兩個欄位，`rule_id`、`evidence`、`derived_from`、`status`、`applied_to` 一律由程式依已驗證的 group 填入。
@@ -16,7 +46,7 @@
 - 本階段不做：不排程、不組 pipeline（Phase 48）；不做診斷與 REFINE（Phase 45／46）；不寫任何 `RULE.status` 轉移（只有 Phase 55 的 `apply_rule_status` 能寫）；不把 candidate 放進 CREATE／UPDATE／REFINE 的 prompt（Phase 19 只選 active）；不計算指標、不比較前後成效（Phase 53–55）。
 - 提案門檻**不要求**平均 `< 3.5`，也不要求總樣本達到弱教學門檻（設計 F26；`F` 開頭是設計文件 §19.2 的功能決策編號，`D` 開頭是 §19.1 的資料決策編號）。證據必須來自同一個 `TutorialVersion`、同一個核定類別、至少五個**不同** Feedback ID；`evidence` 只存 ID（設計 D15）；`derived_from` 恰好一個版本（設計 D18）。
 - `AuthoringRule.applies_when` 的型別是 `StepType`；模型輸出的 `RuleProposal.applies_when` 是 `"click_ui"`／`"input"`／`"read"` 其中一個**字串**，驗證通過後才轉成 `StepType` 存入（00A 第 8 節 D-10、設計 D16）。不得寫成 `"step.type == click_ui"` 字串或 `{"step.type": "click_ui"}` dict。
-- 與本 Phase 有關的 O1–O7 gate（`O` 開頭的編號是設計文件 §18 的七個待確認事項）：**O5** 模型與參數未通過前，本階段只能用假 `Writer` 做單元測試，不得宣稱真實 Bedrock 路徑已驗證；**O7** 核定種子未完成前，candidate 只能說「已提出」，不得寫成「已驗證有效」，也不得自動變成 active；**O2** 操作紀錄未 PASS 前，「重送不重複提案」只由「決定性 `rule_id` 加上寫入前條件檢查」達成，不得宣稱永久去重已驗證。
+- 與本 Phase 有關的 O1–O7 gate（`O` 開頭的編號是設計文件 §18 的七個待確認事項；現況核對 2026-09-14 見 COMMON.md §2）：**O5 BLOCKED**——帳號未送出 Bedrock model access 使用情境表單（`docs/plan/report/o5-20260915T030245Z.md`），本階段只能用假 `Writer` 做單元測試，不得宣稱真實 Bedrock 路徑已驗證，`TKB_GENERATION_MODEL_ID` 不得填猜測值；**O7 未到**（P56 首驗），candidate 只能說「已提出」，不得寫成「已驗證有效」，也不得自動變成 active；**O2 已 PASS**（P11，原寫「未 PASS」已不成立），但本階段的「重送不重複提案」本來就不靠 O2，仍只由「決定性 `rule_id` 加上寫入前 `get_meta` 檢查與 `put_meta(create_only=True)`」達成。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -79,9 +109,9 @@ Phase 48 feedback-review 的 EvaluateTargets Task
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 修改 | `src/training_kb/pipelines/feedback.py` | `CandidateGroup`、`candidate_groups`、`candidate_rule_id`、`propose_candidate`（檔案 owner 是 Phase 44）。 |
-| 修改 | `src/training_kb/writing/prompts.py` | 追加 `prompt_propose_rule`（檔案 owner 是 Phase 17，命名沿用 `prompt_<node>`）。 |
-| 修改 | `src/training_kb/writing/schemas.py` | 只在 `RuleProposal` 缺欄位時補齊，不改 `$id` 與既有 required（檔案 owner 是 Phase 17）。 |
+| 修改 | `src/training_kb/pipelines/feedback.py` | `CandidateGroup`、`MIN_CANDIDATE_FEEDBACK`、`PROPOSE_NODE`、`candidate_groups`、`candidate_rule_id`、`propose_candidate`。（現況核對 2026-09-14：檔案 owner 仍是 Phase 44，但 controller 已預建 docstring 空殼；本 Phase 與 P44、P45 在同一波次 W1 併行追加，只用 Edit、各自 `# ---- Phase 47 ----` 區段。） |
+| 修改 | `src/training_kb/writing/prompts.py` | 追加 `prompt_propose_rule`（檔案 owner 是 Phase 17，命名沿用 `prompt_<node>`；`_as_data` 已在該檔）。**同一波次 P45 也會追加 `prompt_diagnose_weak`，只 Edit 自己那段。** |
+| ~~修改~~ 預期不改 | `src/training_kb/writing/schemas.py` | **現況核對 2026-09-14：`RuleProposal`（`schemas.py:66`）四個 required 欄位、`applies_when` 的 enum 與 `evidence` 的 `minItems: 5` 都已齊全，本 Phase 預期不需要改這支檔。** 若實地核對後真的缺欄位才補，且不改 `$id` 與既有 required（檔案 owner 是 Phase 17）。 |
 | 測試 | `tests/unit/test_rule_proposal.py` | 門檻、溯源、適用範圍、狀態與重送。 |
 
 ## 5. 固定介面
@@ -102,7 +132,8 @@ Repository.list_feedback_of_version(version_id: str) -> list[Feedback]          
 Writer.generate_json(system: str, user: str, schema: Mapping[str, Any], *,
                      operation_id: str, node: str) -> dict[str, Any]              # Phase 15
 RuleProposal: dict[str, object]   # Phase 17；required = rule / applies_when /
-              evidence / derived_from，applies_when 是字串 enum，無額外欄位
+              evidence / derived_from，applies_when 是字串 enum，evidence minItems=5，
+              additionalProperties=False（已存在於 writing/schemas.py:66）
 approved_categories(repository: Repository) -> frozenset[str] / PENDING_CATEGORY   # Phase 43
 ```
 
@@ -465,7 +496,7 @@ def candidate_rule_id(group: CandidateGroup) -> str:
     return f"R-{hashlib.sha256(payload).hexdigest()[:8]}"
 ```
 
-`propose_candidate` 在 Task 2 已經有「`RULE#<rule_id>` 已存在就回既有規則」的分支，所以這個 Task 只補決定性 ID；兩者合起來就是「同一組證據重送不會多出第二條規則、也不會多打一次模型」。`"R-f6c7a0d2"` 是上面五個 ID 那組的實際輸出；換掉 `separators` 或排序方式都會改變它，測試會立刻紅燈。
+`propose_candidate` 在 Task 2 已經有「`RULE#<rule_id>` 已存在就回既有規則」的分支，所以這個 Task 只補決定性 ID；兩者合起來就是「同一組證據重送不會多出第二條規則、也不會多打一次模型」。`"R-f6c7a0d2"` 是上面五個 ID 那組的實際輸出；換掉 `separators`、`ensure_ascii` 或排序方式都會改變它，測試會立刻紅燈。（現況核對 2026-09-14：三個期望值已用本片段的實作重算過——`(prepare-meeting@v1, 找不到按鈕, f_1..f_5)` → `R-f6c7a0d2`；`(prepare-meeting@v2, 同上)` → `R-7e16d4f3`；§2 八筆證據那組 → `R-ad0afde8`，與 00A §6.9 的範例一致。）
 
 - [ ] **Step 4：跑完整檔案確認綠燈**
 
@@ -538,4 +569,5 @@ git commit -m "feat(rules): 以決定性規則 ID 避免重複提案"
 - [ ] `rule_id` 由 `candidate_rule_id(group)` 決定性產生，重送不重複提案也不重複呼叫模型。
 - [ ] candidate 分支不讀 `rating`、不呼叫 `is_weak`，與弱教學門檻完全分開。
 - [ ] `PRP` Rule 1–5 與 `REV` Rule 9 有直接 assertion；其餘相關 Rule 已標明 primary 在哪一份。
-- [ ] 文件與報告沒有把 candidate 寫成已驗證、已生效或可供一般寫作使用。
+- [ ] 文件與報告沒有把 candidate 寫成已驗證、已生效或可供一般寫作使用（O7 未到、O5 **BLOCKED**；O2 已 PASS 但本 Phase 不依賴它）。
+- [ ] `pipelines/feedback.py` 與 `writing/prompts.py` 只用 Edit 追加 `# ---- Phase 47 ----` 自己的區段，沒有動 P44／P45 的程式；`writing/schemas.py` 若未實際缺欄位就不提交。
