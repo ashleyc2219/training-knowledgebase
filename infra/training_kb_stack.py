@@ -507,8 +507,13 @@ class TrainingKbStack(Stack):
         `ticket`／`release` 分支走 `normalize_then_accept` -> `BotoPipelineStarter.start`，
         它在 `ExecutionAlreadyExists` 時會 `DescribeExecution` 把既有執行撿回來（續跑），
         沒有這條授權那一路會變成 `AccessDeniedException`。形狀與 P41 的
-        `_grant_execution_lookup` 相同；**不加** `sts:GetCallerIdentity`——匯入這支的
-        ARN 推導拿得到帳號（`_build_wiring` 會用，但那是 webhook 那支的路徑）。
+        `_grant_execution_lookup` 相同。
+
+        **不加 `sts:GetCallerIdentity`**（修正回合 2 更正理由）：匯入這支的
+        `ticket`／`release` 分支確實會走 `ingress._build_wiring` -> `get_caller_identity`
+        推導帳號，但 AWS 文件明示 `sts:GetCallerIdentity`「不需要任何權限」
+        （no permissions are required；也無法用 IAM policy 拒絕它），所以授權清單裡
+        不需要它。P41 給 webhook 的那一條是保守寫法，這裡不跟進。
         """
         return [self.format_arn(service="states", resource="execution",
                                 resource_name=f"{STATE_MACHINE_NAMES[pipeline]}:*",

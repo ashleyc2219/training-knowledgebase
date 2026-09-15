@@ -66,15 +66,19 @@ def handler(event: dict[str, Any], context: object) -> dict[str, object]:
     順序固定成三段，**每一段都做完才進下一段**：
 
     ```text
-    1 事件形狀   kind 在四種內、items 是陣列、每一筆都是物件 -> 否則整批 PermanentError
+    1 整批預檢   kind 在四種內、items 是陣列、每一筆的**形狀**都對 -> 否則整批 PermanentError
     2 組相依     確認事件合法之後才連 DynamoDB 與 S3
-    3 逐筆寫入   一筆的資料不合法只讓那一筆 rejected，其他筆照做（F51）
+    3 逐筆寫入   一筆的**資料**不合法只讓那一筆 rejected，其他筆照做（F51）
     ```
 
-    第 1 段的「每一筆都是物件」刻意**先全部檢查完**（review 修正回合 1）：邊檢查邊寫入的話，
-    壞在第 n 筆時前 n-1 筆已經進表了，與「整批 PermanentError，一筆都不寫」矛盾。
-    整批的 `deadline` 也在這裡算一次就往下傳（比照 `handlers/github_webhook.py`），
-    下游不重新計時。
+    「形狀」與「資料」的界線是這支 handler 唯一的分流依據：形狀錯（不是物件、`ticket`／
+    `release` 少了可信入口設定、`payload` 不是物件）代表**匯出檔本身壞了**，整批停下來、
+    一筆都不寫；資料錯（欄位缺值、`rating` 不合法、正規化失敗）只拒那一筆。
+
+    第 1 段刻意**先把整批的形狀檢查全部做完**（review 修正回合 1／2）：邊檢查邊寫入的話，
+    壞在第 n 筆時前 n-1 筆已經進表、甚至已經 `StartExecution`，與「整批 `PermanentError`、
+    一筆都不寫」矛盾。整批的 `deadline` 也在這裡算一次就往下傳
+    （比照 `handlers/github_webhook.py`），下游不重新計時。
     """
     global _DEPS
     kind = str(event.get("kind") or "")
@@ -83,7 +87,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, object]:
         raise PermanentError(
             f"匯入事件不合法：kind={event.get('kind')!r}、items 必須是陣列；"
             f"可用的 kind 是 {IMPORT_KINDS}")
-    rows = [_item(index, row) for index, row in enumerate(items)]
+    rows = [_checked(kind, index, row) for index, row in enumerate(items)]
     deadline = _deadline(context)
     if _DEPS is None:
         _DEPS = build_deps(load_settings(os.environ))
@@ -116,12 +120,28 @@ def _deadline(context: object) -> float:
     return monotonic() + IMPORT_DEADLINE_SECONDS
 
 
-def _item(index: int, row: object) -> Mapping[str, object]:
-    """batch 的一筆必須是物件；不是的話整批停下來，一筆都不寫（呼叫端先全部檢查完）。"""
+def _checked(kind: str, index: int, row: object) -> Mapping[str, object]:
+    """整批預檢的一筆：**只看形狀**，任何一筆不合格就整批停下來，一筆都不寫。
+
+    `feedback`／`view` 的形狀就是「是一個物件」；`ticket`／`release` 另外要有
+    `domain`／`adapter`／`event_type`（00A D-60 的可信入口設定，**不從 payload 反推**）
+    與一個是物件的 `payload`。這些都由維護者匯出時就填好，缺了代表匯出檔壞了，
+    不是「這一筆資料不合法」——所以是 `PermanentError` 而不是 `rejected` row。
+    """
     if not isinstance(row, Mapping):
         raise PermanentError(
             f"匯入檔的每一筆都必須是物件：items[{index}] 是 {type(row).__name__}")
-    return cast(Mapping[str, object], row)
+    payload = cast(Mapping[str, object], row)
+    if kind in ("feedback", "view"):
+        return payload
+    missing = missing_nonempty_strings(payload, SOURCE_FIELDS)
+    if missing:
+        raise PermanentError(f"{kind} 匯入缺少來源欄位：items[{index}] 少了 {missing}")
+    if not isinstance(payload.get("payload"), Mapping):
+        raise PermanentError(
+            f"{kind} 匯入的 payload 必須是物件：items[{index}] 是 "
+            f"{type(payload.get('payload')).__name__}")
+    return payload
 
 
 def _lower_headers(payload: Mapping[str, object]) -> dict[str, str]:
@@ -132,11 +152,8 @@ def _lower_headers(payload: Mapping[str, object]) -> dict[str, str]:
 
 
 def _event_payload(payload: Mapping[str, object]) -> Mapping[str, JSONValue]:
-    """`ticket`／`release` 的原始事件本體；不是物件就是匯出檔壞了，整筆停下來。"""
-    body = payload.get("payload")
-    if not isinstance(body, Mapping):
-        raise PermanentError("匯入的 payload 必須是物件")
-    return cast(Mapping[str, JSONValue], body)
+    """`ticket`／`release` 的原始事件本體；「是不是物件」已經由 `_checked` 整批驗過。"""
+    return cast(Mapping[str, JSONValue], payload["payload"])
 
 
 def _import_one(kind: str, payload: Mapping[str, object], deps: Deps,
@@ -145,8 +162,8 @@ def _import_one(kind: str, payload: Mapping[str, object], deps: Deps,
 
     `feedback`／`view` 由 `ingress` 自己收斂，所以那兩條不用 try；`ticket`／`release`
     的 `IngressError` 是從 `normalize_then_accept` 冒上來的，在這裡轉成同一種
-    `rejected` row（review 修正回合 1）。缺 `domain`／`adapter`／`event_type` 不在此列：
-    那是匯出檔本身壞了、不是某一筆資料不合法，仍然整批 `PermanentError`（文件 §11）。
+    `rejected` row（review 修正回合 1）。**形狀**問題不在此列：缺可信入口設定、`payload`
+    不是物件，都已經由 `_checked` 在整批預檢時擋掉了（整批 `PermanentError`、零寫入）。
     """
     repository, operations = deps.need_repository(), deps.operations
     if kind == "feedback":
@@ -158,9 +175,6 @@ def _import_one(kind: str, payload: Mapping[str, object], deps: Deps,
     if kind == "view":
         return import_view(payload, repository=repository, operations=operations,
                            now=deps.now())
-    missing = missing_nonempty_strings(payload, SOURCE_FIELDS)
-    if missing:
-        raise PermanentError(f"{kind} 匯入缺少來源欄位：{missing}")
     try:
         accepted = normalize_then_accept(      # 00A D-60：六個參數全是 keyword
             domain=str(payload["domain"]), adapter=str(payload["adapter"]),
