@@ -1,0 +1,323 @@
+{
+  "Comment": "Training KB release-update（設計 §7.4）；七個 Task 呼叫同一個 Lambda，用 pipeline 與 task 名稱分派。",
+  "StartAt": "LocateFeature",
+  "States": {
+    "ChooseAction": {
+      "Choices": [
+        {
+          "Next": "PrepareUpdate",
+          "StringEquals": "UPDATE",
+          "Variable": "$.action"
+        },
+        {
+          "Next": "RetireTutorials",
+          "StringEquals": "RETIRE",
+          "Variable": "$.action"
+        }
+      ],
+      "Default": "RecordKeep",
+      "Type": "Choice"
+    },
+    "FindSteps": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "SafetyNet",
+      "Parameters": {
+        "pipeline": "release-update",
+        "state.$": "$",
+        "task": "find_steps"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "LocateFeature": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "FindSteps",
+      "Parameters": {
+        "pipeline": "release-update",
+        "state.$": "$",
+        "task": "locate_feature"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "PipelineFailed": {
+      "Cause": "以失敗結束，不發布新版本",
+      "Error": "PipelineFailed",
+      "Type": "Fail"
+    },
+    "PrepareUpdate": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "PublishBatch",
+      "Parameters": {
+        "pipeline": "release-update",
+        "state.$": "$",
+        "task": "prepare_update"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "PublishBatch": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "UpdateAliases",
+      "Parameters": {
+        "pipeline": "release-update",
+        "state.$": "$",
+        "task": "publish_batch"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "RecordKeep": {
+      "Next": "Succeeded",
+      "Result": "KEEP",
+      "ResultPath": "$.action",
+      "Type": "Pass"
+    },
+    "RetireTutorials": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "Succeeded",
+      "Parameters": {
+        "pipeline": "release-update",
+        "state.$": "$",
+        "task": "retire"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "SafetyNet": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "ChooseAction",
+      "Parameters": {
+        "pipeline": "release-update",
+        "state.$": "$",
+        "task": "safety_net"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "Succeeded": {
+      "Type": "Succeed"
+    },
+    "UpdateAliases": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "Succeeded",
+      "Parameters": {
+        "pipeline": "release-update",
+        "state.$": "$",
+        "task": "update_aliases"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    }
+  }
+}

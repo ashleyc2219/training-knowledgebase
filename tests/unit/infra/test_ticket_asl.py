@@ -166,8 +166,13 @@ def actions(statement: dict) -> list[str]:
 
 
 def test_stack_has_one_standard_machine_and_two_named_lambdas(template: "Template") -> None:
-    """Given 合成結果，Then 一條 Standard state machine ＋ 兩支具名 Lambda（D-23）。"""
-    template.resource_count_is("AWS::StepFunctions::StateMachine", 1)
+    """Given 合成結果，Then `ticket-analysis` 是 Standard workflow ＋ 兩支具名 Lambda（D-23）。
+
+    現況核對 2026-09-14（Phase 52 代改）：原本是 `resource_count_is(..., 1)`。Phase 52 與
+    Phase 48 會在同一支 stack 再加 `release-update`／`feedback-review` 兩條 state machine，
+    所以這裡改成**包含關係**，與下面兩支 Lambda 的斷言同一個理由。D-23 真正要守的是
+    「三條 pipeline 共用同一支 Lambda」，那由 `handlers` 的斷言負責。
+    """
     template.has_resource_properties("AWS::StepFunctions::StateMachine", {
         "StateMachineName": "training-kb-ticket-analysis", "StateMachineType": "STANDARD",
         "DefinitionSubstitutions": Match.object_like(
@@ -253,7 +258,8 @@ def test_only_the_webhook_has_a_public_function_url(template: "Template") -> Non
 
 
 def test_state_machine_logs_to_its_own_group(template: "Template") -> None:
-    template.resource_count_is("AWS::Logs::LogGroup", 1)
+    """現況核對 2026-09-14（Phase 52 代改）：原本是 `resource_count_is(..., 1)`；每條
+    state machine 各有**自己**的 log group，Phase 48／52 加進來之後數量不再是 1。"""
     template.has_resource_properties("AWS::Logs::LogGroup", Match.object_like(
         {"LogGroupName": "/aws/vendedlogs/states/training-kb-ticket-analysis"}))
     template.has_resource_properties("AWS::StepFunctions::StateMachine", Match.object_like(

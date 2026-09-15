@@ -122,6 +122,13 @@ def test_only_one_dynamodb_delete_statement_survives_the_new_lambda(
 
 
 def test_no_new_state_machine_or_schedule_comes_from_this_phase(template: "Template") -> None:
-    """Given 本 Phase 不建 state machine、不加排程，Then 數量與 Phase 41 一樣。"""
-    template.resource_count_is("AWS::StepFunctions::StateMachine", 1)
+    """Given 本 Phase 不建 state machine、不加排程，Then 沒有一條 state machine 屬於它。
+
+    現況核對 2026-09-14（Phase 52 代改）：原本是 `resource_count_is(..., 1)`。Phase 48／52
+    會在同一支 stack 加上 `feedback-review`／`release-update`，數量不再是 1；Phase 54 要守的
+    是「analytics 自己不建 state machine、不加排程」，所以改成用名稱判斷。
+    """
+    names = {row["Properties"]["StateMachineName"] for row in
+             template.find_resources("AWS::StepFunctions::StateMachine").values()}
+    assert names and all("analytics" not in name for name in names)
     template.resource_count_is("AWS::Events::Rule", 0)

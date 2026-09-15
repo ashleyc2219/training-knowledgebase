@@ -178,6 +178,15 @@ IMPORT_DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateIt
 # ---- Phase 42 結束 ----
 
 
+# ---- Phase 52 ----（D-23：第二條 state machine 共用同一支 Lambda，不建第二個函式）
+
+RELEASE_UPDATE_MACHINE = STATE_MACHINE_NAMES["release-update"]
+RELEASE_ASL_PATH = PROJECT_ROOT / ASL_LOCAL_PATH.format(pipeline="release-update", number=1)
+"""`training-kb-release-update` 的名稱與定義檔；名稱唯一來源仍是 `STATE_MACHINE_NAMES`。"""
+
+# ---- Phase 52 結束 ----
+
+
 class TrainingKbStack(Stack):
     """流程 stack；`self.deps_layer` 供 Phase 42／48／52／54 沿用（不各自再做 layer）。"""
 
@@ -279,6 +288,43 @@ class TrainingKbStack(Stack):
             actions=["states:StartExecution"], resources=self._import_machine_arns()))
         CfnOutput(self, "ImportFunctionName", value=self.import_function.function_name)
         # ---- Phase 42 結束 ----
+
+        # ---- Phase 52 ----（D-23、D-49；只用既有的 `self.task_function`，不建第二個 Lambda）
+        #
+        # 七個 Task 的 `Resource` 都是同一支共用函式的**直接 ARN**（沒有
+        # `arn:aws:states:::lambda:invoke` 信封，所以 ASL 裡也沒有 `Payload` 外層），
+        # 由 `Parameters.pipeline`／`Parameters.task` 分派到
+        # `training_kb.pipelines.release:release_update_handler`。
+        #
+        # `grant_start_execution` **只給 webhook**：Phase 42 的匯入 Lambda 已經用
+        # `_import_machine_arns()` 以名稱組 ARN 一次授權兩條 pipeline（controller
+        # 2026-09-14 裁決），這裡再 grant 一次只會長出重複的敘述。
+        self.release_update_logs = logs.LogGroup(
+            self, "ReleaseUpdateLogs",
+            log_group_name=f"/aws/vendedlogs/states/{RELEASE_UPDATE_MACHINE}",
+            retention=logs.RetentionDays.THREE_MONTHS, removal_policy=RemovalPolicy.DESTROY)
+        self.release_update = sfn.StateMachine(
+            self, "ReleaseUpdate", state_machine_name=RELEASE_UPDATE_MACHINE,
+            state_machine_type=sfn.StateMachineType.STANDARD,
+            definition_body=sfn.DefinitionBody.from_file(str(RELEASE_ASL_PATH)),
+            definition_substitutions={
+                "PipelineTaskFunctionArn": self.task_function.function_arn},
+            logs=sfn.LogOptions(destination=self.release_update_logs,
+                                level=sfn.LogLevel.ALL),
+            timeout=Duration.minutes(15))
+        self.task_function.grant_invoke(self.release_update)
+        self.release_update.grant_start_execution(self.webhook_function)
+        # 缺口 3 的第二半（P41 `_grant_execution_lookup` 留的 TODO）：P32 的續跑判斷會對
+        # `release-update` 的 execution 呼叫 `DescribeExecution`，現在這條真的存在了才補。
+        self.webhook_function.add_to_role_policy(iam.PolicyStatement(
+            actions=["states:DescribeExecution"],
+            resources=[f"arn:aws:states:{self.region}:{self.account}:execution:"
+                       f"{RELEASE_UPDATE_MACHINE}:*"]))
+        CfnOutput(self, "ReleaseUpdateStateMachineArn",
+                  value=self.release_update.state_machine_arn)
+        CfnOutput(self, "ReleaseUpdateLogGroup",
+                  value=self.release_update_logs.log_group_name)
+        # ---- Phase 52 結束 ----
 
     # --- 私有 helper -----------------------------------------------------------
 
