@@ -12,10 +12,20 @@ CDK 的 Template 斷言不在本檔，在 `tests/unit/infra/test_release_machine
 import copy
 import json
 import pathlib
+from typing import Any
 
 import pytest
+from test_release_retire import (
+    NOW,
+    OPERATION,
+    PROJECT,
+    RELEASE_RENAMED,
+    RetireRepository,
+    accepted_operations,
+)
 
 from training_kb.errors import PermanentError, TransientError
+from training_kb.keys import operation_ref
 from training_kb.pipelines.asl import (
     ASL_LOCAL_PATH,
     CATCH,
@@ -25,6 +35,15 @@ from training_kb.pipelines.asl import (
     assert_safe_asl,
     canonical_json,
     task_state,
+)
+from training_kb.pipelines.common import Deps, task_name
+from training_kb.pipelines.release import (
+    RELEASE_STATE_FIELDS,
+    RELEASE_UPDATE_TASKS,
+    run_release_update,
+    task_prepare_update,
+    task_publish_batch,
+    task_update_aliases,
 )
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -46,6 +65,36 @@ ORDER = ["locate_feature", "find_steps", "safety_net", "prepare_update",
 @pytest.fixture
 def asl() -> dict:
     return json.loads(ASL_PATH.read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def keep_repo() -> RetireRepository:
+    """**空的**圖譜：零個 Feature、零篇教學，所以定位與反查都必然零命中。"""
+    repository = RetireRepository()
+    repository.put_object(operation_ref(OPERATION, "input"),
+                          json.dumps(RELEASE_RENAMED.model_dump(mode="json"),
+                                     ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                          "application/json", if_none_match=True)
+    return repository
+
+
+@pytest.fixture
+def keep_deps(keep_repo: RetireRepository, fake_writer: Any) -> Deps:
+    """`fake_writer` 是 `tests/unit/conftest.py` 的 `RecordingWriter`（不連 Bedrock）。
+
+    型別寫 `Any` 而不是 `RecordingWriter`：`tests/unit/conftest.py` 與
+    `tests/unit/infra/conftest.py` 在 `prepend` 匯入模式下都叫 `conftest`，
+    `from conftest import ...` 會依收集順序拿到不同的那一支（同時跑兩個目錄時直接 collect 失敗）。
+    """
+    return Deps(operations=accepted_operations(keep_repo, canonical_id="r_42"),
+                now=lambda: NOW, repository=keep_repo, writer=fake_writer)
+
+
+@pytest.fixture
+def keep_state() -> dict:
+    """接入層交給 `StartExecution` 的三個欄位，一個字都不多（文件 §2）。"""
+    return {"operation_id": OPERATION, "project_id": PROJECT,
+            "input_ref": operation_ref(OPERATION, "input")}
 
 
 # --- Task 2：ASL 結構與失敗語意 ----------------------------------------------
@@ -114,3 +163,55 @@ def test_assert_safe_asl_rejects_the_same_file_without_a_catch(asl: dict) -> Non
 def test_definition_file_is_canonical_bytes(asl: dict) -> None:
     """Given 部署與 S3 快照是同一份 bytes，Then 檔案本身就是 `canonical_json` 的輸出。"""
     assert ASL_PATH.read_bytes() == canonical_json(asl)
+
+
+# --- Task 3：本機三分支序列 ---------------------------------------------------
+#
+# 器材直接沿用**同一個 Phase 的** `tests/unit/test_release_retire.py`（`tests/unit` 在
+# `sys.path` 上，`tests/unit/test_rule_projection.py` 就是同一種寫法）：那支檔已經有一個
+# 真的 `Repository` ＋ 記憶體表／bucket，再複製一份只會分岔。
+
+
+def test_release_update_task_order_and_names() -> None:
+    """Given `RELEASE_UPDATE_TASKS`，Then 七個 task 名稱與順序固定（D-51）。"""
+    assert [task_name(task) for task in RELEASE_UPDATE_TASKS] == ORDER
+
+
+def test_asl_task_names_match_python_tasks(asl: dict) -> None:
+    """Given ASL 與 Python 兩邊，Then `Parameters.task` 與 `task_name(...)` 完全對得上。"""
+    parameters = [asl["States"][name]["Parameters"] for name in TASK_STATES]
+    assert {row["task"] for row in parameters} == {task_name(task)
+                                                   for task in RELEASE_UPDATE_TASKS}
+    assert {row["pipeline"] for row in parameters} == {"release-update"}
+    assert all(row["state.$"] == "$" and "Payload" not in row for row in parameters)
+
+
+def test_zero_hits_ends_as_keep(keep_deps: Deps, keep_state: dict) -> None:
+    """Given 定位不到 Feature 又零命中，Then `action="KEEP"`、零版本、零發布（F17、F18）。"""
+    result = run_release_update(keep_state, keep_deps)
+    assert (result["action"], result["prepared_version_ids"]) == ("KEEP", [])
+    assert result["feature_id"] is None and result["hit_refs"] == []
+    assert keep_deps.need_repository().published_version_ids == []
+
+
+def test_keep_state_carries_only_the_fixed_fields(keep_deps: Deps, keep_state: dict) -> None:
+    """Given 固定 state（00A §7），Then 輸出沒有全文、evidence 或向量。"""
+    result = run_release_update(keep_state, keep_deps)
+    assert set(result) <= set(RELEASE_STATE_FIELDS)
+    assert len(RELEASE_STATE_FIELDS) == 11
+
+
+def test_update_only_tasks_are_no_ops_outside_their_branch(keep_state: dict,
+                                                           keep_deps: Deps) -> None:
+    """Given `action` 不是 UPDATE，Then 三個 UPDATE 專用 Task 都不呼叫 Phase 49–51／25。
+
+    `deps` 沒有 writer，所以任何一個 Task 真的走進去就會以 `PermanentError` 現身；
+    這同時證明 RETIRE 與 KEEP 兩條路徑一次模型都不會呼叫。
+    """
+    state = {**keep_state, "action": "KEEP", "feature_id": None, "hit_refs": [],
+             "prepared_version_ids": []}
+    without_writer = Deps(operations=keep_deps.operations, now=keep_deps.now,
+                          repository=keep_deps.repository)
+    assert task_prepare_update(state, without_writer)["prepared_version_ids"] == []
+    assert task_publish_batch(state, without_writer) == state
+    assert task_update_aliases(state, without_writer) == state

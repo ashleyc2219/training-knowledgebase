@@ -8,7 +8,9 @@
   `resolve_successor`、`Publisher._write_tutorial_index`（P24）跑的都是真程式。
 - `ops` 是真的 `OperationCoordinator`，父 operation `op-release-r_43` 在 fixture 就接受好
   （雲端由 P32 的接入層寫，本機自己補）。
-- **一個模型呼叫都不會發生**：RETIRE 路徑不碰 `Writer`，所以 `deps.writer` 是 `None`。
+- **一個模型呼叫都不會發生**：`deps.writer` 是 `NoModelWriter`，任何一次 `embed`／
+  `generate_json` 都當場 `AssertionError`。RETIRE 與 KEEP 兩條分支能在 O5 BLOCKED 的
+  真實 AWS 上跑到 `SUCCEEDED`，靠的就是這件事。
 
 固定種子：`prepare-meeting@v2`（命中，維護者指定後繼 `share-summary`）、
 `notification-settings@v1`（命中，未指定後繼 → F19 仍退役）、`share-summary@v1`（後繼本身，
@@ -31,8 +33,9 @@ from training_kb.content import (
     render_markdown,
 )
 from training_kb.errors import PermanentError
-from training_kb.keys import META, operation_ref
+from training_kb.keys import META, feature_pk, operation_ref, step_pk
 from training_kb.models import (
+    Feature,
     Release,
     StepDraft,
     StepType,
@@ -43,7 +46,14 @@ from training_kb.models import (
 )
 from training_kb.operations import AcceptOperation, OperationCoordinator
 from training_kb.pipelines.common import Deps
-from training_kb.pipelines.release import StepHit, retire_for_release, task_retire
+from training_kb.pipelines.release import (
+    RELEASE_STATE_FIELDS,
+    StepHit,
+    retire_for_release,
+    run_release_update,
+    task_retire,
+    task_safety_net,
+)
 from training_kb.publishing import site_key, tutorial_index_key
 from training_kb.repository import Repository
 
@@ -52,6 +62,7 @@ PROJECT = "demo"
 OPERATION = "op-release-r_43"
 FEATURE = "Prepare"
 A, C, SUCCESSOR = "prepare-meeting", "notification-settings", "share-summary"
+OTHER_FEATURE = "Share"
 A_V2, C_V1, SUCCESSOR_V1 = f"{A}@v2", f"{C}@v1", f"{SUCCESSOR}@v1"
 
 HITS_TWO = (StepHit(C, C_V1, 1), StepHit(A, A_V2, 3))
@@ -222,6 +233,16 @@ class RetireRepository(Repository):
         self.bucket.objects[PUBLIC_SITE_PREFIX + site_key(version_id)] = \
             f"<article>{version_id}</article>".encode()
 
+    def add_feature(self, feature_id: str, *, aliases: tuple[str, ...] = ()) -> None:
+        self.put_meta(Feature(feature_id=feature_id, name=feature_id, aliases=list(aliases),
+                              first_seen=NOW))
+
+    def add_steps(self, version_id: str, feature_id: str) -> None:
+        """種 STEP 邊（`REFERENCES#FEATURE#…`）；Phase 27 的反查與 `get_steps` 都靠它。"""
+        for number in (1, 2, 3):
+            self.put_edge(step_pk(version_id, number), "REFERENCES", feature_pk(feature_id),
+                          {"type": "click_ui", "text": f"第 {number} 步。"})
+
     @property
     def published_version_ids(self) -> list[str]:
         """本次 Release 發布出去的版本；RETIRE 不建版，所以永遠應該是空的。"""
@@ -248,18 +269,43 @@ def repo() -> RetireRepository:
     return repository
 
 
-@pytest.fixture
-def ops(repo: RetireRepository) -> OperationCoordinator:
-    coordinator = OperationCoordinator(repo)
+def accepted_operations(repository: Repository, *,
+                        canonical_id: str = "r_43") -> OperationCoordinator:
+    """父 operation 已接受的帳本；雲端由 P32 的接入層寫，本機自己補（`tests/unit` 共用）。"""
+    coordinator = OperationCoordinator(repository)
     coordinator.accept(AcceptOperation(operation_id=OPERATION, kind="release-update",
-                                       canonical_id="r_43", project_id=PROJECT, now=NOW))
+                                       canonical_id=canonical_id, project_id=PROJECT, now=NOW))
     return coordinator
 
 
 @pytest.fixture
+def ops(repo: RetireRepository) -> OperationCoordinator:
+    return accepted_operations(repo)
+
+
+class NoModelWriter:
+    """實作 Phase 15 的 `Writer`，但每一個方法都當場失敗。
+
+    比 `writer=None` 強：`None` 只證明「沒有接線」，這個會在**真的想呼叫模型**時指出是哪一個
+    節點，所以「RETIRE 與 KEEP 零模型呼叫」是被證出來的，不是被 `need_writer()` 擋下來的。
+    """
+
+    def embed(self, text: str, *, operation_id: str, node: str) -> list[float]:
+        raise AssertionError(f"這條路徑不得呼叫 embedding：{node}")
+
+    def generate_json(self, system: str, user: str, schema: Mapping[str, Any], *,
+                      operation_id: str, node: str) -> dict[str, Any]:
+        raise AssertionError(f"這條路徑不得呼叫生成模型：{node}")
+
+    def converse_with_tools(self, system: str, messages: Any, tools: Any, *,
+                            operation_id: str, node: str) -> dict[str, Any]:
+        raise AssertionError(f"這條路徑不得呼叫 tool use：{node}")
+
+
+@pytest.fixture
 def local_deps(repo: RetireRepository, ops: OperationCoordinator) -> Deps:
-    """RETIRE 路徑一個模型呼叫都沒有，所以 `writer` 刻意留 `None`。"""
-    return Deps(operations=ops, now=lambda: NOW, repository=repo)
+    """RETIRE 路徑一個模型呼叫都沒有，所以 `writer` 是會爆炸的 `NoModelWriter`。"""
+    return Deps(operations=ops, now=lambda: NOW, repository=repo, writer=NoModelWriter())
 
 
 @pytest.fixture
@@ -372,3 +418,66 @@ def test_only_the_retired_slug_gets_a_new_index(
     task_retire(retire_state, local_deps)
     public = [key for key in repo.bucket.writes if key.startswith(PUBLIC_SITE_PREFIX)]
     assert public == [PUBLIC_SITE_PREFIX + tutorial_index_key(A)]
+
+
+# --- Task 3：三分支串接（RETIRE 走完整條序列，一次模型都不呼叫）-----------------
+
+
+@pytest.fixture
+def flow_repo(repo: RetireRepository) -> RetireRepository:
+    """在 Task 1 的種子上再補 Feature 與 STEP 邊，讓 `locate_feature`／`find_release_hits`
+    在**字串層**就命中：`prepare-meeting` 引用 `Prepare`，另外兩篇引用 `Share`。
+
+    `Prepare` 的 aliases 帶著改名前的 `Meeting Summary`：`renamed` 事件因此在第 1 層就對上，
+    `needs_safety_net` 回 `False`，連一次 `embed` 都不會發生（F16）。"""
+    repo.add_feature(FEATURE, aliases=("Meeting Summary",))
+    repo.add_feature(OTHER_FEATURE)
+    repo.add_steps(A_V2, FEATURE)
+    repo.add_steps(C_V1, OTHER_FEATURE)
+    repo.add_steps(SUCCESSOR_V1, OTHER_FEATURE)
+    return repo
+
+
+@pytest.fixture
+def start_state() -> dict[str, Any]:
+    """接入層交給 `StartExecution` 的三個欄位，一個字都不多（文件 §2）。"""
+    return {"operation_id": OPERATION, "project_id": PROJECT,
+            "input_ref": operation_ref(OPERATION, "input")}
+
+
+def test_removed_release_runs_end_to_end_as_retire(
+        flow_repo: RetireRepository, local_deps: Deps, start_state: dict[str, Any]) -> None:
+    """Given 一則 `removed`，When 跑完整條 `run_release_update`，Then 只有 RETIRE 分支動作。
+
+    `deps.writer` 是 `NoModelWriter`，所以這條路徑只要呼叫任何模型就會當場失敗
+    ——這正是雲端可以在 O5 BLOCKED 下跑到 `SUCCEEDED` 的原因。
+    """
+    result = run_release_update(start_state, local_deps)
+    assert (result["release_id"], result["feature_id"]) == ("r_43", FEATURE)
+    assert (result["action"], result["hit_refs"]) == ("RETIRE", [f"{A_V2}#{n}" for n in (1, 2, 3)])
+    assert result["result_ref"] == operation_ref(OPERATION, "retire")
+    assert set(result) <= set(RELEASE_STATE_FIELDS)
+    assert flow_repo.get_tutorial(A).status is TutorialStatus.RETIRED
+    assert flow_repo.get_tutorial(C).status is TutorialStatus.ACTIVE      # 沒引用就不動
+    assert flow_repo.published_version_ids == []
+    index = flow_repo.get_object(PUBLIC_SITE_PREFIX + tutorial_index_key(A)).decode("utf-8")
+    assert RETIRED_NOTICE in index and SUCCESSOR in index                 # D-83
+
+
+def test_renamed_with_direct_hits_chooses_update_without_the_model(
+        flow_repo: RetireRepository, local_deps: Deps) -> None:
+    """Given `renamed` 且 alias 已對上、反查有命中，Then `action="UPDATE"` 且零模型呼叫。
+
+    `needs_safety_net` 在這個組合回 `False`（F16），所以連一次 `embed` 都不會發生
+    ——雲端的 BLOCKED 切點因此落在 `PrepareUpdate` 而不是 `SafetyNet`。
+    """
+    flow_repo.put_object(operation_ref(OPERATION, "input"),
+                         json.dumps(RELEASE_RENAMED.model_dump(mode="json"),
+                                    ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                         "application/json", if_none_match=False)
+    state = {"operation_id": OPERATION, "project_id": PROJECT,
+             "input_ref": operation_ref(OPERATION, "input"), "release_id": "r_42",
+             "feature_id": FEATURE, "hit_refs": [f"{A_V2}#3"], "prepared_version_ids": []}
+    result = task_safety_net(state, local_deps)          # writer 一被碰就 AssertionError
+    assert result["action"] == "UPDATE"
+    assert result["hit_refs"] == [f"{A_V2}#3"]

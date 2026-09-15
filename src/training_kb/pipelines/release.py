@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from training_kb.analytics.status_writer import load_validated_at
 from training_kb.clock import now_utc, to_iso
-from training_kb.config import Thresholds
+from training_kb.config import Thresholds, load_settings
 from training_kb.content import (
     VersionPlan,
     allocate_version,
@@ -32,6 +32,7 @@ from training_kb.errors import (
     ContentError,
     CoordinationError,
     PermanentError,
+    PublishError,
     TransientError,
 )
 from training_kb.ingress import operation_id_for
@@ -50,9 +51,16 @@ from training_kb.models import (
     TutorialStep,
 )
 from training_kb.operations import AcceptOperation, OperationCoordinator
-from training_kb.pipelines.common import Deps, JSONValue
+from training_kb.pipelines.common import (
+    Deps,
+    JSONValue,
+    TaskFn,
+    build_deps,
+    run_sequence,
+    task_name,
+)
 from training_kb.pipelines.feedback import LEASE_TTL_SECONDS
-from training_kb.publishing import Publisher
+from training_kb.publishing import Publisher, PublishRequest
 from training_kb.repository import DynamoValue, Repository, item_to_model
 from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
 from training_kb.site import SiteRenderer
@@ -779,3 +787,193 @@ def task_retire(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]
             ref, json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8"),
             "application/json", if_none_match=True)
     return {**state, "result_ref": ref}
+
+
+# --- Task 包裝、固定 state 與 handler（Phase 52 Task 3）-----------------------
+
+RELEASE_STATE_FIELDS: tuple[str, ...] = (
+    "operation_id", "project_id", "input_ref", "release_id", "feature_id",
+    "action", "hit_refs", "prepared_version_ids", "publish_request_ref",
+    "alias_update", "result_ref")
+"""`release-update` 的 state 只有這十一個欄位（設計 §14.3、00A 第 7 節）。
+
+事件全文、教學原文、evidence 與向量都不進 state：execution history 會被保留 90 天，放進去
+等於把私有內容留在 Step Functions 的紀錄裡；`States.ALL` 也抓不到
+`States.DataLimitExceeded`，state 一大就會變成攔不住的失敗。需要全文的 Task 自己用
+`input_ref` 讀回來。測試用 `set(result) <= set(RELEASE_STATE_FIELDS)` 守住。
+"""
+
+
+def _release_action(release: Release, hits: Sequence[StepHit]) -> str:
+    """三選一（F18）：`removed` → RETIRE；有命中且 `renamed`／`changed` → UPDATE；其餘 KEEP。
+
+    `removed` 即使零命中也回 RETIRE（**本計畫選擇（2026-09-14）**）：REL Rule 9 是依
+    `kind` 決定動作，不是依命中數；零命中時 `retire_for_release` 退役零篇，`retire.json`
+    留下一個空陣列，追溯得到「這則 removed 沒有命中任何教學」。
+    """
+    if release.kind is ReleaseKind.REMOVED:
+        return "RETIRE"
+    return "UPDATE" if hits else "KEEP"
+
+
+def task_locate_feature(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """把 Release 定位到唯一一個既有 Feature（Phase 49）；找不到回 `None` 是合法結果。
+
+    順手把 `hit_refs` 與 `prepared_version_ids` 設成空值：雲端的 KEEP 與 RETIRE 兩條分支
+    都會跳過 `PrepareUpdate`，在第一個節點就給定初值，三條分支的輸出形狀才一致
+    （文件 §2 要求成功輸出列得出這幾個欄位）。
+    """
+    repository = deps.need_repository()
+    release = _load_release(state, repository)
+    feature = locate_feature(release, repository=repository, writer=deps.need_writer(),
+                             operation_id=_text(state, "operation_id"))
+    return {**state, "release_id": release.id,
+            "feature_id": None if feature is None else feature.feature_id,
+            "hit_refs": [], "prepared_version_ids": []}
+
+
+def task_find_steps(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """目前已發布版本裡真的引用這個 Feature 的步驟座標（Phase 50 `find_release_hits`）。
+
+    Task 名稱是 `find_steps`、模組函式是 `find_release_hits`，兩者不是同一層、不得互相
+    取代（D-51）。定位不到 Feature 時反查沒有輸入，`hit_refs` 保持空 list。
+    """
+    feature_id = state.get("feature_id")
+    if not isinstance(feature_id, str) or not feature_id:
+        return dict(state)
+    hits = find_release_hits(feature_id, repository=deps.need_repository())
+    return {**state, "hit_refs": [_hit_ref(hit) for hit in hits]}
+
+
+def task_safety_net(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """需要時才補漏（Phase 50 `safety_net`），最後決定這次改版的 `action`。
+
+    兩個觸發條件：**直接反查為零**，或 `needs_safety_net(...)` 成立（alias 比對失敗的
+    renamed，F16）。定位不到 Feature 時前者必然成立，所以補漏仍會跑一次；`needs_safety_net`
+    需要 `Feature` 物件，那時沒有，用不到。
+
+    聯集由這一層做（`set(direct) | set(net)`）：Phase 50 的 `safety_net` 只回補漏證據，
+    補漏永遠只會新增，不可能抹掉明確命中。
+    """
+    repository = deps.need_repository()
+    release = _load_release(state, repository)
+    hits = _hits(state)
+    feature_id = state.get("feature_id")
+    feature = (repository.get_feature(feature_id)
+               if isinstance(feature_id, str) and feature_id else None)
+    if isinstance(feature_id, str) and feature_id and feature is None:
+        raise PermanentError(f"定位到的 Feature 不存在：{feature_id}")
+    if not hits or (feature is not None and needs_safety_net(release, feature, hits)):
+        net = safety_net(release, repository=repository, writer=deps.need_writer(),
+                         operation_id=_text(state, "operation_id"))
+        hits = tuple(sorted(set(hits) | set(net), key=lambda hit: (hit.slug, hit.number)))
+    return {**state, "hit_refs": [_hit_ref(hit) for hit in hits],
+            "action": _release_action(release, hits)}
+
+
+def task_prepare_update(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """UPDATE 分支：每篇只重寫命中步驟，產出一整組**未發布**版本（Phase 51）。
+
+    傳進去的是**這次 Release 的** `operation_id`；命中多篇教學時 `prepare_update` 會在內部
+    替每篇各開一筆子 operation 去配版號（D-59），本 Phase 沒有第二份取號邏輯。
+    退役教學會被 Phase 51 跳過，所以 `len(plans)` 可能少於命中的 slug 數。
+    """
+    if state.get("action") != "UPDATE":
+        return {**state, "prepared_version_ids": []}
+    repository = deps.need_repository()
+    plans = prepare_update(_load_release(state, repository), _hits(state),
+                           repository=repository, writer=deps.need_writer(),
+                           operations=deps.operations,
+                           operation_id=_text(state, "operation_id"))
+    return {**state, "prepared_version_ids": [plan.version_id for plan in plans]}
+
+
+def task_publish_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """整組 `version_id` 包成**一個** `PublishRequest` 交 Phase 25，整批全有或全無（F49）。
+
+    `commit` 的第一件事就是 `inspect`，所以這裡不重複呼叫一次。
+
+    **交易條件不符也要往外丟**：`PublishResult.failed` 代表 DynamoDB 擋下了這次切換，
+    `published_at` 與 `current_version` 都沒變、`site/` 也沒有新檔。回一個正常的 state 會讓
+    執行走到 `Succeeded`，從外面看不出這次其實沒發布——與設計 §14.2 相反，所以丟
+    `PublishError` 交給 Catch（形狀同 `ticket.task_publish_version`）。
+
+    **不得因為本函式綠燈就宣稱 O3 已通過**（D-80）：整批切換的原子性由維護者的 gate 決定。
+    """
+    version_ids = state.get("prepared_version_ids")
+    if state.get("action") != "UPDATE" or not isinstance(version_ids, list) or not version_ids:
+        return dict(state)
+    repository = deps.need_repository()
+    operation_id = _text(state, "operation_id")
+    publisher = Publisher(repository, SiteRenderer(), deps.operations)
+    request = PublishRequest(version_ids=tuple(str(one) for one in version_ids),
+                             operation_id=operation_id)
+    result = publisher.commit(publisher.prepare(request, now=deps.now()), now=deps.now())
+    if result.failed is not None:
+        raise PublishError(
+            f"publish_rejected：{result.failed} 的發布交易條件不符，"
+            f"沒有任何欄位被切換（{'；'.join(result.reasons)}）")
+    return {**state, "publish_request_ref": operation_ref(operation_id, "publish-request")}
+
+
+def task_update_aliases(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """改名收尾：把顯示名稱換成 `new_name`、舊名收進 aliases，**主鍵不動**（Phase 49、D06）。
+
+    排在 `PublishBatch` **之後**（設計 §7.4）；`kind=changed` 或非 UPDATE 分支一律原樣回傳。
+    撞名時 `update_feature_aliases` 丟 `PermanentError`，**不降級成 KEEP**（D07）。
+    """
+    feature_id = state.get("feature_id")
+    if state.get("action") != "UPDATE" or not isinstance(feature_id, str) or not feature_id:
+        return dict(state)
+    repository = deps.need_repository()
+    release = _load_release(state, repository)
+    if release.kind is not ReleaseKind.RENAMED:
+        return dict(state)
+    feature = repository.get_feature(feature_id)
+    if feature is None:
+        raise PermanentError(f"要改名的 Feature 不存在：{feature_id}")
+    updated = update_feature_aliases(feature, old_name=release.old_name or "",
+                                     new_name=release.new_name or "", repository=repository)
+    return {**state, "alias_update": {"feature_id": updated.feature_id,
+                                      "name": updated.name, "aliases": list(updated.aliases)}}
+
+
+RELEASE_UPDATE_TASKS: tuple[TaskFn, ...] = (
+    task_locate_feature, task_find_steps, task_safety_net, task_prepare_update,
+    task_publish_batch, task_update_aliases, task_retire)
+"""七個 Task 的固定順序；`task_name(...)` 的結果就是 ASL 的 `Parameters.task`（D-51）。"""
+
+
+def run_release_update(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """本機把七個 Task 依序跑完（測試與 Demo 用）。
+
+    雲端**不走這條**：Step Functions 每個 Task 各 invoke 一次 Lambda，由
+    `pipeline_task_handler` → `release_update_handler` 只跑其中一個 Task，`ChooseAction`
+    負責跳過不適用的節點。兩邊共用同一組函式，所以本機序列與雲端分支不會長出兩套語意
+    ——差別只在本機會把「不適用」的 Task 也叫一次，它們自己原樣回傳。
+    """
+    return run_sequence("release-update", state, RELEASE_UPDATE_TASKS, deps)
+
+
+_TASK_BY_NAME: dict[str, TaskFn] = {task_name(task): task for task in RELEASE_UPDATE_TASKS}
+"""ASL `Parameters.task` -> Task 函式；名稱由 `task_name` 導出，不另打一份字串表。"""
+
+_DEPS: Deps | None = None
+"""Lambda 容器層級的相依快取：同一個容器只組一次 boto3 client 與 `BedrockWriter`。"""
+
+
+def release_update_handler(event: dict[str, Any], context: object) -> dict[str, JSONValue]:
+    """`release-update` 的直接入口：**只跑 `event["task"]` 指定的那一個 Task**（D-24／D-25）。
+
+    不 try／except：`TransientError` 要讓 ASL 的 Retry 抓到，`PermanentError` 要讓 Catch
+    抓到（設計 §14.2）。相依在第一次 invoke 時才組（模組 import 時不碰網路），之後同一個
+    容器沿用；環境變數類的執行期開關**不跟著快取**（見 `common.maybe_fail_task`）。
+    """
+    global _DEPS
+    task = _TASK_BY_NAME.get(str(event.get("task")))
+    if task is None:
+        raise PermanentError(f"release-update 沒有名為 {event.get('task')!r} 的 task")
+    if _DEPS is None:
+        _DEPS = build_deps(load_settings())
+    state = event.get("state")
+    return task(dict(state) if isinstance(state, dict) else {}, _DEPS)
