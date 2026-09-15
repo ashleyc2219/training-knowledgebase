@@ -26,12 +26,14 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_stepfunctions as sfn
 from constructs import Construct
 
-from infra.scripts.build_lambda_layer import LAYER_ROOT
+from infra.scripts.build_lambda_layer import LAYER_ROOT, MARKERS, is_built
 from infra.training_kb_data_stack import PRIVATE_PREFIXES, TABLE_NAME, TARGET_INDEX
 from training_kb.config import DEFAULT_EMBEDDING_MODEL_ID, DEFAULT_PROJECT_ID
 from training_kb.content import PUBLIC_SITE_PREFIX
 from training_kb.errors import PermanentError
+from training_kb.faults import ENV_NAME_ENV, PRODUCTION
 from training_kb.handlers.github_webhook import SECRET_ENV
+from training_kb.keys import OPERATIONS_PREFIX
 from training_kb.pipeline_starter import STATE_MACHINE_NAMES
 from training_kb.pipelines.asl import ASL_LOCAL_PATH
 
@@ -58,16 +60,40 @@ WEBHOOK_TIMEOUT = Duration.seconds(10)
 MEMORY_MB = 512
 """記憶體同時決定 CPU：webhook 的八秒期限包含冷啟動與 `pydantic` import，128 MB 太緊。"""
 
-ALL_PREFIXES: tuple[str, ...] = (*PRIVATE_PREFIXES, PUBLIC_SITE_PREFIX)
-"""私有四個前綴 ＋ 公開的 `site/`（缺口 1：P24／P25 要寫公開前綴）。"""
+TASK_PREFIXES: tuple[str, ...] = (*PRIVATE_PREFIXES, PUBLIC_SITE_PREFIX)
+"""pipeline Lambda：私有四個前綴 ＋ 公開的 `site/`（缺口 1：P24／P25 要寫公開前綴）。"""
 
-DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:Scan",
-               "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:ConditionCheckItem"]
+WEBHOOK_PREFIXES: tuple[str, ...] = (OPERATIONS_PREFIX,)
+"""webhook Lambda：**只有** `operations/`。
+
+它是唯一 `AuthType: NONE` 的公開入口，全部的寫入只有
+`ingress._put_canonical_input_once` 的 `operations/<op>/input.json`。給它 `site/*` 等於
+讓一個免驗證入口有能力改公開站的內容（驗簽只保證來源，不保證程式沒有其他洞）。
+"""
+
+TASK_DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query",
+                    "dynamodb:Scan", "dynamodb:PutItem", "dynamodb:UpdateItem",
+                    "dynamodb:ConditionCheckItem"]
 """交易寫入由 `PutItem`／`UpdateItem`／`ConditionCheckItem` 授權，**不含** `DeleteItem`。
 
 `DeleteItem` 另外單獨一條（見 `_grant_delete_edges`），而且**不用**
 `grant_read_write_data()`——CDK 那個 grant 會把 `DeleteItem` 混進同一條敘述，D-79 要的
 「只有一條 `DeleteItem`」就守不住了。
+"""
+
+WEBHOOK_DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+                       "dynamodb:Scan"]
+"""接入路徑實際用到的四個動作，逐一對得上程式：
+
+| 動作 | 來源 |
+|---|---|
+| `GetItem` | `operations.get_meta_item`、`rote.get_proc`、`ingress.get_meta`／`get_version` |
+| `PutItem` | `operations.put_meta_item`（帶條件的永久去重）、`rote.put_meta`、`ingress.put_edge` |
+| `UpdateItem` | `operations.update_meta`（`_revision` 的 compare-and-swap） |
+| `Scan` | `rote.list_procs` → `scan_entity("PROC")`（兩層命中要看同 domain／adapter 的全部 PROC） |
+
+**沒有** `Query`／`BatchGetItem`／`ConditionCheckItem`（接入路徑不做交易也不查 GSI），
+所以索引 ARN 也不給。
 """
 
 
@@ -79,6 +105,30 @@ ANALYTICS_HANDLER = "training_kb.handlers.analytics.handler"
 
 ANALYTICS_TIMEOUT = Duration.seconds(60)
 """`metrics` 要掃 VIEW 與 TICKET（`_scan_models` 讀完所有分頁），比 webhook 的 10 秒寬。"""
+
+ANALYTICS_PREFIXES: tuple[str, ...] = (OPERATIONS_PREFIX,)
+"""analytics Lambda：**只有** `operations/`。
+
+`metrics` 自己一個 S3 物件都不讀；這個前綴是留給 Phase 55 的
+`operations/rules/validated_at.json`（`analytics/status_writer.py` 的唯一寫入者）。
+不給 `tutorials/`／`site/`：它既不寫教學也不發布。
+"""
+
+ANALYTICS_DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan",
+                         "dynamodb:PutItem", "dynamodb:UpdateItem"]
+"""四個讀 ＋ 兩個寫，逐一對得上程式：
+
+| 動作 | 來源 |
+|---|---|
+| `GetItem` | `get_version`／`get_tutorial`／`list_feedback_of_version` 的回基表一致讀取 |
+| `Query` | `query_by_target`（GSI；`list_feedback_of_version` 的候選）、`query_pk` |
+| `Scan` | `list_views_of_version`／`list_tickets`／`list_rules` 的 `_scan_models` |
+| `PutItem`／`UpdateItem` | **Phase 55** 的 `apply_rule_status`（D-58：Phase 55 不再動 CDK） |
+
+**沒有** `DeleteItem`（D-79 的那一條只屬於 task function）、沒有 `BatchGetItem`、
+沒有 `ConditionCheckItem`、沒有 `bedrock:InvokeModel`（`metrics` 只讀 `CallTrace`，
+不呼叫模型）、沒有 `states:StartExecution`（它不啟動任何 pipeline）。
+"""
 
 # ---- Phase 54 結束 ----
 
@@ -100,6 +150,9 @@ class TrainingKbStack(Stack):
             "TKB_AWS_REGION": self.region,
             "TKB_PROJECT_ID": DEFAULT_PROJECT_ID,
             "TKB_EMBEDDING_MODEL_ID": DEFAULT_EMBEDDING_MODEL_ID,
+            # 預設 prod：faults.active_fault 在正式部署一律不生效。P59 要做復原演練時
+            # 以 TKB_ENV=demo 重新部署（00A §3.5 的執行期開關）。
+            "TKB_ENV": os.environ.get(ENV_NAME_ENV, PRODUCTION),
             # TKB_GENERATION_MODEL_ID 刻意不設：O5 BLOCKED，不得填猜測值（00A §3.5）。
             # BedrockWriter 只有在真的呼叫生成模型時才丟 PermanentError，建構不受影響。
         }
@@ -112,21 +165,26 @@ class TrainingKbStack(Stack):
             # 值只由部署當下的 shell 提供；缺值讓 synth 當場 KeyError，比部署出一支
             # 永遠驗簽失敗的 Lambda 好（明文環境變數的取捨見 Phase 41 報告 §5）。
             {**base_env, SECRET_ENV: os.environ[SECRET_ENV]})
-        for function in (self.task_function, self.webhook_function):
-            self._grant_data(function, table, bucket)
+        self._grant_data(self.task_function, table, bucket, prefixes=TASK_PREFIXES,
+                         actions=TASK_DDB_ACTIONS, with_index=True)
+        self._grant_data(self.webhook_function, table, bucket, prefixes=WEBHOOK_PREFIXES,
+                         actions=WEBHOOK_DDB_ACTIONS, with_index=False)
         self._grant_delete_edges(self.task_function, table)
-        self.task_function.add_to_role_policy(iam.PolicyStatement(
-            # O5 BLOCKED 期間只列已核定用途的 embedding 模型；生成模型的 ARN 等
-            # TKB_GENERATION_MODEL_ID 有實測值之後再加（00A §3.5）。
-            actions=["bedrock:InvokeModel"],
-            resources=[f"arn:aws:bedrock:{self.region}::foundation-model/"
-                       f"{DEFAULT_EMBEDDING_MODEL_ID}"]))
+        for function in (self.task_function, self.webhook_function):
+            # webhook 也要：ingress 的 Agent 回退在這支 Lambda 裡跑 Converse（O5 解鎖後
+            # 沒有這條會 AccessDenied）。O5 BLOCKED 期間只列已核定用途的 embedding 模型；
+            # 生成模型的 ARN 等 TKB_GENERATION_MODEL_ID 有實測值之後再加（00A §3.5）。
+            function.add_to_role_policy(iam.PolicyStatement(
+                actions=["bedrock:InvokeModel"],
+                resources=[f"arn:aws:bedrock:{self.region}::foundation-model/"
+                           f"{DEFAULT_EMBEDDING_MODEL_ID}"]))
         self.webhook_url = self.webhook_function.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE)
         self.log_group = logs.LogGroup(
             self, "TicketAnalysisLogs",
             log_group_name=f"/aws/vendedlogs/states/{TICKET_ANALYSIS_MACHINE}",
-            retention=logs.RetentionDays.ONE_MONTH, removal_policy=RemovalPolicy.DESTROY)
+            # 證據依賴 execution history 的 90 天保留期，log 要活得比它久一點
+            retention=logs.RetentionDays.THREE_MONTHS, removal_policy=RemovalPolicy.DESTROY)
         self.ticket_analysis = sfn.StateMachine(
             self, "TicketAnalysis", state_machine_name=TICKET_ANALYSIS_MACHINE,
             state_machine_type=sfn.StateMachineType.STANDARD,
@@ -150,14 +208,16 @@ class TrainingKbStack(Stack):
         # 不給 `bedrock:InvokeModel`（`metrics` 只讀 `CallTrace`，不呼叫模型）、
         # 不給 `dynamodb:DeleteItem`（D-79 的那一條只屬於 task function）。
         #
-        # `_grant_data` 是讀＋寫（`PutItem`／`UpdateItem`、`s3:PutObject`）。本 Phase 自己
-        # **只讀**，多出來的寫入是留給 Phase 55 的 `apply_rule_status` 與
-        # `operations/rules/validated_at.json`：D-58 明定 Phase 55 不再動 CDK，現在不給足
-        # 就會逼它回來改這支共用檔（Phase 54 §7 Task 4、§11 完成清單）。
+        # 動作清單裡的 `PutItem`／`UpdateItem` 與 `operations/` 是留給 Phase 55 的
+        # `apply_rule_status` 與 `operations/rules/validated_at.json`：本 Phase 自己
+        # **只讀**，但 D-58 明定 Phase 55 不再動 CDK，現在不給足就會逼它回來改這支
+        # 共用檔（Phase 54 §7 Task 4、§11 完成清單）。
         self.analytics_function = self._function(
             "AnalyticsFunction", ANALYTICS_FUNCTION, ANALYTICS_HANDLER,
             ANALYTICS_TIMEOUT, base_env)
-        self._grant_data(self.analytics_function, table, bucket)
+        self._grant_data(self.analytics_function, table, bucket,
+                         prefixes=ANALYTICS_PREFIXES, actions=ANALYTICS_DDB_ACTIONS,
+                         with_index=True)   # GSI：list_feedback_of_version 走 query_by_target
         # ---- Phase 54 結束 ----
 
     # --- 私有 helper -----------------------------------------------------------
@@ -177,9 +237,14 @@ class TrainingKbStack(Stack):
         return str(name)
 
     def _layer(self) -> lambda_.LayerVersion:
-        if not LAYER_PATH.is_dir():
+        """相依 layer；**查的是真的裝好的套件目錄**，不是只看資料夾在不在。
+
+        空的 `build/lambda-layer/python/` 會讓 synth 與 deploy 都成功，卻在第一次 invoke
+        才 `Runtime.ImportModuleError: No module named 'pydantic'`。
+        """
+        if not is_built(LAYER_PATH):
             raise FileNotFoundError(
-                f"缺少 Lambda 相依 layer：{LAYER_PATH}；"
+                f"Lambda 相依 layer 沒有建好（缺 {'／'.join(MARKERS)}）：{LAYER_PATH}；"
                 "先跑 uv run python -m infra.scripts.build_lambda_layer")
         return lambda_.LayerVersion(
             self, "DependencyLayer", layer_version_name="training-kb-deps",
@@ -199,21 +264,31 @@ class TrainingKbStack(Stack):
             memory_size=MEMORY_MB, environment=environment)
 
     def _grant_data(self, function: lambda_.Function, table: dynamodb.ITable,
-                    bucket: s3.IBucket) -> None:
-        """單表（含唯一索引）＋ 五個 key 前綴；形狀照 P09 資料角色，不用 CDK 的 grant。
+                    bucket: s3.IBucket, *, prefixes: tuple[str, ...] = TASK_PREFIXES,
+                    actions: list[str] | None = None, with_index: bool = True) -> None:
+        """單表 ＋ 指定 key 前綴；形狀照 P09 資料角色，**不用** CDK 的 grant。
+
+        三個 keyword 都有預設值（＝ pipeline Lambda 的範圍），只是為了讓既有呼叫端不必
+        同時改；**新的呼叫端請明寫自己真正需要的最小集合**。
+
+        兩支 Lambda 的範圍**刻意不同**（見 `WEBHOOK_PREFIXES`／`WEBHOOK_DDB_ACTIONS`）：
+        公開入口拿到的權限必須小於內部流程，否則驗簽以外的任何洞都直接等於可以改公開站。
 
         `s3:ListBucket` 是 bucket 層級動作，資源必須是 bucket ARN：沒有它，真實 S3 會把
         「key 不存在」回成 403 而不是 404，Phase 07 的 `get_object -> None` 就不成立。
         """
+        resources = [table.table_arn]
+        if with_index:
+            resources.append(f"{table.table_arn}/index/{TARGET_INDEX}")
         function.add_to_role_policy(iam.PolicyStatement(
-            actions=DDB_ACTIONS,
-            resources=[table.table_arn, f"{table.table_arn}/index/{TARGET_INDEX}"]))
+            actions=list(actions if actions is not None else TASK_DDB_ACTIONS),
+            resources=resources))
         function.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:GetObject", "s3:PutObject"],
-            resources=[bucket.arn_for_objects(f"{prefix}*") for prefix in ALL_PREFIXES]))
+            resources=[bucket.arn_for_objects(f"{prefix}*") for prefix in prefixes]))
         function.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket"], resources=[bucket.bucket_arn],
-            conditions={"StringLike": {"s3:prefix": [f"{prefix}*" for prefix in ALL_PREFIXES]}}))
+            conditions={"StringLike": {"s3:prefix": [f"{prefix}*" for prefix in prefixes]}}))
 
     def _grant_delete_edges(self, function: lambda_.Function, table: dynamodb.ITable) -> None:
         """缺口 2（D-79）：唯一一條 `dynamodb:DeleteItem`，資源只有這張表本體。
