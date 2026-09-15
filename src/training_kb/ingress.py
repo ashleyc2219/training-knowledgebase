@@ -27,9 +27,8 @@ from typing import TYPE_CHECKING, Literal
 import boto3
 from pydantic import ValidationError
 
-from training_kb.clock import now_utc, parse_iso, to_iso
-from training_kb.config import DEFAULT_PROJECT_ID, Settings, load_settings
-from training_kb.content import assert_accepts_feedback
+from training_kb.clock import now_utc, parse_iso
+from training_kb.config import Settings, load_settings
 from training_kb.errors import (
     CoordinationError,
     IngressError,
@@ -37,16 +36,14 @@ from training_kb.errors import (
     PermanentError,
     TransientError,
 )
-from training_kb.keys import feedback_pk, operation_ref, parse_pk, version_pk, view_pk
+from training_kb.keys import operation_ref
 from training_kb.models import (
     Feedback,
     Release,
     ReleaseKind,
     ReleaseSource,
-    StrictModel,
     Ticket,
     TicketSource,
-    Tutorial,
     TutorialView,
 )
 from training_kb.operations import (
@@ -609,13 +606,6 @@ VIEW_FIELDS: frozenset[str] = frozenset({"tutorial_version", "user", "ts", "proj
 FEEDBACK_ID_PREFIX = "f_"
 """設計 §7.1 的回饋 ID 形狀；widget 產生的是 `f_site-<slug>-<user>-<epoch>`（P57）。"""
 
-_MISSING_VERSION = "版本不存在於圖譜"
-_RETIRED_TUTORIAL = "此教學已退役，不再接受新回饋"
-_DUPLICATE_FEEDBACK = "相同 Feedback ID 已匯入，不再計一筆有效回饋"
-_DUPLICATE_VIEW = "相同的版本、使用者與時間已匯入過，不再計一筆瀏覽"
-_SAVED_VIEW = "已保存瀏覽紀錄"
-
-
 @dataclass(frozen=True)
 class ImportResult:
     """固定匯入逐筆的結果；`handler` 直接 `asdict()` 成回應的一列。
@@ -629,17 +619,6 @@ class ImportResult:
     object_id: str | None
     message: str
     invalid_fields: tuple[str, ...]
-
-
-def _rejected(message: str, fields: Sequence[str]) -> ImportResult:
-    """把 `IngressError` 收斂成 `rejected`：固定匯入不讓例外冒到呼叫端（00A §4.1、F51）。"""
-    return ImportResult("rejected", None, message, tuple(fields))
-
-
-def _project_id(payload: Mapping[str, object]) -> str:
-    """操作紀錄的分組；`Feedback`／`TutorialView` 本身沒有這個欄位，不會寫進表。"""
-    value = payload.get("project_id")
-    return value if isinstance(value, str) and value.strip() else DEFAULT_PROJECT_ID
 
 
 def _text(payload: Mapping[str, object], key: str, bad: list[str]) -> str:
@@ -758,107 +737,3 @@ def validate_view(payload: Mapping[str, object]) -> TutorialView:
         return TutorialView(tutorial_version=tutorial_version, user=user, ts=ts)
     except ValidationError as error:
         raise IngressError("瀏覽紀錄欄位值不合法", _invalid_fields(error)) from error
-
-
-def _assert_open(tutorial: Tutorial) -> ImportResult | None:
-    """退役判斷**只有**這一個來源：Phase 26 的 `assert_accepts_feedback`。
-
-    不自己寫 `tutorial.status == "retired"`：狀態語意改動時兩份判斷會默默分岔。
-    它丟的 `IngressError.fields` 就是 `("tutorial_version",)`，不必比對訊息字串。
-    """
-    try:
-        assert_accepts_feedback(tutorial)
-    except IngressError as error:
-        return _rejected(_RETIRED_TUTORIAL, error.fields)
-    return None
-
-
-def _dedupe[MetaT: StrictModel](
-        payload: Mapping[str, object], *, kind: OperationKind, canonical_id: str,
-        pk: str, model: type[MetaT], repository: Repository,
-        operations: OperationCoordinator, now: datetime) -> tuple[str, bool]:
-    """向操作紀錄登記這一筆匯入，回 `(operation_id, 是不是真的重複)`。
-
-    **`accept` 回 duplicate 不等於物件已經存在**（00A D-45、設計 §14.1／§14.2）：上一次
-    可能在寫 item 之前就中斷了。所以再讀一次目標物件，兩個條件同時成立才算重複；
-    只有 ledger 有紀錄、物件卻不在，是**續跑**，本次要補寫，不是重複處理。
-    """
-    operation_id = operation_id_for(kind, canonical_id)
-    acceptance = operations.accept(AcceptOperation(
-        operation_id=operation_id, kind=kind, canonical_id=canonical_id,
-        project_id=_project_id(payload), now=now))
-    written = repository.get_meta(pk, model) is not None
-    return operation_id, acceptance.status == "duplicate" and written
-
-
-def _saved_message(payload: Mapping[str, object], feedback_id: str, ts: datetime) -> str:
-    """成功訊息；`ts` 是補的就必須講清楚它不是使用者實際提交時間（設計 §7.1）。"""
-    if payload.get("ts") is not None:
-        return f"已保存 {feedback_id}"
-    return (f"已保存 {feedback_id}；來源未提供 ts，改記匯入時間 {to_iso(ts)}，"
-            "非使用者實際提交時間")
-
-
-def import_feedback(payload: Mapping[str, object], *, repository: Repository,
-                    operations: OperationCoordinator, now: datetime) -> ImportResult:
-    """固定匯入一筆回饋：欄位 → 版本與退役 → 永久去重 → 寫 metadata 與 `REFERS_TO` 邊。
-
-    **不觸發任何後續**（`ING` Rule 29、`COL` Rule 8）：不啟動 Step Functions、不更新 PROC、
-    不建立教學版本，也不呼叫模型。邊一律指向**提交時指定的那一版**（`COL` Rule 7），
-    不改綁 `Tutorial.current_version`。
-
-    Phase 43 會在這裡追加一個有預設值的 `writer: Writer | None = None` 做 `category`
-    判定（00A 第 915 列）。參數全是 keyword-only，所以那次追加不會動到任何呼叫端；
-    本 Phase 零模型呼叫，先不宣告那個參數。
-    """
-    try:
-        feedback = validate_feedback(payload, now=now)
-    except IngressError as error:
-        return _rejected(error.message, error.fields)
-    version = repository.get_version(feedback.tutorial_version)
-    if version is None:
-        return _rejected(_MISSING_VERSION, ("tutorial_version",))
-    tutorial = repository.get_tutorial(version.slug)
-    if tutorial is None:
-        return _rejected(_MISSING_VERSION, ("tutorial_version",))
-    closed = _assert_open(tutorial)
-    if closed is not None:
-        return closed
-    pk = feedback_pk(feedback.id)
-    operation_id, duplicated = _dedupe(payload, kind="feedback", canonical_id=feedback.id,
-                                       pk=pk, model=Feedback, repository=repository,
-                                       operations=operations, now=now)
-    if duplicated:
-        return ImportResult("duplicate", feedback.id, _DUPLICATE_FEEDBACK, ())
-    repository.put_meta(feedback, create_only=True)
-    repository.put_edge(pk, "REFERS_TO", version_pk(feedback.tutorial_version))
-    operations.complete(operation_id, now=now)
-    assert feedback.ts is not None          # validate_feedback 一定補過（模型放寬才是 None）
-    return ImportResult("saved", feedback.id,
-                        _saved_message(payload, feedback.id, feedback.ts), ())
-
-
-def import_view(payload: Mapping[str, object], *, repository: Repository,
-                operations: OperationCoordinator, now: datetime | None = None) -> ImportResult:
-    """固定匯入一筆瀏覽紀錄：欄位 → 版本存在 → 三元組去重 → 寫 metadata。
-
-    **不查退役**：退役教學的歷史頁仍會被讀，瀏覽數是「重開票率」的分母，一起擋掉會讓
-    指標失真（設計 §8.4）。**不建 `VIEWED` 邊**（設計 §9.2），去重完全靠 `view_pk`。
-    `now` 是可選的接受時間（缺值用 `now_utc()`），與事件時間 `view.ts` 是兩件事。
-    """
-    accepted_at = now_utc() if now is None else now
-    try:
-        view = validate_view(payload)
-    except IngressError as error:
-        return _rejected(error.message, error.fields)
-    if repository.get_version(view.tutorial_version) is None:
-        return _rejected(_MISSING_VERSION, ("tutorial_version",))
-    pk = view_pk(view.tutorial_version, view.user, view.ts)
-    operation_id, duplicated = _dedupe(payload, kind="view", canonical_id=parse_pk(pk)[1],
-                                       pk=pk, model=TutorialView, repository=repository,
-                                       operations=operations, now=accepted_at)
-    if duplicated:
-        return ImportResult("duplicate", pk, _DUPLICATE_VIEW, ())
-    repository.put_meta(view, create_only=True)
-    operations.complete(operation_id, now=accepted_at)
-    return ImportResult("saved", pk, _SAVED_VIEW, ())
