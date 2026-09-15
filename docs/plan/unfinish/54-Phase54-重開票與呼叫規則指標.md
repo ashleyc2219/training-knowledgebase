@@ -2,6 +2,39 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **（a）已存在、可直接用**
+> - `src/training_kb/writing/client.py`：`CallTrace`（`add` / `count(*, operation_id=None)` / `next_attempt` / `to_json`）、`TRACE_FIELDS`（七個鍵，多一個少一個都 `PermanentError`）、`TRACE_KINDS = {"embedding","generation","tool_use"}`、`TRACE_OUTCOMES = {"success","transient_error","permanent_error"}`。`CallTrace` 已由 `writing/__init__.py` re-export，`from training_kb.writing import CallTrace` **可用**。
+> - `src/training_kb/repository.py`：`list_views_of_version(version_id) -> list[TutorialView]`（掃 `VIEW` entity、以 `tutorial_version` 等值過濾、依 `(ts, user)` 排序）、`list_tickets(project_id) -> list[Ticket]`（依 `id` 升序）、`list_rules(status=None) -> list[AuthoringRule]`、`list_feedback_of_version`、`get_tutorial`、`get_version` 全部已實作，`_paged` 已讀完所有分頁（含空頁）。**另有 `list_versions_applying_rule(rule_id) -> list[str]`**（從 `APPLIED_TO` 邊取候選、再以 `VERSION.rules_applied` 為唯一權威過濾去重，依版號升序）——它是「從 DB 查」的版本，本 Phase 的 `applied_count(versions, rule_id)` 是「對已取得的 version 清單算」的純函式，兩者同一條 D17 規則，**不要互相取代**。
+> - `src/training_kb/models.py`：`TutorialView(tutorial_version, user, ts)`、`Ticket(id, source: TicketSource, text, author, ts, project_id, cluster_id, feature_ids, embedding)`、`TutorialVersion(version_id, slug, supersedes, reason, rules_applied, s3_key, published_at)`、`AuthoringRule(rule_id, rule, applies_when: StepType, evidence, status: RuleStatus, applied_to, derived_from)` 全部已存在。`TicketSource` 的三個值是 `github_issue`／`discord`／`email`（§7 helper 用的 `"email"` 合法）；`AuthoringRule.evidence` **至少五個不重複 ID**（§7 的 `EVIDENCE` 五筆剛好夠）。
+> - `src/training_kb/ingress.py::_wiring()` / `_reset_wiring()` / `_build_wiring(settings)` 是本專案**既有的 Lambda 接線範式**：模組層 `_WIRING` 快取、`boto3.resource(..., region_name=settings.aws_region)`、另備一支 `_reset_wiring()` 給測試清快取。本 Phase 的 `handlers/analytics.py::_wiring()` 照這一套寫（§7 Task 4 的片段已補上這兩點）。
+> - `src/training_kb/analytics/__init__.py` 已由 Phase 40 建成 docstring-only 空殼；`src/training_kb/handlers/__init__.py` 已由 Phase 30 建立，docstring 已列出 `training-kb-analytics → analytics.handler（P54／P55）`。
+>
+> **（b）因上一批裁決／現況而修正的點**
+> 1. **`infra/training_kb_stack.py` 目前不存在**（現況：`infra/` 只有 `__init__.py`、`app.py`、`training_kb_data_stack.py`、`scripts/`）。它由 **Phase 41 建立**（00A §3.2、D-21），`tests/unit/infra/` 這個目錄也由 Phase 41 首建。**本 Phase 的 CDK Task 必須排在 Phase 41 之後**。
+> 2. **§7 Task 4 的 `Template` 斷言（四支具名 Lambda 的字典等號）另外要求 Phase 42 已落地**——第三支 `training-kb-import` 是 Phase 42 加的（D-58）。**本計畫選擇：**本 Phase 的實作排在 Phase 41 與 Phase 42 之後；萬一輪到本 Phase 時 Phase 42 尚未落地，改用**包含式**斷言（`handlers["training-kb-analytics"] == "training_kb.handlers.analytics.handler"` ＋ `template.resource_count_is("AWS::Lambda::Url", 1)`），在報告寫明是因為 Phase 42 未落地而降級，**不得**為了讓等號成立去刪別的 Phase 的資源或測試。Phase 41 的 `test_stack_has_one_standard_machine_and_two_named_lambdas` 已經改成包含式斷言，不會因為多出第四支而轉紅。
+> 3. **`lambda_.Code.from_asset("src")` 只會帶原始碼，不含 `pydantic`／`jsonschema`（COMMON R2）。** §7 Task 4 的 CDK 片段照抄 Phase 41 的寫法，實作時**一律沿用 Phase 41 建立的相依 layer／bundling**，不在本 Phase 另做一套（現況核對 2026-09-14：原片段只寫 `code=lambda_.Code.from_asset("src")`）。
+> 4. **`cdk` 指令要用 `command npx aws-cdk@2`**：本機互動 shell 把 `node` 定義成會拒絕的 function（`Security: node blocked`），所以 §7 Task 4 的 `cdk synth --quiet` 實際要寫成 `AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 command npx aws-cdk@2 synth --quiet`（COMMON.md §1；全案固定 `us-east-1`，`--outputs-file` 一律指到 scratchpad，**不提交 `cdk.out/`**）。「不加 `uv run`」那句仍然正確。
+> 5. **§4 的「修改 `src/training_kb/analytics/__init__.py`」這一列取消。** Phase 53（該檔 owner）依 00A §3.2 的授權裁決「維持 docstring-only、不 re-export」，理由是與既有 `pipelines/__init__.py` 同一套 house style，而且本文件與 Phase 55／56／58 的測試片段**全部**用子模組路徑 import。本 Phase 與 Phase 53 同一實作波（W1），這條裁決同時消掉 COMMON R3 的同檔併行風險。
+> 6. **更新 Phase 48 的 Lambda 名稱集合斷言是「有文件依據的例外」。** COMMON R3.6 原則上禁止改別的 Phase 的測試檔，但 Phase 48 §7 已逐字寫「Phase 54 之後會再加第四支 `training-kb-analytics`，屆時要把上面那個名稱集合補齊」。要改的是 `tests/unit/test_feedback_review_flow.py::test_stack_has_review_machine_and_exactly_one_daily_schedule` 裡那個 `names == {...}` 的集合，**只加一個名字、不動該檔其他任何一行**，並在報告寫明。
+> 7. Phase 43 的 `approved_categories(repository)`（`_wiring()` 會呼叫）**目前尚未實作**，Phase 43 與本 Phase 同屬 41–60 這一批。`metrics_action` 與 `version_metrics` 都把 `approved` 當參數收，所以**單元測試不受影響**；只有 `handlers/analytics.py::_wiring()` 這條真實接線路徑需要 Phase 43 先落地，實作時若還沒有就把 Task 4 的 handler 分支測試維持在「未知 action 在接線前丟 `PermanentError`」，不去 monkeypatch 出一個假的 `approved_categories`。
+> 8. §7 各 Task Step 5 的 `git commit -m "..."` 片段**沒有帶 trailer**；實作時補上 COMMON R8 的兩行 trailer，`git add` 只加自己的檔案路徑。
+>
+> **（c）gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - **O4 未到，本 Phase 是首驗**：§全域限制與 §6 的「O4 待核定、本計畫選擇 `[p, p+14 days)` UTC」敘述**維持不變**，端點測試不得刪。
+> - **O5 BLOCKED**（Titan／Claude 都回 `ValidationException: Operation not allowed`；`docs/plan/report/o5-20260915T030245Z.md`）：本 Phase 不呼叫模型，`bedrock_call_count` 只讀 `CallTrace`，**單元測試不受影響**。真實 AWS 上 `training-kb-analytics` 的 `metrics` action 也不碰 Bedrock，可以照常驗收。
+> - **O3 FAIL**（`docs/plan/report/o3-20260914t181109z.md`）：本 Phase 不發布，無影響。
+> - **O2 PASS**、**O6 待核定**、**O7 未到**：與本 Phase 無關；§11 「不得宣稱 O4 已核定」那條維持。
+> - **COMMON R1（真實 AWS 這一批要接）**：本 Phase 不在 R1 的名單（P41／P48／P52／P57／P59／P60）裡，但它改 `infra/training_kb_stack.py`，所以 `cdk synth` 必須真的跑過；要不要 `cdk deploy` 由 controller 依 Phase 41 的部署狀態決定，做不到就在報告寫 BLOCKED 與實際錯誤原文。
+>
+> **（d）適用的 controller 裁決（COMMON.md §3）**
+> - **R2（Lambda 打包）**：見 (b)3。
+> - **R3（同波同檔）**：`infra/training_kb_stack.py` 的修改者依 00A §3.2 有 P42、P48、P52、P54 四個 Phase——既有檔**只用 Edit 不用 Write**、新增資源放進自己的 `# ---- Phase 54 ----` 區段、不重排別人的程式、`git add` 只加自己的路徑。同波的 Phase 53 不碰本 Phase 的任何檔。
+> - **R5**：文件片段是示意，00A §6.10 的名稱與簽名是契約。
+> - **R6／R7／R9**：逐 Task 紅燈→綠燈並留證據；報告寫 `docs/plan/report/phases/2026-09-14-Phase54-REP.md`；不派 subagent。
+> - 全套 gate：`uv run pytest tests -q -W error`、`uv run ruff check src tests infra`、`uv run ruff format --check src tests infra`、`uv run mypy`（strict，`files = ["src", "infra"]`——`analytics/*.py`、`handlers/analytics.py` 與 `infra/training_kb_stack.py` 都在範圍內，每個函式都要完整型別註記；測試檔不在範圍內）。測試檔 basename 全專案唯一（tests 沒有 `__init__.py`）：`test_reopen_metrics.py`、`test_rule_and_call_metrics.py`、`infra/test_analytics_stack.py` 三個名字目前都沒被占用。
+
 **目標：** 在 O4 建議的 `[p, p+14 天)` UTC 窗口下重算同題重開票筆數與比率、規則狀態計數、規則套用次數與真實 Bedrock 呼叫數，組成 `VersionMetrics`，並建立 `training-kb-analytics` 的 Lambda 入口。
 
 **架構：** `reopen_stats`、`rule_counts`、`applied_count`、`bedrock_call_count` 都是純函式；`version_metrics` 是唯一讀 Repository 的組裝函式，把 Phase 53 的評分指標與本 Phase 的重開票指標合成同一份結果；`handler` 只做 action 分派與外部資源接線，交 Phase 55 判定、Phase 58 顯示。
@@ -77,10 +110,9 @@ handler({"action": "metrics", "version_ids": ["prepare-meeting@v1"]}, None)
 | 新增 | `src/training_kb/analytics/rules_metrics.py` | `rule_counts`、`applied_count`、`bedrock_call_count`。 |
 | 新增 | `src/training_kb/analytics/version.py` | `VersionMetrics`、`version_metrics`、`metrics_action`。 |
 | 新增 | `src/training_kb/handlers/analytics.py` | `training-kb-analytics` 的 Lambda 入口 `handler`；只分派 action 與接線（00A D-56；`handlers/` 套件由 Phase 30 建立）。 |
-| 修改 | `src/training_kb/analytics/__init__.py` | 匯出本 Phase 的名稱（檔案 owner 是 Phase 53）。 |
-| 修改 | `infra/training_kb_stack.py` | 把 `training-kb-analytics` 這支 Lambda 接進 stack（檔案 owner 是 Phase 41；00A D-58）。 |
+| 修改 | `infra/training_kb_stack.py` | 把 `training-kb-analytics` 這支 Lambda 接進 stack（檔案 owner 是 Phase 41；00A D-58）。**現況核對 2026-09-14：這支檔還不存在，Phase 41 才會建**；沿用 Phase 41 的相依 layer／bundling（COMMON R2），不自己再做一套。 |
 | 測試 | `tests/unit/test_reopen_metrics.py` | 窗口端點、去重、先後、cluster、零分母、`VersionMetrics` 與 handler 分派。 |
-| 測試 | `tests/unit/infra/test_analytics_stack.py` | `Template` 斷言 Lambda 名稱、handler 路徑與沒有 Function URL。 |
+| 測試 | `tests/unit/infra/test_analytics_stack.py` | `Template` 斷言 Lambda 名稱、handler 路徑與沒有 Function URL（`tests/unit/infra/` 由 Phase 41 首建）。 |
 | 測試 | `tests/unit/test_rule_and_call_metrics.py` | 規則狀態計數、套用次數與 attempt 計數。 |
 
 ## 5. 固定介面
@@ -107,6 +139,8 @@ approved_categories(repository) -> frozenset[str]                               
 load_settings(env=None) -> Settings（只用 table_name／content_bucket／project_id） # P02
 PermanentError                                                                   # P02
 ```
+
+模組路徑（現況核對 2026-09-14，實際 import 位置）：`from training_kb.writing import CallTrace`（`writing/__init__.py` 有 re-export）、`from training_kb.models import AuthoringRule, Feedback, RuleStatus, Ticket, Tutorial, TutorialVersion, TutorialView`、`from training_kb.config import load_settings`、`from training_kb.errors import PermanentError`、`from training_kb.repository import Repository`、`from training_kb.analytics.ratings import average_rating, format_average, negative_feedback_ids`（Phase 53 的四個名稱走**子模組路徑**，`analytics/__init__.py` 不 re-export）。
 
 ### Produces
 
@@ -520,6 +554,8 @@ def test_stack_wires_the_analytics_lambda():
     template.resource_count_is("AWS::Lambda::Url", 1)      # 只有 webhook 有 Function URL
 ```
 
+（現況核對 2026-09-14：這個**字典等號**同時要求 Phase 41 已建 `infra/training_kb_stack.py` 與 Phase 42 已加 `training-kb-import`。輪到本 Phase 時若 Phase 42 尚未落地，改成包含式斷言——`handlers["training-kb-analytics"] == "training_kb.handlers.analytics.handler"` 加上 `resource_count_is("AWS::Lambda::Url", 1)`——並在報告寫明降級原因；**不得**為了讓等號成立去刪別的 Phase 的資源或測試。）
+
 - [ ] **Step 2：執行並確認紅燈**
 
 ```bash
@@ -581,13 +617,24 @@ _WIRING: "tuple[Repository, frozenset[str], str] | None" = None
 
 
 def _wiring() -> "tuple[Repository, frozenset[str], str]":
+    # 現況核對 2026-09-14：照 `src/training_kb/ingress.py::_wiring/_build_wiring` 的既有範式——
+    # boto3 resource 一律帶 `region_name=settings.aws_region`（不靠 shell 預設；全案固定 us-east-1），
+    # 且 `load_settings()` 不帶參數就會讀 `os.environ`（不必自己傳 `os.environ`）。
     global _WIRING
     if _WIRING is None:
-        settings = load_settings(os.environ)
-        repository = Repository(boto3.resource("dynamodb").Table(settings.table_name),
-                                boto3.resource("s3").Bucket(settings.content_bucket))
+        settings = load_settings()
+        dynamodb = boto3.resource("dynamodb", region_name=settings.aws_region)
+        s3 = boto3.resource("s3", region_name=settings.aws_region)
+        repository = Repository(dynamodb.Table(settings.table_name),
+                                s3.Bucket(settings.content_bucket))
         _WIRING = (repository, approved_categories(repository), settings.project_id)
     return _WIRING
+
+
+def _reset_wiring() -> None:
+    """丟掉模組層快取，給測試用（與 `ingress._reset_wiring` 同一個理由）。正式程式不呼叫。"""
+    global _WIRING
+    _WIRING = None
 
 
 def handler(event: dict, context: object) -> dict:
@@ -603,21 +650,27 @@ def handler(event: dict, context: object) -> dict:
 
 ```python
 # infra/training_kb_stack.py（class TrainingKbStack；檔案 owner 是 Phase 41，本 Phase 只追加）
+# ---- Phase 54 ----（R3：既有檔只用 Edit，新增資源放自己的區段，不重排別人的程式）
 analytics_fn = lambda_.Function(
     self, "AnalyticsFunction", function_name="training-kb-analytics",
-    runtime=lambda_.Runtime.PYTHON_3_12, code=lambda_.Code.from_asset("src"),
+    runtime=lambda_.Runtime.PYTHON_3_12,
+    code=...,        # 現況核對 2026-09-14：**沿用 Phase 41 建立的相依 layer／bundling**
+                     # （COMMON R2：`Code.from_asset("src")` 不含 pydantic／jsonschema），
+                     # 與 task_fn／webhook_fn／import_fn 同一支，不在本 Phase 另做一套。
     handler="training_kb.handlers.analytics.handler",
     timeout=Duration.seconds(60), environment=base_env)
 table.grant_read_write_data(analytics_fn)   # 讀指標來源；Phase 55 的 apply_rule_status 要寫 RULE.status
 bucket.grant_read_write(analytics_fn)       # Phase 55 要寫 operations/rules/validated_at.json 與證據檔
 ```
 
-寫入權限現在就給足，是因為 Phase 55 依裁決**不再動 CDK**（D-58）；本 Phase 自己只讀不寫，這個差距在上面那行註解寫清楚即可，不要為了「最小」而讓 Phase 55 又回來改一次 stack。維護者用 boto3 `invoke` 呼叫它，所以不開 Function URL。**同時要更新 [Phase 48](./48-Phase48-Feedback-Review排程流程.md) 那個列舉 Lambda 名稱集合的 `Template` 斷言**：本 Phase 之後 stack 有四支具名 Lambda，少補一個名字會讓 Phase 48 的測試轉紅。
+寫入權限現在就給足，是因為 Phase 55 依裁決**不再動 CDK**（D-58）；本 Phase 自己只讀不寫，這個差距在上面那行註解寫清楚即可，不要為了「最小」而讓 Phase 55 又回來改一次 stack。維護者用 boto3 `invoke` 呼叫它，所以不開 Function URL。**同時要更新 [Phase 48](./48-Phase48-Feedback-Review排程流程.md) 那個列舉 Lambda 名稱集合的 `Template` 斷言**：本 Phase 之後 stack 有四支具名 Lambda，少補一個名字會讓 Phase 48 的測試轉紅。（現況核對 2026-09-14：確切位置是 `tests/unit/test_feedback_review_flow.py::test_stack_has_review_machine_and_exactly_one_daily_schedule` 裡的 `names == {"training-kb-pipeline-task", "training-kb-webhook", "training-kb-import"}`。這是 COMMON R3.6「不修改別的 Phase 的測試檔」的**有文件依據的例外**——Phase 48 §7 已逐字預告本 Phase 要補；**只加一個名字、不動該檔其他任何一行**，並在報告寫明。）
 
 ```bash
 uv run pytest tests/unit/test_reopen_metrics.py tests/unit/test_rule_and_call_metrics.py \
              tests/unit/infra/test_analytics_stack.py -q
-cdk synth --quiet
+# 現況核對 2026-09-14：本機互動 shell 把 node 定成會拒絕的 function（`Security: node blocked`），
+# 所以 cdk 一律走 `command npx aws-cdk@2`，並明寫 region（COMMON.md §1）。
+AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 command npx aws-cdk@2 synth --quiet
 ```
 
 預期：全部 PASS，且 `handler({"action": "validate_rules"}, None)` 在 Phase 55 完成前一律 `PermanentError`；`cdk synth` 產出的 template 恰有四支具名 Lambda、沒有新增 state machine。`cdk` 是 Node.js 套件，指令**不加** `uv run`（00A §3.1、D-22）。CDK 環境尚未建立時先完成 Phase 01／09／41，不要把「目前跑不了」寫成已通過。
@@ -625,8 +678,12 @@ cdk synth --quiet
 - [ ] **Step 5：提交**
 
 ```bash
-git add src/training_kb/analytics/ src/training_kb/handlers/analytics.py infra/training_kb_stack.py \
-        tests/unit/test_reopen_metrics.py tests/unit/infra/test_analytics_stack.py
+# 現況核對 2026-09-14：不要 `git add src/training_kb/analytics/`（那會把 Phase 53 的
+# ratings.py 與 Phase 40 的 status_writer.py 一起帶進來）；逐檔列出自己的路徑（COMMON R3.3）。
+git add src/training_kb/analytics/reopen.py src/training_kb/analytics/rules_metrics.py \
+        src/training_kb/analytics/version.py src/training_kb/handlers/analytics.py \
+        infra/training_kb_stack.py tests/unit/test_reopen_metrics.py \
+        tests/unit/infra/test_analytics_stack.py tests/unit/test_feedback_review_flow.py
 git commit -m "feat(analytics): 組成單版完整指標並建立 analytics 入口"
 ```
 
@@ -695,4 +752,6 @@ Rule 原文逐字取自 `.feature` 原檔；primary／相關的歸屬依 [00B �
 - [ ] `version_metrics` 對未發布或缺 `cluster_id` 的版本回零分母結果，不猜測時間。
 - [ ] `handlers/analytics.py::handler` 已建立、只認得 `action: "metrics"`，未知 action 在接線前就丟 `PermanentError`（D-56）。
 - [ ] `infra/training_kb_stack.py` 已加入 `training-kb-analytics`（handler `training_kb.handlers.analytics.handler`、無 Function URL、無 `states:StartExecution`），並有 `Template` 斷言；權限已涵蓋 Phase 55 的寫入（D-58）。
+- [ ] Phase 48 的 Lambda 名稱集合斷言（`tests/unit/test_feedback_review_flow.py`）已補上 `training-kb-analytics`，且只動那一行。
+- [ ] CDK 沿用 Phase 41 的相依 layer／bundling（COMMON R2），沒有另做一套；`cdk synth` 以 `command npx aws-cdk@2` 實際跑過。
 - [ ] 文件與測試都沒有把 7／2 當成百分比，也沒有宣稱 O4 已核定。
