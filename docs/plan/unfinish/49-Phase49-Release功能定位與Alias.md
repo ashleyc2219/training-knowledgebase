@@ -2,6 +2,34 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **（a）已存在、直接重用（file:function）**
+> - `src/training_kb/pipelines/release.py` — controller 已預建**只有 docstring 的空殼**（commit `5f8a430`，COMMON.md R4）。本 Phase 是「修改」不是「建立」。
+> - `src/training_kb/repository.py:Repository.find_feature_by_name_or_alias`（P27；先比 `name` 再比 `aliases`，alias 撞名丟 `PermanentError`）、`revision_of(pk) -> int`、`update_meta(pk, changes, *, expected_revision) -> int`、`scan_entity(entity, *, consistent=True, meta_only=True)`、模組函式 `item_to_model[T: StrictModel](item, model) -> T`、`get_feature(feature_id)`、`put_meta(entity, *, create_only=True)`。
+> - `src/training_kb/vectors.py:cosine`、`src/training_kb/writing/client.py:Writer.embed(text, *, operation_id, node)`。
+> - `src/training_kb/config.py:Thresholds.cosine_match = 0.85`（唯一數字來源）、`src/training_kb/keys.py:META`／`feature_pk`。
+> - `src/training_kb/models.py:Feature`／`Release`（`Release.kind` 是 `ReleaseKind` StrEnum；`old_name`／`new_name` 可為 `None`）。
+> - 測試器材：`tests/unit/conftest.py:RecordingWriter`／`fake_writer`（P15）、`tests/integration/conftest.py:repository`（**moto**，region `us-west-2`）。
+>
+> **（b）因上一批裁決／實作而修正的點**
+> 1. §4「建立 `pipelines/release.py`」→ **修改**：只用 `Edit` 往檔內追加 `# ---- Phase 49 ----` 區段（COMMON.md R3／R4）。同一波次 **P50 也在改這支檔**（不同函式區段），不得 `Write`、不重排、不動別人的區段。
+> 2. §7 Task 1／Task 2 的 `fake_writer`（帶 `cosine_for`、`embed_calls`）**不是**共用 fixture：`tests/unit/conftest.py` 的 `RecordingWriter` 只有 `calls`／`replies`／`request_attempts`／固定 `FIXED_EMBEDDING`，而該檔 **只有 P55 可以修改**（COMMON.md R3.6）。本 Phase 要在自己的測試檔內定義區域 fixture（同名覆寫或另取名），不得改 conftest。
+> 3. §7 Task 3 的 `repository` fixture 是 **moto**（`tests/integration/conftest.py`），不連真實帳號；Step 4 的 `aws dynamodb get-item --consistent-read` 原始輸出**不是本 Phase 能產出的證據**。真實 AWS 這一批集中在 P41／P48／**P52**／P57／P59／P60（COMMON.md R1），本 Phase 的 `FEATURE#Prepare` 雲端核對併入 **P52 §6 證據表**。
+> 4. `update_feature_aliases` 回傳用 `feature.model_copy(update=...)`：pydantic v2 的 `model_copy` **不重新驗證**，所以 `name`／`aliases` 必須在寫入前自己 strip 過（`Feature` 的 `bare_id` 只擋空字串、前後空白與 `#`／控制字元，字串**中間的空白是合法的**，`"Meeting Summary"` 不會被擋）。
+> 5. §6 的「`expected_revision` 只能取自 `revision_of`」與現況一致（`repository.py:306-318`）；`update_meta` 會擋 `RESERVED_ATTRS`、revision 不符丟 `CoordinationError("stale revision for …")`，§7 Task 3 的 `match="stale revision"` 成立。
+> 6. §5 Consumes 的簽名與現況逐一核對通過，未發現需要改寫的簽名。
+>
+> **（c）gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - **O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`：Titan／Claude 皆 `ValidationException: Operation not allowed`）→ 語意層一律用假向量（自備 fake writer），**不得**寫「語意定位已在真實 Bedrock 驗證」。真實 AWS 執行時，需要模型的節點會走 `PermanentError → Catch → PipelineFailed`，那是 BLOCKED 證據不是 bug。
+> - **O6 未核定 `github.com/pull_request`**（`tests/fixtures/o6/approved-sources.json` 該列 `approved_by` 為空）→ Release 事件目前**走不進 webhook 路徑**。本 Phase 是純函式＋Repository，不受影響，但也不得宣稱 O6 已核定。
+> - **O3 FAIL**、**O2 PASS**；本 Phase 不發布、不切 `current_version`，兩者都不影響交付物。
+> - 前置 P01–P40 全部完成（`docs/plan/report/phases/`）。
+>
+> **（d）適用的 controller 裁決**：R3（`pipelines/release.py` 同波次併行，只 Edit、只 `git add` 自己的檔）、R4（空殼已建）、R5（00A ＋既有程式優先於本文件片段）、R6（逐 Task 先紅後綠）、R7（報告寫 `docs/plan/report/phases/2026-09-14-Phase49-REP.md`）、R8（commit 格式）、R10（自己裁決並記錄）。
+>
+> **實作波次**：W1（P49 ∥ P50 同時進行）→ W2（P51）→ W3（P52）。
+
 **目標：** 讓一則已正規化的 Release 先用名稱與 alias、再用語意相似度定位到唯一一個既有 Feature，並在改版完成後安全更新該 Feature 的顯示名稱與 aliases。
 
 **架構：** 這是 `release-update` pipeline 的第一段。程式先做完全相同字串查詢，再做忽略大小寫與前後空白的正規化比對，全部落空才呼叫 Titan 算向量；是否採用由程式的 `0.85` 門檻決定，不由模型決定。Feature 的 PK 在第一次建立時就固定，本 Phase 只改 `name` 與 `aliases` 兩個欄位。
@@ -15,7 +43,7 @@
 - 下一階段是 [Phase 50：Release 步驟反查與 Safety Net](./50-Phase50-Release步驟反查與Safety-Net.md)。
 - 本階段不做：不反查步驟、不建立新 Feature、不建立版本、不發布、不退役、不呼叫 Claude。
 - 定位失敗是合法業務結果（回 `None`），代表「不改版、不建立 Feature」，不是技術故障。
-- O1–O7 狀態：O5 未通過時語意分支保持 blocked，只能跑前兩層與純函式測試；O6 未通過時 `old_name`／`new_name` 不可信，整條 release-update 停止。本 Phase 不得宣稱 O5 或 O6 已核定。
+- O1–O7 狀態（現況核對 2026-09-14：原寫「未通過時…」，實際狀態已確定）：**O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`）→ 語意分支保持 blocked，只能跑前兩層與以假向量驅動的純函式測試；**O6 尚未核定 `github.com/pull_request`**（`tests/fixtures/o6/approved-sources.json`）→ 真實 webhook 進來的 `old_name`／`new_name` 不可信，整條 release-update 的**雲端**入口 blocked（雲端驗收改由 P52 以 `start-execution` 直接餵 input）。本 Phase 不得宣稱 O5 或 O6 已核定。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -72,10 +100,10 @@ aliases = ["Meeting Summary"]
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 建立 | `src/training_kb/pipelines/release.py` | `FEATURE_MATCH_THRESHOLD`、`normalize_feature_name`、`locate_feature`、`update_feature_aliases`。 |
+| 修改 | `src/training_kb/pipelines/release.py` | `FEATURE_MATCH_THRESHOLD`、`normalize_feature_name`、`locate_feature`、`update_feature_aliases`。（現況核對 2026-09-14：原寫「建立」，controller 已預建 docstring 空殼，只用 `Edit` 追加 `# ---- Phase 49 ----` 區段；同一波次 P50 也在改這支檔。） |
 | 測試 | `tests/unit/test_release_locate_feature.py` | 三層定位順序、門檻與平手排序。 |
 | 測試 | `tests/unit/test_release_alias_update.py` | PK 不變、old_name 入 aliases、撞名拒絕。 |
-| 測試 | `tests/integration/test_release_feature_lookup.py` | 真實 Repository 的一致讀取與條件更新。 |
+| 測試 | `tests/integration/test_release_feature_lookup.py` | 真實 `Repository` 類別 + **moto** 表的一致讀取與條件更新。（現況核對 2026-09-14：`tests/integration/conftest.py` 的 `repository` fixture 是 moto，不是真實帳號；真實 AWS 證據見 P52。） |
 
 ## 5. 固定介面
 
@@ -174,6 +202,8 @@ def test_semantic_match_needs_at_least_the_threshold(fake_repo, fake_writer, cha
 `renamed_release` 是 `r_42`（`kind="renamed"`、`feature="Prepare"`、`old_name="Meeting Summary"`、`new_name="Prepare"`），`changed_release` 是同一則 Release 但 `kind="changed"`、兩個名稱欄位都是 `None`（Phase 31 只有 `renamed` 強制這兩欄）。第一個測試同時斷言新舊名都回到同一個 `FEATURE#Prepare`，這正是 REL Rule 2 的可觀察結果。
 
 `fake_writer` 不算 cosine，也不假裝自己是 Titan：它把每段文字對應到一個**長度 1024 的單位向量**，查詢文字固定回 `[1.0] + [0.0] * 1023`，候選 `X` 回 `[s, sqrt(1 - s * s)] + [0.0] * 1022`，其中 `s = cosine_for[X]`。這樣 Phase 16 的真 `cosine` 算出來就剛好等於 `s`，邊界值不會被浮點誤差推過門檻；`embed_calls` 記錄每次呼叫的 `(text, node)`。
+
+（現況核對 2026-09-14：這個帶 `cosine_for`／`embed_calls` 的 `fake_writer` **不是**共用 fixture。`tests/unit/conftest.py` 的 `RecordingWriter` 只有 `calls`／`replies`／`request_attempts` 與固定的 `FIXED_EMBEDDING`，而該檔依 COMMON.md R3.6 **只有 P55 可以修改**。請在 `tests/unit/test_release_locate_feature.py` 內自備一個區域 fixture（同名覆寫即可，pytest 以最近的定義為準），不要改 conftest，也不要讓 P50 的測試檔依賴它。）
 
 - [ ] **Step 2：執行 `uv run pytest tests/unit/test_release_locate_feature.py -q` 並確認紅燈**，訊號包含 `cannot import name 'locate_feature'`。
 
@@ -364,7 +394,9 @@ uv run pytest tests/integration/test_release_feature_lookup.py -q
 uv run pytest tests/integration/test_release_feature_lookup.py -q
 ```
 
-預期：PASS，並保存 `aws dynamodb get-item --consistent-read --table-name training_kb --key '{"PK":{"S":"FEATURE#Prepare"},"SK":{"S":"META"}}'` 的原始輸出當證據。若 O5 尚未通過，語意定位的整合案例標為 `xfail(strict=True, reason="O5 尚未驗證")`，不得改用假向量宣稱語意路徑已驗證。
+預期：PASS。
+
+（現況核對 2026-09-14：原寫「保存 `aws dynamodb get-item --consistent-read` 的原始輸出當證據」——本檔跑在 **moto** 上，產不出真實帳號的輸出。真實 AWS 的 `FEATURE#Prepare` 逐欄比對**移交 P52 §6 證據表**（COMMON.md R1：這一批的真實 AWS 集中在 P41／P48／P52／P57／P59／P60）。**O5 現況是 BLOCKED**，所以語意定位**不新增**真實 Bedrock 整合案例——不寫 `xfail(strict=True)`（那會變成第 12 個站崗 xfail 且與 O5 的 `aws` marker 機制重複），改為在報告寫明「語意層只有假向量單元測試，O5 BLOCKED」。不得改用假向量宣稱語意路徑已驗證。）
 
 - [ ] **Step 5：提交**
 
@@ -385,7 +417,10 @@ git commit -m "test(release): 真實表驗證定位與條件更新"
 | Boundary | 兩個 Feature 同為 `0.90` | 取 `feature_id` 升序最小者，重跑結果相同。 |
 | Identity | 連續兩次改名 | PK 始終是第一次建立的值。 |
 
-人工驗收：用 `aws dynamodb get-item --consistent-read` 讀改名前後的 `FEATURE#Prepare`，逐欄比對 `PK`、`name`、`aliases`；再用 `CallTrace` 確認 alias 命中那次執行真的沒有 Bedrock attempt。不能只看測試顯示 PASS。
+人工驗收（現況核對 2026-09-14：拆成兩條路徑，照 COMMON.md §2）：
+
+- **可實證路徑（本 Phase 交付）**：在 moto 整合測試裡用 `repository.get_meta_item(feature_pk("Prepare"))` 讀改名前後的整筆 item，逐欄比對 `PK`、`name`、`aliases`、`_revision`；再讀自備 fake writer 的 `embed_calls`（或 P15 `RecordingWriter` 的 `calls`）確認 alias 命中那次執行真的零次 embedding attempt。不能只看測試顯示 PASS。
+- **BLOCKED／移交路徑**：真實帳號的 `aws dynamodb get-item --consistent-read --table-name training_kb --key '{"PK":{"S":"FEATURE#Prepare"},"SK":{"S":"META"}}'` 由 **P52 雲端驗收**取得；語意定位的真實 Bedrock 證據因 **O5 BLOCKED** 取不到，報告記 BLOCKED 並附 `docs/plan/report/o5-20260915T030245Z.md`。
 
 ## 9. 常見錯誤與停止條件
 
