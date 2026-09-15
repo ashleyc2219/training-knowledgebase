@@ -2,6 +2,47 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **（a）已存在、可直接用的東西**
+>
+> - `src/training_kb/config.py`：`load_settings(env=None) -> Settings`、`Settings(... project_id=DEFAULT_PROJECT_ID)`、`DEFAULT_PROJECT_ID = "demo"`、`Thresholds`。
+> - `src/training_kb/errors.py`：`ObjectAlreadyExists`（**是** `PermanentError` 的子類）、`PermanentError`、`TransientError`。
+> - `src/training_kb/repository.py`：`put_object(key, body, content_type, *, if_none_match)`（**`if_none_match` 沒有預設值，必須明寫**）、`list_rules(status=None)`、`list_versions_of_tutorial(slug)`、`list_feedback_of_version`／`list_views_of_version`／`list_tickets`、`get_object`、`object_exists`、`scan_entity`。
+> - `src/training_kb/writing/client.py`：`Writer.generate_json(system, user, schema, *, operation_id, node) -> dict`（`node` 必填、原樣寫進 trace）、`CallTrace.to_json()`、`TRACE_FIELDS = ("operation_id", "node", "model", "attempt", "kind", "started_at", "outcome")`（七欄，不多不少）。
+> - `src/training_kb/rules.py`：`render_rules_block(rules)`、`applied_rule_ids(rules)`、`select_active_rules(...)`、`rules_for_content(...)`。
+> - `src/training_kb/content.py`：`render_markdown(content)`、`diff_key(slug, number)`、`markdown_key(slug, number)`、`parse_version_id`。
+> - **`operation_id_for(kind, canonical_id)` 與 `execution_name(operation_id)` 在 `src/training_kb/ingress.py`**（不是獨立模組）；`OperationKind` 在 `src/training_kb/operations.py`，值含 `"feedback-review"`，所以 `operation_id_for("feedback-review", ...)` 型別上合法。
+> - `infra/training_kb_data_stack.py`：**`PRIVATE_PREFIXES` 已經包含 `"demo/previews/"`**，所以 `PREVIEW_PREFIX` 天生落在私有前綴裡，`site/*` 的 bucket policy 不會公開它（§5 的說法成立，且已經是既成事實）。
+> - `tests/unit/conftest.py`：`RecordingWriter`（`generate_json` 依 `replies` 佇列回 dict、記 `calls`／`request_attempts`）、`fake_writer` fixture、`FIXED_EMBEDDING`。
+> - `tests/conftest.py`：`MemoryRepository`（記憶體版，有 `put_object` 的 `if_none_match` 行為）與 `aws` marker 的自動 skip。
+>
+> **（b）文件因上一批裁決／實作而修正的點（逐條）**
+>
+> 1. **§5 Consumes 裡大半的名稱在本批還不存在**（實測 grep `src/` 全無）：`import_feedback`／`import_view`（P42，W2）、`approved_categories`（P43，W3）、`ReviewMode`（P44，W1）、`average_rating`／`negative_feedback_ids`／`format_average`（P53，W1）、`version_metrics`／`reopen_stats`／`rule_counts`／`applied_count`／`bedrock_call_count`（P54，W2）、`load_seed`／`verify_recipe`／`apply_seed`（P56，W1）。**本 Phase 在 W3，上述全部都在它之前**，所以這些相依在排程上都成立——這是本組三份文件裡唯一沒有缺件問題的 Phase。模組落點依 00A §3.2 已補進 §5。
+> 2. **`streamlit` 目前沒有安裝**（`uv run python -c "import streamlit"` → `ModuleNotFoundError`）。加進 `[dependency-groups] dev` 之後 **`uv.lock` 必須一起 `git add`**（00A §3.2 的根目錄表）。`pyproject.toml` 是共用檔（P56 可能也要改），只用 Edit、只加自己那一行（R3）。
+> 3. **`demo/` 目前不存在，而且 pytest 執行時專案根目錄不在 `sys.path`**（實測 `import demo` → `ModuleNotFoundError`；`[tool.setuptools.packages.find] where = ["src"]` 只安裝 `training_kb`）。P56 在 §4 已經裁決「在 `[tool.pytest.ini_options]` 加 `pythonpath = ["."]`」——本 Phase 在 W3，**P56 已經做完，直接沿用，不要再做一次**；若 P56 最後沒做，本 Phase 補上同一行。
+> 4. **`demo/` 是本機原始碼目錄，`demo/previews/` 是 S3 key 前綴**，兩者同名但不同層；`PREVIEW_PREFIX` 指的是後者，任何程式都不得用它去組本機路徑。
+> 5. `Repository.put_object` 的 `if_none_match` **沒有預設值**，§6 的 `put_object(..., if_none_match=True)` 寫法正確，照抄即可。
+> 6. `CallTrace` 的 record 只有 `TRACE_FIELDS` 七欄，`kind` 只允許 `embedding`／`generation`／`tool_use`，`outcome` 只允許 `success`／`transient_error`／`permanent_error`（00A §6.4）——`call_breakdown` 依 `node` 分組、數 `attempt >= 2`，欄位名照這七個。
+> 7. §4 表把 `DASHBOARD_BLOCKS`／`SYNTHETIC_NOTICE` 放在 `view_model.py`、`PREVIEW_PREFIX` 放在 `preview.py`，與 00A §3.2 的 `demo/` 表逐字一致（四支檔不得互相搬名稱）；§5 的 Produces 區塊把它們混在一起列，**以 00A ＋ §4 為準**。
+>
+> **（c）gate 現況對本 Phase 的影響**（COMMON.md §2）
+>
+> - **O5 BLOCKED**（Titan／Claude 皆 `ValidationException: Operation not allowed`；報告 `docs/plan/report/o5-20260915T030245Z.md`）→ **Task 2 的規則開關預覽在真實 AWS 上跑不出兩份 Markdown**（`Writer.generate_json` 會 `PermanentError`）。moto ＋ `RecordingWriter` 的測試照做、照綠；**真實現場演練記 BLOCKED 並附錯誤原文**，不得用預先產好的 `off.md`／`on.md` 冒充本次成功（設計 §11.5 的「預先執行結果」必須標示，`Banner.fallback_reason` 就是為此存在）。`trigger-ticket` 觸發的正式 Ticket Analysis（D-68 的 R-007 套到 B v1）同理：真實 AWS 上會在模型節點走 Catch → PipelineFailed，那是 BLOCKED 證據不是 bug。
+> - **O7 未到**（P56 首驗，而且 P56 這一批因 O5 只能留「待核定」）→ Dashboard 的文案固定「待維護者核定」，**不得**出現「O7 已通過」；`missing_approvals` 非空時不得宣稱通過。
+> - **O4 未到**（P54 首驗）→ 重開票率的 14 天窗口端點未核定，區塊 3 除了分子分母與 proxy 說明，還要能承受「窗口定義之後改」而不必改公式（一律轉呼 `reopen_stats`）。
+> - **O3 FAIL** → 本 Phase 不寫 `site/`；只要確認預覽跑完 `site/` 前綴物件數不變即可，**不得**因此對 O3 下任何結論。
+> - O1 provisionally accepted、O6 待核定：與本 Phase 無直接相依。
+>
+> **（d）適用的 controller 裁決（COMMON.md §3）**
+>
+> - **R1 真實 AWS**：本 Phase 不在 R1 的六個 Phase 名單內（P41／P48／P52／P57／P59／P60）。`trigger-*` 子命令**要能真的送出**，但實機演練與證據收在 P60 的證據索引（本文件 §6 已寫 `V4` 那一列）。本 Phase 只保證 CLI 送出去的 payload 與 execution name 逐字正確（用假 client 斷言）。
+> - **R3 同檔併行**：`demo/cli.py`／`preview.py`／`view_model.py`／`dashboard.py` 只有本 Phase 動；`pyproject.toml` 是共用檔（只用 Edit）。W3 同波的 P43／P48／P52／P55 不碰 `demo/`。
+> - **R5**：本文件的程式碼片段是示意，00A ＋ 既有程式是契約。
+> - **R6**：逐 Task 先紅燈再綠燈。**R9**：不派 subagent。
+> - **R11 安全**：Demo 指標要明示是合成資料；不嵌金鑰；`PREVIEW_PREFIX` 是私有前綴。
+
 **目標：** 做出維護者本機用的 Demo 控制台：一支 CLI 觸發六種操作、一個 Streamlit dashboard 顯示四個固定區塊，並用同一批 B 工單產生「規則關／開」兩份完全隔離的預覽。
 
 **架構：** 控制台不直接寫 DynamoDB 業務資料；所有寫入都走 `lambda:invoke` 或 `states:StartExecution`，唯二例外是受控的 `seed` 匯入與隔離預覽，而預覽只寫私有 S3 `demo/previews/<run_id>/`。Dashboard 是唯讀的 view model 加 Streamlit 畫面，指標數值全部由 Phase 53／54 的函式從原始資料重算。
@@ -13,7 +54,7 @@
 - 唯一主來源是 [Training KB 設計 §11.4、§11.5、§12.1、§12.3、§13](../../design/training-kb.md)。
 - 前置為 [Phase 57：S3 靜態教學站與回饋下載](./57-Phase57-S3靜態教學站與回饋下載.md)；另需 [Phase 53](./53-Phase53-評分與負面回饋指標.md)、[Phase 54](./54-Phase54-重開票與呼叫規則指標.md) 的指標函式、[Phase 55](./55-Phase55-規則驗證與狀態轉移.md) 的規則狀態與 [Phase 56](./56-Phase56-O7核定Demo種子資料.md) 的種子。前置未通過時停止。下一階段是 [Phase 59：失敗復原與重送驗收](./59-Phase59-失敗復原與重送驗收.md)。
 - 本階段不做：不建立第四條 pipeline；不讓 CLI 或 Dashboard 直接寫入 DynamoDB 業務 item；不把 AWS 憑證嵌進頁面或種子檔；不改正式門檻；不自行計算指標公式（一律呼叫 Phase 53／54）；不重算或重新核定種子（屬 [Phase 56](./56-Phase56-O7核定Demo種子資料.md)）。
-- 與本 Phase 有關的 O1–O7 gate 狀態（O1–O7 是設計 §18 的七個待確認事項編號）：O7（核定種子與外部設定）的核定屬 Phase 56，Dashboard 只能顯示已核定批次名稱，**不得把「程式重算成功」寫成「維護者已核定」**；O4（時間與比較邊界）的窗口端點仍待核定，重開票率必須同時顯示分子、分母與 proxy 說明，零分母顯示 N/A 與樣本不足。
+- 與本 Phase 有關的 O1–O7 gate 狀態（O1–O7 是設計 §18 的七個待確認事項編號）：**O7 未到**（首驗在 Phase 56，而且 P56 這一批因 O5 只能留「待核定」），Dashboard 只能顯示批次名稱並標「待維護者核定」，**不得把「程式重算成功」寫成「維護者已核定」**；**O4 未到**（首驗在 P54），窗口端點仍待核定，重開票率必須同時顯示分子、分母與 proxy 說明，零分母顯示 N/A 與樣本不足；**O5 BLOCKED**（現況核對 2026-09-14 新增：Titan／Claude 皆 `ValidationException: Operation not allowed`，報告 `docs/plan/report/o5-20260915T030245Z.md`）→ 規則開關預覽與 `trigger-ticket` 的正式套用在真實 AWS 上跑不到模型，moto ＋ 假 writer 的測試照做，現場演練記 BLOCKED 並用 `Banner.fallback_reason` 明示；**O3 FAIL**（報告 `docs/plan/report/o3-20260914t181109z.md`）→ 本 Phase 不寫 `site/`，只斷言預覽不動它，不對 O3 下結論。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -74,7 +115,8 @@ $ uv run streamlit run demo/dashboard.py
 | 建立 | `demo/preview.py` | `run_rule_toggle_preview`，只寫 `demo/previews/<run_id>/`。 |
 | 建立 | `demo/view_model.py` | 四區塊的純計算 view model、`Banner`、`call_breakdown`。 |
 | 建立 | `demo/dashboard.py` | Streamlit 畫面；唯讀、不嵌金鑰。 |
-| 修改 | `pyproject.toml` | 把 `streamlit` 加進 `[dependency-groups] dev`（沿用 Phase 01 的相依管理方式）。 |
+| 修改 | `pyproject.toml` ＋ `uv.lock` | 把 `streamlit` 加進 `[dependency-groups] dev`（沿用 Phase 01 的相依管理方式）。（現況核對 2026-09-14：`streamlit` 目前**沒有安裝**；`uv.lock` **必須一起 `git add`**，00A §3.2 根目錄表明文。`pyproject.toml` 是共用檔，只用 Edit、只加自己那一行，R3。） |
+| （沿用） | `pyproject.toml` 的 `[tool.pytest.ini_options] pythonpath = ["."]` | 讓 `from demo.cli import ...` 能 import。（現況核對 2026-09-14：實測 pytest 執行時專案根目錄**不在** `sys.path`。這一行由 **P56（W1）** 加，本 Phase 在 W3 直接沿用；若 P56 最後沒做，本 Phase 補。） |
 | 測試 | `tests/unit/test_demo_cli.py`、`tests/unit/test_demo_view_model.py` | 參數、寫入路徑與 view model。 |
 | 測試 | `tests/unit/test_demo_dashboard_guard.py` | 原始碼守門：不寫 DynamoDB、不含金鑰。 |
 | 測試 | `tests/integration/test_demo_preview.py` | moto 下比對預覽前後整張表。 |
@@ -84,28 +126,55 @@ $ uv run streamlit run demo/dashboard.py
 ### Consumes
 
 ```text
-load_settings() -> Settings（table_name / content_bucket / aws_region / project_id）  # Phase 02
-ObjectAlreadyExists（PermanentError 子類）                             # Phase 07
-Repository.put_object(key, body, content_type, *, if_none_match)      # Phase 07
-Repository.list_rules(status=None) / list_versions_of_tutorial(slug)  # Phase 08、27
-Writer.generate_json(system, user, schema, *, operation_id, node)
-CallTrace.to_json() -> str（逐筆 node／attempt 的唯一讀法）            # Phase 15
-render_rules_block(rules: Sequence[AuthoringRule]) -> str             # Phase 19
-render_markdown(content: TutorialContent) -> str / diff_key(slug, n)  # Phase 22
-operation_id_for(kind, canonical_id) / execution_name(operation_id)   # Phase 32
-import_feedback / import_view（由 import handler 逐筆呼叫）            # Phase 42
-approved_categories(repository) -> frozenset[str]                     # Phase 43
-ReviewMode = Literal["formal", "demo"]                                # Phase 44
-average_rating(feedback) / negative_feedback_ids(feedback, approved)
-format_average(value) -> str                                          # Phase 53
-version_metrics(version_id, *, repository, approved, project_id) -> VersionMetrics
-reopen_stats(views, tickets, *, cluster_id, published_at) -> ReopenStats(
-    count, reopen_users, viewers, rate)
-rule_counts(rules) / applied_count(versions, rule_id)
-bedrock_call_count(trace, *, operation_id=None) -> int                # Phase 54
-load_seed(directory: Path) -> SeedBundle / verify_recipe(bundle) -> RecipeReport
-apply_seed(bundle, *, repository, now) -> tuple[str, ...]             # Phase 56
+# 已存在（可直接 import）
+training_kb.config      load_settings(env=None) -> Settings                       # P02
+                        （table_name / content_bucket / aws_region / project_id）
+                        DEFAULT_PROJECT_ID = "demo"
+training_kb.errors      ObjectAlreadyExists（PermanentError 子類）                 # P07
+training_kb.repository  Repository.put_object(key, body, content_type, *,         # P07
+                                              if_none_match)  ← 無預設值，必須明寫
+                        Repository.list_rules(status=None)                        # P08
+                        Repository.list_versions_of_tutorial(slug)                # P27
+training_kb.writing     Writer.generate_json(system, user, schema, *,             # P15
+                                             operation_id, node) -> dict
+                        CallTrace.to_json() -> str（逐筆 node／attempt 的唯一讀法）
+                        TRACE_FIELDS 七欄：operation_id / node / model / attempt /
+                                           kind / started_at / outcome
+training_kb.rules       render_rules_block(rules: Sequence[AuthoringRule]) -> str  # P19
+training_kb.content     render_markdown(content: TutorialContent) -> str          # P22
+                        diff_key(slug, n) / markdown_key(slug, n) / parse_version_id
+training_kb.ingress     operation_id_for(kind, canonical_id)                      # P32
+                        execution_name(operation_id)
+                        ← 現況核對 2026-09-14：這兩個在 ingress.py，沒有獨立模組
+training_kb.operations  OperationKind（含 "feedback-review"）                      # P10
+infra.training_kb_data_stack
+                        PRIVATE_PREFIXES 已含 "demo/previews/"                     # P09
+
+# 本批較早的波次產出（本 Phase 在 W3，下列全部在它之前落地）
+training_kb.ingress     import_feedback / import_view（由 import handler 逐筆呼叫） # P42（W2）
+                        approved_categories(repository) -> frozenset[str]          # P43（W3，同波）
+training_kb.pipelines.feedback
+                        ReviewMode = Literal["formal", "demo"]                     # P44（W1）
+training_kb.analytics.ratings
+                        average_rating(feedback) / negative_feedback_ids(feedback,
+                                                                         approved)
+                        format_average(value) -> str                               # P53（W1）
+training_kb.analytics.version
+                        version_metrics(version_id, *, repository, approved,
+                                        project_id) -> VersionMetrics              # P54（W2）
+training_kb.analytics.reopen
+                        reopen_stats(views, tickets, *, cluster_id,
+                                     published_at) -> ReopenStats(count,
+                                     reopen_users, viewers, rate)                  # P54（W2）
+training_kb.analytics.rules_metrics
+                        rule_counts(rules) / applied_count(versions, rule_id)
+                        bedrock_call_count(trace, *, operation_id=None) -> int     # P54（W2）
+demo.seed_loader        load_seed(directory: Path) -> SeedBundle
+                        verify_recipe(bundle) -> RecipeReport
+                        apply_seed(bundle, *, repository, now) -> tuple[str, ...]  # P56（W1）
 ```
+
+**（現況核對 2026-09-14：`approved_categories` 的 owner P43 與本 Phase 同在 W3。）** 若 P43 尚未落地就先做 `dashboard_view`，`approved` 一律由**呼叫端傳進來**（它已經是 `dashboard_view(*, repository, approved, project_id, batch)` 的必填 keyword），測試傳 `frozenset({"找不到按鈕", "缺少資訊"})` 即可；`view_model.py` 裡**一個字都不寫類別清單**。
 
 ### Produces
 
@@ -177,6 +246,12 @@ def dashboard_view(*, repository, approved, project_id, batch) -> dict: ...
 `run_id` 由呼叫端提供並寫進檔頭，兩份檔案第一行固定是「合成資料示範｜隔離預覽｜不寫入正式教學與統計」。兩個 key 一律用 `put_object(..., if_none_match=True)` 寫入，同一個 `run_id` 重跑會拿到 `ObjectAlreadyExists`（Phase 07 的 `PermanentError` 子類）而中止，避免蓋掉現場已經展示過的對照檔；要重跑就換 `run_id`。若現場另外展示正常 Ticket Analysis 建立 B v1，那是獨立流程，畫面上要與這兩份預覽分開標示（設計 §11.4：不能把 B 的兩份預覽算進 R-007 的三次套用）。
 
 **R-007 轉 active 之後的正式套用由本 Phase 觸發（00A D-68）。** 設計 §11.4 要求示範「規則真的被用到正式教學上」：種子（[Phase 56](./56-Phase56-O7核定Demo種子資料.md)）只把 `R-007` 放成 candidate，[Phase 55](./55-Phase55-規則驗證與狀態轉移.md) 的 `validate_rules` 把它轉成 active 之後，維護者在本 Phase 用 `uv run python -m demo.cli trigger-ticket --ticket-id <一張 B 類工單>` 跑一次**正常的** Ticket Analysis，產出 `share-summary@v1` 並讓該版的 `rules_applied == ["R-007"]`。這條路徑走的是正式 pipeline（`lambda:invoke` → ingress handler），不是上面的隔離預覽，所以它會寫 VERSION item、也會被 Phase 54 的 `applied_count` 算進去；證據由 [Phase 60](./60-Phase60-安全檢查與端到端完成證據.md) 證據索引的 `V4`（已驗證規則用到另一篇教學）那一列收下，實機演練排在它的 rehearse 步驟；本 Phase 只負責提供觸發入口與畫面上的區分標示。
+
+> **（現況核對 2026-09-14）O5 BLOCKED，這條路在真實 AWS 上跑不完。** Ticket Analysis 要呼叫 Titan（embedding）與 Claude（draft），兩者目前都回 `ValidationException: Operation not allowed`（報告 `docs/plan/report/o5-20260915T030245Z.md`），所以真實執行會在模型節點走 `PermanentError → Catch → PipelineFailed`。**那是 BLOCKED 證據，不是 bug，也不是通過**（COMMON.md §2 O5 列）。本 Phase 的責任邊界因此縮成：
+>
+> 1. `trigger-ticket` 的**送出內容**正確（`lambda.invoke` 的 payload、function 名稱來自 `load_settings()`），用假 client 斷言——本波可驗、必須綠。
+> 2. 「`share-summary@v1` 的 `rules_applied == ["R-007"]`」這條**在 moto ＋ `RecordingWriter`** 下驗（P40／P46 的既有做法），證明串接對了。
+> 3. **真實 AWS 的那一次**由 P60 的 rehearse 收；若 O5 屆時仍 BLOCKED，P60 照實記 BLOCKED，本 Phase §11 的對應列維持未勾並註明「等 O5」。
 
 四個 Dashboard 區塊與資料來源固定如下，其他欄位不加：
 
@@ -274,6 +349,8 @@ uv run pytest tests/integration/test_demo_preview.py -q
 - [ ] **Step 3：建立最小實作**
 
 同一批 `tickets` 各跑一次 `Writer.generate_json`：第一次規則區塊傳空字串，第二次傳 `render_rules_block([rule])`；兩份輸出各自 `TutorialContent.model_validate(...)` 後經 `render_markdown` 轉成 Markdown，前面加上固定檔頭（`SYNTHETIC_NOTICE`、`run_id`、規則開關狀態），再用 `Repository.put_object(key, body.encode("utf-8"), "text/markdown; charset=utf-8", if_none_match=True)` 寫到 `PREVIEW_PREFIX + run_id + "/off.md"` 與 `"/on.md"`。函式全程不呼叫 `put_meta`、`put_edge`、`update_meta`、`allocate_version`、`create_version`，也不回傳任何 `version_id`。
+
+（現況核對 2026-09-14：`Writer.generate_json` 的 `node` 是**必填** keyword，`generate_json` 會把它原樣寫進 `CallTrace`，所以兩次呼叫要傳**不同**的 node 名（例如 `preview-off`／`preview-on`），`call_breakdown` 才分得開。測試用 `tests/unit/conftest.py` 的 `RecordingWriter`，`replies` 先排好兩個 `TutorialContent` 形狀的 dict。**O5 BLOCKED** → 真實 Bedrock 上這兩次呼叫會 `PermanentError`；本 Task 的綠燈全部在 moto ＋ `RecordingWriter` 上取得，現場演練的失敗照實記 BLOCKED 並用 `Banner.fallback_reason` 標示「目前顯示預先執行結果」。）
 
 - [ ] **Step 4：補污染防護測試並跑綠燈**
 
@@ -382,16 +459,18 @@ git commit -m "feat(demo): Dashboard 標示與唯讀守門"
 
 ## 8. 驗收矩陣
 
-| 路徑 | 輸入 | 預期資料結果 |
-|---|---|---|
-| Happy | `trigger-review --mode demo` | 回傳 execution ARN，名稱來自 `execution_name(operation_id_for(...))`；沒有任何 DynamoDB 直接寫入。 |
-| Happy | 同一批 B 工單跑預覽 | 只新增 `off.md`、`on.md` 兩個私有 key；整張表與 `site/` 不變。 |
-| Failure | `--mode loose` | `SystemExit`；不啟動任何流程。 |
-| Failure | 同一個 `run_id` 重跑預覽，或 Dashboard 原始碼含寫入呼叫／金鑰字面值 | 前者丟 `ObjectAlreadyExists` 且不覆寫；後者守門測試 FAIL，不得展示。 |
-| Boundary | 版本零評分、零瀏覽 | 顯示「尚無評分」與「N/A：樣本不足」，不顯示 0 分或 0%。 |
-| Boundary | 一次執行含 embedding 與一次重試 | 呼叫數 `total` 含全部嘗試，`retries` 只數 `attempt >= 2` 的紀錄。 |
+| 路徑 | 輸入 | 預期資料結果 | 本批（2026-09-14）實際可驗到哪 |
+|---|---|---|---|
+| Happy | `trigger-review --mode demo` | 回傳 execution ARN，名稱來自 `execution_name(operation_id_for(...))`；沒有任何 DynamoDB 直接寫入。 | 可驗（假 boto3 client 斷言 payload 與 execution name 逐字）。真實送出的實機證據在 P60。 |
+| Happy | 同一批 B 工單跑預覽 | 只新增 `off.md`、`on.md` 兩個私有 key；整張表與 `site/` 不變。 | 可驗（moto ＋ `RecordingWriter`）。**真實 Bedrock 不行**（O5 BLOCKED）。 |
+| Failure | `--mode loose` | `SystemExit`；不啟動任何流程。 | 可驗。 |
+| Failure | 同一個 `run_id` 重跑預覽，或 Dashboard 原始碼含寫入呼叫／金鑰字面值 | 前者丟 `ObjectAlreadyExists` 且不覆寫；後者守門測試 FAIL，不得展示。 | 可驗。 |
+| Boundary | 版本零評分、零瀏覽 | 顯示「尚無評分」與「N/A：樣本不足」，不顯示 0 分或 0%。 | 可驗。 |
+| Boundary | 一次執行含 embedding 與一次重試 | 呼叫數 `total` 含全部嘗試，`retries` 只數 `attempt >= 2` 的紀錄。 | 可驗（`CallTrace` 是純記錄物件，不需要真模型）。 |
+| （新增）Blocked | 真實 AWS 上跑預覽或 `trigger-ticket` | 模型節點 `ValidationException: Operation not allowed` → `PermanentError` → Catch → PipelineFailed；報告記 **BLOCKED ＋ 錯誤原文逐字**，`Banner.fallback_reason` 標「目前顯示預先執行結果」。**不得**把預先產好的檔案說成本次成功（設計 §11.5）。 | 本批要留的證據形狀（實機由 P60 收）。 |
+| （新增）Gate | Dashboard 文案 | 固定「待維護者核定」；`missing_approvals` 非空時不得出現「O7 已通過」「雲端驗收已通過」。 | 可驗（Task 4 的守門測試 ＋ 報告措辭檢查）。 |
 
-人工驗收：開一次 Dashboard，逐格核對區塊 2 的 2.9／4.4 與區塊 3 的 7／2、0.7／0.2 能由 Phase 56 的種子原始資料重算；再打開 `off.md` 與 `on.md` 並排讀，確認兩份都標示為隔離預覽。不能只看測試顯示 PASS。
+人工驗收：開一次 Dashboard，逐格核對區塊 2 的 2.9／4.4 與區塊 3 的 7／2、0.7／0.2 能由 Phase 56 的種子原始資料重算；再打開 `off.md` 與 `on.md` 並排讀，確認兩份都標示為隔離預覽。不能只看測試顯示 PASS。（現況核對 2026-09-14：`off.md`／`on.md` 這一批只能是 moto ＋ 假 writer 產生的；人工驗收時要能一眼看出它們是**假模型輸出**，檔頭除了 `SYNTHETIC_NOTICE` 與 `run_id`，建議一併寫上 writer 類別名——這樣「隔離預覽」與「模型未開通」兩件事在紙面上分得開。）
 
 ## 9. 常見錯誤與停止條件
 
@@ -430,3 +509,13 @@ git commit -m "feat(demo): Dashboard 標示與唯讀守門"
 - [ ] 呼叫數含 embedding、Rote、Map 與重試，來源是 `bedrock_call_count` 與 `trace.to_json()`。
 - [ ] 橫幅固定顯示合成資料與批次；即時與模擬時間分開；備援標為「預先執行結果」。
 - [ ] 未把程式重算成功寫成 O7 已核定或雲端驗收已通過。
+- [ ] **`streamlit` 進 `[dependency-groups] dev` 且 `uv.lock` 一起提交**（現況核對 2026-09-14 新增；`streamlit` 目前沒有安裝）。
+- [ ] **`from demo.cli import ...` 在 `uv run pytest` 下 import 得到**（`pythonpath = ["."]` 由 P56 加；本 Phase 只確認它還在，現況核對 2026-09-14 新增）。
+
+**（現況核對 2026-09-14）本批注定勾不起來的一列，以及它的解除條件：**
+
+| 完成清單的列 | 為什麼本批勾不起來 | 解除條件 |
+|---|---|---|
+| `trigger-ticket` 能在 `R-007` 轉 active 後跑出**真實的** B v1 且 `rules_applied == ["R-007"]`（D-68） | **O5 BLOCKED**：真實 Ticket Analysis 會在 Titan／Claude 節點 `ValidationException: Operation not allowed` | 維護者送出 Bedrock model access 表單並核准（REP §8 第 1 項）；實機那一次由 P60 的 rehearse 收 |
+
+本批可以且必須勾完的替代證據：同一條串接在 **moto ＋ `RecordingWriter`** 下綠燈（證明串接對了），以及 `trigger-ticket` 送出的 payload／function 名稱由假 client 斷言逐字正確。兩者都**不等於** O5 通過，報告要分開寫。
