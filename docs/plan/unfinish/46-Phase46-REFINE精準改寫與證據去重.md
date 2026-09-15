@@ -2,6 +2,38 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **(a) 已存在、可直接重用（不要重寫）**
+> - `src/training_kb/content.py`：`allocate_version(tutorial_id, operation_id, operations, *, repository, reason, rules_applied) -> VersionPlan`（:194，**前三個是位置參數**，重送同 `operation_id` 走 `_replay_plan` 回同一版號）、`validate_content(content, known_feature_ids: frozenset[str]) -> None`（:290）、`parse_markdown(markdown) -> TutorialContent`（:431）、`create_version(plan, content, repository) -> TutorialVersion`（:617）、`verify_version_complete(version_id, repository) -> bool`（:691）。
+> - `src/training_kb/rules.py`：`rules_for_content(rules, step_types, validated_at_by_rule) -> dict[StepType, list[AuthoringRule]]`（:55，**回 dict**）、`render_rules_block(rules) -> str`（:44）、`applied_rule_ids(rules) -> list[str]`（:50）。`select_active_rules`（:25）同一個 `step_type` **最多回一條**（`matching[:1]`），缺 `validated_at` 直接 `PermanentError`。
+> - `src/training_kb/analytics/status_writer.py:36` `load_validated_at(repository) -> dict[str, datetime]`（P40 已建讀取端，檔案不存在回 `{}`；D-28）。
+> - `src/training_kb/operations.py`：`OperationCoordinator.load(operation_id) -> OperationRecord | None`（:290）、`record_model_output(operation_id, output_ref)`（:319，同 ref 不重複附加）、`acquire_lease(scope, owner, *, ttl_seconds, now) -> bool`（:376）、`release_lease(scope, owner)`（:416，非持有者呼叫無效果）。`OperationRecord` 有 `version_id`、`model_output_refs`（tuple）、`updated_at`。
+> - `src/training_kb/keys.py:182` `operation_ref(operation_id, name) -> "operations/<op>/<name>.json"`；`src/training_kb/ingress.py:243` `operation_id_for(kind, canonical_id) -> "op-<kind>-<canonical_id>"`，`OperationKind` 含 `"feedback"`（`operations.py:47`）。
+> - `src/training_kb/writing/schemas.py:53` `StepRewrite`（schema dict）；`writing/prompts.py:29` `_as_data`。
+> - `src/training_kb/models.py:173` `TutorialVersion(version_id, slug, supersedes, reason, rules_applied, s3_key, published_at)` —— `slug` 與 `s3_key` 都在，`get_tutorial(base_version.slug)` 成立。
+> - `src/training_kb/repository.py:399` `put_object(key, body, content_type, *, if_none_match)` —— `if_none_match` **是必填 keyword、沒有預設值**。
+> - `src/training_kb/pipelines/feedback.py`：controller 已預建空殼（commit `5f8a430`），P44／P45／P47 在 W1 先落地。
+>
+> **(b) 文件因上一批裁決／實作而修正的點**
+> 1. 「全域限制」寫 **O2 尚未 PASS** → **錯了，O2 已 PASS**（P11，`docs/plan/report/o2-20260914t182824z.md`）。因此 Task 3 Step 4 那句「**O2 未 PASS 前，本 Task 只能標 blocked**」**作廢**：`tests/integration/test_feedback_refine_retry.py` 要**實際執行**（`TKB_RUN_AWS_INTEGRATION=1 uv run pytest -m aws`）並把輸出寫進報告。記憶體 fake 的綠燈仍然不算永久去重證據，這一句保留。
+> 2. §4「檔案由 Phase 44 建立」→ controller 已預建空殼（COMMON.md R4）。本 Phase 是 **W2**（等 P45 的 `DiagnosisResult` 落地後才開始），仍只用 Edit、`# ---- Phase 46 ----` 區段。
+> 3. `prompt_refine_steps` 要加進 `writing/prompts.py`，該檔 W1 已被 P45（`prompt_diagnose_weak`）與 P47（`prompt_propose_rule`）各加一段；本 Phase 只 Edit 自己那段。
+> 4. `select_active_rules` 每個 `step_type` 只回一條（最近驗證時間優先、同時間取 `rule_id` 升序），所以 `_rules_for_hits` 的 `selected` dict 最多會有「命中步驟型態數」條規則，不是所有 active 規則。
+> 5. `prepare_refine` 片段裡 `repo.get_version(diagnosis.version_id)` 可能回 `None`（`get_version` 的回傳型別是 `TutorialVersion | None`）；落檔時要先擋 `None` 再取 `.slug`，否則 mypy strict 會擋下來。
+> 6. `record.updated_at` 是 `OperationRecord` 既有欄位，`acquire_lease(..., now=record.updated_at)` 成立（本計畫選擇不變）。
+>
+> **(c) gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - O1 provisionally accepted（D-71）；**O2 PASS**（P11）；**O3 FAIL**（P12，`docs/plan/report/o3-20260914t181109z.md`；P24／P25 已依協定 A 在 moto 重現切點，F49 未放寬）；**O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`）；O6 待核定；O4／O7 未到。
+> - **O5 BLOCKED**：`TKB_GENERATION_MODEL_ID` 不得填猜測值；單元測試用假 Writer；真實 AWS 上 `refine_steps` 節點會走 `PermanentError → Catch → PipelineFailed`，那是 BLOCKED 證據。
+> - **O3 FAIL**：本 Phase 本來就不發布（只建未發布版本、只寫私有前綴），不受影響；但報告不得把「建出 v2」寫成「已公開」。
+>
+> **(d) controller 裁決 R1–R11 的適用項**
+> - **R3（同檔併行）**：`pipelines/feedback.py` 與 `writing/prompts.py` 兩支共用檔在本批都有多人動過。只用 Edit 不用 Write；動手前先重讀要改的那一段；不重排、不重格式化、不改名別人的程式；共用檔只跑 `ruff format --check`；`git add` 只加自己的檔案路徑；整套測試紅燈若來自別的 Phase 進行中的測試檔，用 `--ignore=` 排除並在報告寫明。
+> - **R4**：空殼已建，直接 Edit。**R5**：文件片段是示意，簽名以 00A ＋ 既有程式為準。
+> - **R6／R7／R8**：逐 Task 先紅燈再綠燈；報告寫 `docs/plan/report/phases/2026-09-14-Phase46-REP.md`；commit trailer 照 COMMON.md R8。
+> - 測試檔照 00A §3.3 平放：`tests/unit/test_feedback_refine.py`、`tests/integration/test_feedback_refine_retry.py`（兩個 basename 全專案唯一）。
+
 **目標：** 用 Phase 45 的有效診斷只改命中步驟，其餘文字逐字相同，並讓同一批證據不會再產生第二個版本。
 
 **架構：** `pipelines/feedback.py` 先把同版同類的 Feedback ID 正規化成證據指紋，再依「lease → 選規則 → 配版號 → 呼叫模型 → 程式核對 → 建版」的固定順序產出一個**未發布**版本。模型只回命中步驟的新文字；版號、reason、`rules_applied` 與去重全部由程式決定。發布由 Phase 25 的 `Publisher` 在 Phase 48 執行，本階段不碰公開前綴。
@@ -15,7 +47,7 @@
 - 下一階段是 [Phase 47：Candidate 規則提出與溯源](./47-Phase47-Candidate規則提出與溯源.md)。
 - 本階段**不發布**、不切 `current_version`、不寫 `site/` 前綴、不提出規則、不修改回饋，也不建立新的 Tutorial 身分（只有 Ticket Analysis 能建）。
 - REFINE 只能以該篇**最近已發布版本**為基底（基底不是 `Tutorial.current_version` 時停止）；只注入 active 規則，且只取命中步驟型態的規則，複製原文不算本次套用（F29）。
-- gate 狀態：**O2 尚未 PASS**，不得宣稱永久去重或 FIFO；**O3 尚未 PASS**，公開發布路徑保留 FAIL。**O5 尚未通過**，`TKB_GENERATION_MODEL_ID` 保持 `<實測通過的 ID>` 佔位；FakeWriter 綠燈不等於 Bedrock 或 AWS 已通過。記憶體 fake 的綠燈不能當成 O2 已驗證。
+- gate 狀態（現況核對 2026-09-14，見 COMMON.md §2；原寫「O2 尚未 PASS」已不成立）：**O2 PASS**（P11，`docs/plan/report/o2-20260914t182824z.md`），永久去重與同版號可以依賴，但**記憶體 fake 的綠燈仍不算證據**，要靠 `tests/integration/test_feedback_refine_retry.py` 在真實表上跑；**O3 FAIL**（P12），公開發布路徑保留 FAIL，本 Phase 本來就不發布；**O5 BLOCKED**（不是「尚未通過」），`TKB_GENERATION_MODEL_ID` 保持 `<實測通過的 ID>` 佔位、不得填猜測值，假 Writer 綠燈不等於 Bedrock 或 AWS 已通過。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -67,8 +99,8 @@ RefinePlan(version_id="prepare-meeting@v2", base_version_id="prepare-meeting@v1"
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 修改 | `src/training_kb/pipelines/feedback.py` | `RefinePlan`、`evidence_fingerprint`、`refine_operation_id`、`refine_reason`、`evidence_of`、`prepare_refine`（檔案由 Phase 44 建立）。 |
-| 修改 | `src/training_kb/writing/prompts.py` | 依 Phase 17 的 `prompt_<node>` 命名加入 `prompt_refine_steps`（檔案由 Phase 17 建立）。 |
+| 修改 | `src/training_kb/pipelines/feedback.py` | `RefinePlan`、`REFINE_NODE`、`LEASE_TTL_SECONDS`、`evidence_fingerprint`、`refine_operation_id`、`refine_reason`、`evidence_of`、`prepare_refine`。（現況核對 2026-09-14：原寫「檔案由 Phase 44 建立」，實際上 controller 已預建空殼；本 Phase 是 **W2**，在 P44／P45／P47 的 W1 之後，只用 Edit 追加 `# ---- Phase 46 ----` 區段。） |
+| 修改 | `src/training_kb/writing/prompts.py` | 依 Phase 17 的 `prompt_<node>` 命名加入 `prompt_refine_steps`（檔案由 Phase 17 建立；`_as_data` 已在該檔，直接用）。**W1 的 P45／P47 已各加一段，只 Edit 自己那段。** |
 | 測試 | `tests/unit/test_feedback_refine.py` | 指紋、reason、精準改寫、越界改寫、規則紀錄、`NO_STEP` 與 `no_new_evidence`。 |
 | 測試 | `tests/integration/test_feedback_refine_retry.py` | lease 衝突、儲存中斷後以同 operation 重送、同版號與模型輸出重用。 |
 
@@ -359,6 +391,8 @@ def prepare_refine(diagnosis, *, repo, writer, operations, operation_id):
         return None                                  # NO_STEP（F24）
     category, feedback_ids = evidence_of(diagnosis, repo=repo)
     base_version = repo.get_version(diagnosis.version_id)
+    if base_version is None:                         # get_version 回 TutorialVersion | None
+        raise ContentError(f"{diagnosis.version_id} 不存在")   # mypy strict 需要這道守門
     tutorial = repo.get_tutorial(base_version.slug)
     if tutorial is None or tutorial.current_version != diagnosis.version_id:
         raise ContentError(f"{diagnosis.version_id} 不是 {base_version.slug} 最近已發布的版本")
@@ -477,7 +511,7 @@ uv run pytest tests/unit/test_feedback_refine.py -q
 uv run pytest tests/integration/test_feedback_refine_retry.py -q
 ```
 
-整合測試用真實 DynamoDB 與 S3（`@pytest.mark.aws`，未設 `TKB_RUN_AWS_INTEGRATION=1` 時 skip）：第一次在寫 STEP 關係前注入失敗，第二次用**同一個** `operation_id` 重送，斷言版號仍是 `prepare-meeting@v2`、`record.model_output_refs` 沒有增加、`writer.request_attempts == 1`。**O2 未 PASS 前，本 Task 只能標 blocked**：記憶體 fake 的綠燈不算永久去重已驗證。
+整合測試用真實 DynamoDB 與 S3（`@pytest.mark.aws`，未設 `TKB_RUN_AWS_INTEGRATION=1` 時 skip）：第一次在寫 STEP 關係前注入失敗，第二次用**同一個** `operation_id` 重送，斷言版號仍是 `prepare-meeting@v2`、`record.model_output_refs` 沒有增加、`writer.request_attempts == 1`。（現況核對 2026-09-14：原寫「**O2 未 PASS 前，本 Task 只能標 blocked**」——**O2 已於 P11 PASS**，所以這支整合測試要**實際以 `TKB_RUN_AWS_INTEGRATION=1` 執行**並把輸出寫進報告，不再標 blocked。）記憶體 fake 的綠燈本身仍不算永久去重已驗證，這一點不變。
 
 - [ ] **Step 5：提交**
 
@@ -531,4 +565,5 @@ git commit -m "test(feedback): 驗證 REFINE 租約、重送與同證據去重"
 - [ ] `rules_applied` 只含本次 prompt 真正注入的 active 規則；candidate 與未改步驟的規則都不入選。
 - [ ] `NO_STEP` 與 `no_new_evidence` 都回 `None` 且沒有配版號、沒有模型呼叫；儲存中斷後以同 operation 重送時版號與模型輸出都重用。
 - [ ] `REV` Rule 7、8 有直接 assertion，`VER` 2／4、`APL` 1、`ING` 30 標為相關並指出 primary。
-- [ ] 未把記憶體 fake 或 FakeWriter 的綠燈說成 O2／O3／O5 已通過，也沒有把未發布版本寫進 `site/`。
+- [ ] 未把記憶體 fake 或假 Writer 的綠燈當成證據；gate 語氣照現況：**O2 PASS**（整合測試要真的跑）、**O3 FAIL**、**O5 BLOCKED**；也沒有把未發布版本寫進 `site/`。
+- [ ] `pipelines/feedback.py` 與 `writing/prompts.py` 只用 Edit 追加 `# ---- Phase 46 ----` 自己的區段，沒有動 P44／P45／P47 的程式或格式。
