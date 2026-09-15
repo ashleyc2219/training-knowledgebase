@@ -215,9 +215,24 @@ def main(argv: list[str] | None = None) -> int: ...
 
 `InjectedFault` 繼承 `TransientError`，注入的失敗才會走完 Retry 再進 Catch，把設計 §14.2 的整條失敗路徑走一次（00A 第 4.1 節同一句）。
 
+> **現況核對（2026-09-15，Phase 59 review 修正回合 1）：上面這段程式片段已經與實作不同，
+> 以實作為準。** 兩處差異：
+> 1. `InjectedFault` **不是**子類，而是 `InjectedFault = TransientError` 的**相容別名**；
+>    `maybe_fail` 丟的是 `TransientError` **本身**（沒有 `.point` 屬性，切點名稱在訊息裡）。
+>    理由：Step Functions 的 `ErrorEquals` 比對 Lambda 回報的類別名字串、不認繼承，丟子類
+>    就命不中 D-53 第一條 retrier `["TransientError"]`（P41 §9 第 3 點的雲端實證；對照證據
+>    `op-ticket-t_883` 的 `LambdaFunctionFailed.error` 逐字 `TransientError` 三次）。
+>    00A 第 1230 列的名稱不變。
+> 2. 打錯的切點名稱丟的是 **`PermanentError`**（不是 `ValueError`）：`training_kb.errors` 的
+>    型別階層才是本專案判斷「可不可以重試」的唯一依據，`ValueError` 會被
+>    `run_sequence`／`_start_once` 當成不認得的例外。P41 建第一片時就是這樣寫的，本 Phase 沿用。
+> 3. `TKB_ENV` 的 prod 比對是 `.strip().lower() == "prod"`（`" Prod "`／`"PROD"` 一樣擋住）。
+
 ## 6. 設計細節
 
 `active_fault` 有兩道保險：`TKB_ENV` 是 `prod` 時一律回 `None`，不論 `TKB_FAULT` 設什麼；切點名稱不在 `FAULT_POINTS` 時立刻丟 `ValueError`，讓打錯字變成明確錯誤而不是安靜地不生效。`maybe_fail` 進入前也先檢查名稱，所以就算沒啟用，寫錯的切點名也會在第一次執行被抓到。
+
+> **現況核對（2026-09-15）：** 實作丟的是 **`PermanentError`** 不是 `ValueError`（理由見 §5 的現況核對），prod 比對用 `.strip().lower()`。其餘（兩道保險、`maybe_fail` 進入前先檢查名稱）與本段一致。
 
 [Phase 12](./12-Phase12-O3發布切換整合驗證.md) spike 的切點與本 Phase 的注入開關是**兩套名稱**，兩邊都不改名，對照關係固定如下：
 
@@ -323,6 +338,8 @@ def maybe_fail(point: str, env: Mapping[str, str] | None = None) -> None:
     if active_fault(env) == point:
         raise InjectedFault(point)
 ```
+
+> **現況核對（2026-09-15）：上面這份片段是 W0 寫的示意，實作與它有三處不同**（`InjectedFault` 是別名、打錯名丟 `PermanentError`、prod 比對用 `.strip().lower()`），逐條說明見 §5 的現況核對方塊。P41 已經建好這支檔的第一片，本 Phase 是**擴充**：改注入型別並補上五處 `maybe_fail`。
 
 - [x] **Step 4：把五個切點接進程式並跑綠燈**
 
@@ -651,8 +668,10 @@ if __name__ == "__main__":
 - [x] 同事件重送不新增版本、回饋樣本或 PROC 成功樣本；closed execution 先核對 `status == "done"` 再判定。
 - [x] `check_asl.py` 包裝 `assert_safe_asl`，對三份 ASL 全部 `[通過]`，刻意刪掉一個 Catch 或第二條 retrier 時會失敗。
 - [x] Phase 12 與本 Phase 的兩套切點名稱有對照表，兩邊都沒有改名。
-- [x] `recovery-<YYYYMMDD-HHMM>.md` 有 execution ARN 與前後狀態；未完成前不宣稱 publish 故障驗收已通過。
-- [x] **（承接 Phase 24 §11）真實 AWS 上重跑單篇三個切點，並用公開 website endpoint（HTTP）做人工驗收**，證據在 `recovery-<YYYYMMDD-HHMM>.md`。
-- [x] **（承接 Phase 25 §11）真實 AWS 上重跑多篇五個切點，用公開 website endpoint 的 HTTP 回應同時讀 A 與 B 兩頁存證**；出現 partial 就標 `FAIL（O3）`，不改寫成通過。
+- [x] `docs/plan/report/recovery-20260915-0644.md` 有 execution ARN 與前後狀態；**沒有**宣稱 publish 故障驗收已通過（O3 維持 FAIL）。
+- [x] **（承接 Phase 24 §11）真實 AWS 上重跑單篇的發布切點（切點 3 `publish_before_transact`、切點 4 `publish_after_transact_before_site`，外加建版切點 1／2），並用公開 website endpoint（**HTTP**，S3 website 沒有 HTTPS）在注入當下讀舊版頁與（應該不存在的）新版頁存證**——與 §7 Task 3 Step 4A 第 1、3 項同一組。證據：`docs/plan/report/recovery-20260915-0644.md` §1／§2／§3。
+- [x] **（承接 Phase 25 §11）真實 AWS 上重跑 Phase 25 §8 的多篇五個切點**（1 `assert_batch_publishable` 拒絕、2 `prepare` 第 2 篇失敗、3 `inspect` 回 `ok=False`、4 交易中斷／被取消、5 promote 第 2 篇失敗），**每個切點都用 website endpoint 的 HTTP 回應同時讀 A 與 B 兩頁存證**。證據：`docs/plan/report/recovery-20260915-0644.md` §4（切點 5）與附錄 A（切點 1、2、3、4a、4b）。
+
+  **切點 5 出現 partial（A 的 v2 HTTP 200、B 的 v2 HTTP 404），標 `FAIL（O3）`，不改寫成通過、不放寬 F49、不刪頁回滾**；其餘四個切點在注入當下 A／B 兩頁都是 404（讀者看到的仍是整批舊狀態），復原後都回到 200／200。
 - [x] `resume_publish` 的 `a2` 復原在真實 AWS 上驗過：**先 `Publisher.prepare` 再 `promote_site_objects`**，補齊後 `site/` 頁面不含 `data-published="false"`。
 - [x] 需要模型的雲端節點在報告中標 `BLOCKED（O5）` 並附 `get-execution-history` 的 `error`／`cause` 原文；Release 端到端標 `BLOCKED（O6）`。未執行的項目一律不標 green。
