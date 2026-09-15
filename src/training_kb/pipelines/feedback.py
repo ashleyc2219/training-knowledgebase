@@ -17,7 +17,7 @@ from typing import Any, Literal
 from training_kb.analytics.ratings import average_rating
 from training_kb.config import Thresholds
 from training_kb.errors import ContentError, PermanentError
-from training_kb.ingress import DEFAULT_FEEDBACK_CATEGORIES
+from training_kb.ingress import DEFAULT_FEEDBACK_CATEGORIES, operation_id_for
 from training_kb.keys import rule_pk
 from training_kb.models import (
     AuthoringRule,
@@ -418,3 +418,73 @@ def propose_candidate(group: CandidateGroup, *, writer: Writer, repo: Repository
     )
     repo.put_meta(candidate)
     return candidate
+
+
+# ---- Phase 46（owner）：REFINE 精準改寫與證據去重 ----
+# 交付 `REFINE_NODE`、`RefinePlan`、`evidence_fingerprint`、`refine_operation_id`、
+# `refine_reason`、`evidence_of`、`prepare_refine` 與五個 module-private helper
+# （`REV` Rule 7、8；設計 §7.5、§7.6、§8.1、§8.2、§14.1、§14.2）。
+# `LEASE_TTL_SECONDS` 是同一個 Phase 的交付物，但由 controller 預先宣告在本檔開頭
+# （讓 W2 併行的 P51 不必等本 Phase），所以這裡**不重複宣告**。
+#
+# 停止點：`create_version` ＋ `verify_version_complete` 通過後回 `RefinePlan`。
+# **不發布、不切 `current_version`、不寫 `site/`、不提規則、不建立新的 Tutorial 身分。**
+
+REFINE_NODE = "refine_steps"
+"""本節點寫進 Phase 15 `CallTrace` 的名字；`generate_json` 的 `node=` 一律傳它（00A §6.9）。"""
+
+
+def evidence_fingerprint(version_id: str, category: str, ids: Iterable[str]) -> str:
+    """把「版本 ＋ 類別 ＋ 排序去重的 Feedback ID」雜湊成穩定字串（64 個十六進位字元）。
+
+    **只吃穩定的東西。** 平均分、留言原文、執行時間都不進指紋：顯示文字改一個字就換一個
+    指紋的話，永久去重（F23）會在第一次改文案時失效。ID 先 `sorted(set(...))`，所以
+    `f_2, f_1, f_1` 與 `f_1, f_2` 得到同一個值；換版本或換類別則一定不同。
+
+    `ensure_ascii=False` ＋ `sort_keys=True` ＋ 固定 `separators`：同一批證據在不同機器、
+    不同 Python 版本上要算出逐字相同的 JSON，才算得出逐字相同的雜湊。
+    """
+    payload = {"version_id": version_id, "category": category,
+               "feedback_ids": sorted(set(ids))}
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def refine_operation_id(version_id: str, category: str, ids: Iterable[str]) -> str:
+    """這批證據的 REFINE `operation_id`：`op-feedback-<64 位指紋>`（00A §3.3）。
+
+    **指紋就是 operation 的 canonical id**（本計畫選擇）。呼叫端（Phase 48）用它產生每個
+    target 的 operation 再交給 `OperationCoordinator.accept`，一次解決三件事：同一批證據
+    跨日重跑撞到同一筆 `OPS#` 永久紀錄（F23）；同一次 Review 的不同 target 有不同
+    operation，`allocate_version` 不會兩篇共用版號；儲存重試沿用原版號與原模型輸出。
+
+    永久去重本身仍然依賴 O2（P11 已 PASS），不是靠這個函式；它只保證「同證據＝同 ID」。
+    """
+    return operation_id_for("feedback", evidence_fingerprint(version_id, category, ids))
+
+
+def refine_reason(category: str, feedback_ids: Iterable[str]) -> str:
+    """改版原因，逐字 `feedback:<n> 則 <category>`（00A §3.3 三種格式之一、D28）。
+
+    `<n>` 是**去重後**的證據筆數：同一個 ID 送兩次不會把 8 變成 9。
+    """
+    return f"feedback:{len(set(feedback_ids))} 則 {category}"
+
+
+def evidence_of(diagnosis: DiagnosisResult, *, repo: Repository) -> tuple[str, tuple[str, ...]]:
+    """回（唯一類別, 排序去重的 Feedback ID）；跨類別或有缺漏一律 `ContentError`。
+
+    **一次 REFINE 只處理一個類別的證據。** 混類別的改寫沒有單一改法，reason 也寫不出
+    `feedback:<n> 則 <category>`；缺漏則代表診斷引用了這一版沒有的回饋，兩者都是內容
+    問題（`PermanentError` 子類），不重試。
+
+    只看 `diagnosis.version_id` 那一版的回饋：別版、別類的回饋連讀都不會讀進來。
+    """
+    wanted = frozenset(diagnosis.feedback_ids)
+    rows = [row for row in repo.list_feedback_of_version(diagnosis.version_id)
+            if row.id in wanted]
+    categories = {row.category for row in rows}
+    if len(rows) != len(wanted) or len(categories) != 1:
+        raise ContentError(f"{diagnosis.version_id} 的證據必須是同一個類別且不可缺漏")
+    return categories.pop() or "", tuple(sorted(wanted))
