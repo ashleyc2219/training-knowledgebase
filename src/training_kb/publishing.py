@@ -67,6 +67,7 @@ from training_kb.content import (
     verify_version_complete,
 )
 from training_kb.errors import ObjectAlreadyExists, PublishError
+from training_kb.faults import maybe_fail
 from training_kb.keys import META, OPERATIONS_PREFIX, operation_ref, tutorial_pk, version_pk
 from training_kb.models import Tutorial, TutorialContent, TutorialVersion, bare_id
 from training_kb.operations import OperationCoordinator
@@ -528,6 +529,7 @@ class Publisher:
         if not inspection.ok:
             raise PublishError("發布前檢查未通過：" + "；".join(inspection.problems))
         loaded = [self._load(version_id)[:2] for version_id in prepared.version_ids]
+        maybe_fail("publish_before_transact")   # Phase 59 切點 3：交易還沒送出，全舊
         items = build_commit_transaction(prepared, repository=self._repository, now=now)
         index = self._repository.transact_write(items)
         if index is not None:
@@ -591,6 +593,9 @@ class Publisher:
         """
         operation_id = prepared.request.operation_id
         self._record_pending_promote(prepared)
+        # Phase 59 切點 4：交易已提交、待補清單（或單篇的 ledger 版號）已就緒、公開物件還沒寫。
+        # 例外會被 `_after_transaction` 轉成 `PublishError`（訊息帶 `_cut_point` 代號）。
+        maybe_fail("publish_after_transact_before_site")
         for version, tutorial in loaded:
             self._restage(version, tutorial, operation_id, now=now)
         for version_id in prepared.version_ids:

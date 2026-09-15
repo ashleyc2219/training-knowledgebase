@@ -59,6 +59,7 @@ from training_kb.errors import (
     PermanentError,
     TransientError,
 )
+from training_kb.faults import maybe_fail
 from training_kb.keys import (
     edge_sk,
     feature_pk,
@@ -650,6 +651,7 @@ def create_version(plan: VersionPlan, content: TutorialContent,
     current_md = render_markdown(content)
     previous_md, previous_name = _previous_markdown(plan, repository)
     put_private_artifact(repository, md_key, current_md, MARKDOWN_CONTENT_TYPE)
+    maybe_fail("s3_after_md")            # Phase 59 切點 1：md 已寫、diff 還沒
     put_private_artifact(
         repository, diff_key(plan.slug, plan.number),
         make_diff(previous_md, current_md, previous_name=previous_name, current_name=md_key),
@@ -657,6 +659,7 @@ def create_version(plan: VersionPlan, content: TutorialContent,
     )
     if existing is None:
         repository.put_meta(planned)
+    maybe_fail("ddb_after_version")      # Phase 59 切點 2：VERSION 已建、關係邊還沒
     _write_edges(plan, content, repository)
     return _verified(plan.version_id, repository)
 

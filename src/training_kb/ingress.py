@@ -37,6 +37,7 @@ from training_kb.errors import (
     PermanentError,
     TransientError,
 )
+from training_kb.faults import maybe_fail
 from training_kb.keys import feedback_pk, operation_ref, parse_pk, version_pk, view_pk
 from training_kb.models import (
     Feedback,
@@ -414,6 +415,9 @@ def _accept(kind: OperationKind, canonical_id: str, project_id: str,
     if accepted.record.input_ref != input_ref:
         operations.record_normalized(operation_id, input_ref)
     assert_time_left(deadline, step="start-execution")
+    # Phase 59 切點 5：刻意插在 `_start_once` **之外**——插在裡面會被它的 `except Exception`
+    # 攔到並先 `operations.fail(...)` 把 ledger 標成 failed，重送就走不到 D-45 的續跑分支。
+    maybe_fail("start_execution")
     # ASL input 的 project_id 以 **ledger** 為準：續跑時本次請求的設定可能已經換過
     # （例如 `Settings.project_id` 改了），但這筆 operation 從接受當下就綁定一個專案。
     arn = _start_once(wiring.starter, operations, PIPELINE_FOR_KIND[kind], operation_id,

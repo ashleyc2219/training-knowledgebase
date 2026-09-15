@@ -10,11 +10,13 @@ TKB_FAULT=<切點名稱>   一次只注入一個切點
 TKB_ENV=prod           一律不注入（正式環境的保險，比對任何切點之前就先擋）
 ```
 
-`InjectedFault` 繼承 `TransientError`，所以本機與 moto 的復原測試會走完「重試 -> Catch」
-這條路。**但在雲端不會**：Step Functions 的 `ErrorEquals` 比對的是 Lambda runtime 回報的
-類別名字串（`InjectedFault`），不認繼承，所以第一條 retrier（`["TransientError"]`）不會
-命中。要在真實 AWS 上實證重試，注入點必須丟 `TransientError` **本身**——Phase 41 的
-`pipelines.common.maybe_fail_task`（`TKB_FAULT_TASK`）就是為此存在的另一個開關。
+**注入一律丟 `TransientError` 本身**（controller 2026-09-14 裁決）。Phase 41／52 在真實
+AWS 實證過：Step Functions 的 `ErrorEquals` 比對的是 Lambda runtime 回報的**類別名字串**、
+不認繼承，所以子類（原本的 `InjectedFault`）不會命中第一條 retrier `["TransientError"]`。
+`InjectedFault` 因此降級成**相容別名**（00A 第 1230 列的名稱不變，仍可 `except InjectedFault`
+或 `pytest.raises(InjectedFault)`），但沒有任何地方用它建立例外實例。同一條理由也是 Phase 41
+`pipelines.common.maybe_fail_task`（`TKB_FAULT_TASK`）存在的原因：那支是 Lambda **Task 層**
+的開關，本模組這五個是 library 路徑上的切點，兩者互補。
 """
 
 import os
@@ -39,8 +41,14 @@ ENV_NAME_ENV = "TKB_ENV"
 PRODUCTION = "prod"
 
 
-class InjectedFault(TransientError):
-    """人為注入的暫時性失敗；只有 `maybe_fail` 會丟它。"""
+InjectedFault = TransientError
+"""人為注入的暫時性失敗；**就是 `TransientError` 本身**的相容別名（00A 第 1230 列）。
+
+原本它是 `TransientError` 的子類，但雲端的 `errorType` 會變成 `InjectedFault` 這個字串，
+ASL 的 `ErrorEquals: ["TransientError"]` 因此比不中（Phase 41 §9 第 3 點的實證）。改成別名
+之後，注入的失敗在雲端與本機都是同一個類別名，走完 Retry 才進 Catch；呼叫端既有的
+`except InjectedFault` 仍然成立，因為兩個名字指的是同一個類別。
+"""
 
 
 def active_fault(env: Mapping[str, str] | None = None) -> str | None:
@@ -61,11 +69,15 @@ def active_fault(env: Mapping[str, str] | None = None) -> str | None:
 
 
 def maybe_fail(point: str, env: Mapping[str, str] | None = None) -> None:
-    """切點命中就丟 `InjectedFault`，否則什麼都不做。
+    """切點命中就丟 `TransientError`，否則什麼都不做。
 
     `point` 不在 `FAULT_POINTS` 裡代表呼叫端打錯名字（程式錯誤），當場 `PermanentError`。
+
+    丟的是 `TransientError` **本身**而不是子類：雲端的 `errorType` 就是這個類別名，
+    ASL 第一條 retrier `ErrorEquals: ["TransientError"]` 才會命中（見模組說明）。
+    訊息帶切點名稱，`describe-execution` 的 `cause` 裡看得出是哪一個切點。
     """
     if point not in FAULT_POINTS:
         raise PermanentError(f"未知的故障切點：{point}")
     if active_fault(env) == point:
-        raise InjectedFault(f"注入故障切點：{point}")
+        raise TransientError(f"注入故障切點：{point}")
