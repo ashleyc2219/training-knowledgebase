@@ -8,12 +8,15 @@ controller 2026-09-14 預建空殼：讓同一波次的 Phase 只用 Edit 追加
 
 import json
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
+from pydantic import ValidationError
+
 from training_kb.analytics.status_writer import load_validated_at
-from training_kb.clock import now_utc
+from training_kb.clock import now_utc, to_iso
 from training_kb.config import Thresholds
 from training_kb.content import (
     VersionPlan,
@@ -21,6 +24,7 @@ from training_kb.content import (
     create_version,
     parse_markdown,
     parse_version_id,
+    retire_tutorial,
     validate_content,
     verify_version_complete,
 )
@@ -46,9 +50,12 @@ from training_kb.models import (
     TutorialStep,
 )
 from training_kb.operations import AcceptOperation, OperationCoordinator
+from training_kb.pipelines.common import Deps, JSONValue
 from training_kb.pipelines.feedback import LEASE_TTL_SECONDS
+from training_kb.publishing import Publisher
 from training_kb.repository import DynamoValue, Repository, item_to_model
 from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
+from training_kb.site import SiteRenderer
 from training_kb.vectors import cosine
 from training_kb.writing.client import Writer
 from training_kb.writing.prompts import prompt_release_rewrite, prompt_safety_net_confirm
@@ -636,3 +643,139 @@ def prepare_update(release: Release, hits: Sequence[StepHit], *, repository: Rep
         finally:
             operations.release_lease(scope, operation_id)
     return tuple(plans)
+
+
+# ---- Phase 52：RETIRE 分支與 release-update 的 Task 包裝 ----
+# 設計 §7.4、§8.4、§14；00A §7（固定 state 欄位）、D-25（handler 放本檔）、D-51（task 名稱）、
+# D-83（退役之後重寫教學索引頁）。本段只追加，不改 Phase 49／50／51 的任何一行。
+
+RETIRE_RECORD_NAME = "retire"
+"""退役紀錄的檔名；完整 key 是 `operation_ref(operation_id, 這個值)`（00A §6.6）。"""
+
+SUCCESSORS_NAME = "successors"
+"""維護者事先放好的 `{slug: successor_slug}`；**事件本身不得指定後繼**（F54）。"""
+
+HIT_REF_SEPARATOR = "#"
+"""`hit_refs` 的元素固定是 `"<version_id>#<number>"`；state 只放座標，不放步驟原文。"""
+
+
+def retire_for_release(release: Release, hits: Sequence[StepHit], *,
+                       repository: Repository, successor_by_slug: Mapping[str, str],
+                       now: datetime) -> tuple[str, ...]:
+    """把這則 `removed` 命中的每一篇教學退役，回傳退役成功的 slug（依 slug 升序）。
+
+    入口只接受 `removed`（REL Rule 9）：`renamed`／`changed` 走 Phase 51 的 UPDATE 路徑，
+    誤接進來是呼叫端接錯線，`PermanentError` 讓 ASL 的 Catch 導向 `PipelineFailed`。
+
+    **successor 的唯一來源是 `successor_by_slug`**，也就是維護者事先寫進
+    `operations/<operation_id>/successors.json` 的對照表；Release 的 `evidence`／`new_name`
+    一個字都不看（F54）。沒有對到的 slug 傳 `None` 進去，Phase 26 的 `retire_tutorial`
+    照樣完成退役（F19）。合法性檢查（存在、非自身、狀態、不成環）由 `resolve_successor`
+    負責，本函式不重寫一份。
+
+    同一篇被兩個步驟命中時只退役一次：先對 `hit.slug` 去重再排序，所以呼叫次數等於**篇數**
+    而不是命中步驟數，而且 `retire_tutorial` 本身在無變更時是零次 `update_meta`（冪等）。
+    """
+    if release.kind is not ReleaseKind.REMOVED:
+        raise PermanentError(f"retire_for_release 只處理 removed，收到 {release.kind}")
+    retired: list[str] = []
+    for slug in sorted({hit.slug for hit in hits}):
+        retire_tutorial(slug, reason=f"release:{release.id}",
+                        successor=successor_by_slug.get(slug),
+                        repository=repository, now=now)
+        retired.append(slug)
+    return tuple(retired)
+
+
+# --- state 與輸入的小工具（七個 Task 共用）-----------------------------------
+
+
+def _text(state: dict[str, JSONValue], field: str) -> str:
+    """從 state 取一個必填的非空字串；缺了就當場說出缺哪一個欄位。"""
+    value = state.get(field)
+    if not isinstance(value, str) or not value:
+        raise PermanentError(f"release-update state 缺少 {field}")
+    return value
+
+
+def _load_release(state: dict[str, JSONValue], repository: Repository) -> Release:
+    """把接入層存下的 canonical 輸入（`input_ref`）讀回成 `Release`。
+
+    state 只帶 ref 不帶事件全文，所以需要它的 Task 各自讀回來（設計 §14.3）。pydantic 的
+    `ValidationError` 轉成 `PermanentError`，ASL 的 `ErrorEquals` 才看得到已知的類別名。
+    """
+    ref = _text(state, "input_ref")
+    body = repository.get_object(ref)
+    if body is None:
+        raise PermanentError(f"讀不到 canonical 輸入 {ref}")
+    try:
+        return Release.model_validate(json.loads(body.decode("utf-8")))
+    except (ValidationError, ValueError) as error:
+        raise PermanentError(f"canonical 輸入不是合法 Release：{ref}") from error
+
+
+def _load_successors(repository: Repository, operation_id: str) -> dict[str, str]:
+    """維護者的 `{slug: successor_slug}`；檔案不存在就是空 dict（F19／F54）。"""
+    body = repository.get_object(operation_ref(operation_id, SUCCESSORS_NAME))
+    if body is None:
+        return {}
+    try:
+        loaded = json.loads(body.decode("utf-8"))
+    except ValueError as error:
+        raise PermanentError(f"successors.json 不是合法 JSON：{operation_id}") from error
+    if not isinstance(loaded, dict):
+        raise PermanentError(f"successors.json 必須是物件：{operation_id}")
+    return {str(key): str(value) for key, value in loaded.items()}
+
+
+def _hit_ref(hit: StepHit) -> str:
+    """`StepHit` -> `"<version_id>#<number>"`（文件 §5 固定格式）。"""
+    return f"{hit.version_id}{HIT_REF_SEPARATOR}{hit.number}"
+
+
+def _hits(state: dict[str, JSONValue]) -> tuple[StepHit, ...]:
+    """`hit_refs` -> `StepHit`；slug 用 Phase 20 的 `parse_version_id` 還原，不再查表。"""
+    raw = state.get("hit_refs")
+    refs: Sequence[JSONValue] = raw if isinstance(raw, list) else ()
+    hits: list[StepHit] = []
+    for item in refs:
+        version_id, separator, number = str(item).rpartition(HIT_REF_SEPARATOR)
+        if not separator or not number.isdigit():
+            raise PermanentError(f"hit_ref 格式必須是 <version_id>#<number>：{item!r}")
+        hits.append(StepHit(parse_version_id(version_id)[0], version_id, int(number)))
+    return tuple(sorted(hits, key=lambda hit: (hit.slug, hit.number)))
+
+
+def task_retire(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """RETIRE 分支：退役每一篇命中教學 → 重寫它們的索引頁（D-83）→ 寫退役紀錄。
+
+    **順序不可顛倒**：索引頁的內容取自 `repository.get_tutorial(slug)`，`status` 還沒變成
+    `retired` 之前寫出去的頁面不會有退役區塊。`Publisher._write_tutorial_index` 走
+    `_put_index` → `_put_public_object(..., if_none_match=False)`，索引是可重建的投影所以
+    允許覆寫；**已發布的版本頁一個 byte 都不動**（協定 A 下不可覆寫），也不呼叫
+    `prepare`／`inspect`／`commit`、不建立任何新版本。直接用既有的私有方法是
+    **本計畫選擇（2026-09-14）**：複製一份索引渲染邏輯遲早會與 `Publisher` 分岔。
+
+    `retire.json` 用條件寫入且**存在就不重寫**：同 `operation_id` 重送要拿回同一份紀錄，
+    `retired_at` 也不會被第二次執行的時鐘改掉。
+    """
+    if state.get("action") != "RETIRE":
+        return dict(state)
+    repository = deps.need_repository()
+    operation_id = _text(state, "operation_id")
+    release = _load_release(state, repository)
+    successors = _load_successors(repository, operation_id)
+    now = deps.now()
+    slugs = retire_for_release(release, _hits(state), repository=repository,
+                               successor_by_slug=successors, now=now)
+    publisher = Publisher(repository, SiteRenderer(), deps.operations)
+    for slug in slugs:
+        publisher._write_tutorial_index(slug)      # D-83：只重寫索引頁，不重發版本頁
+    ref = operation_ref(operation_id, RETIRE_RECORD_NAME)
+    if repository.get_object(ref) is None:
+        body = [{"slug": slug, "reason": f"release:{release.id}", "retired_at": to_iso(now),
+                 "successor": successors.get(slug)} for slug in slugs]
+        repository.put_object(
+            ref, json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+            "application/json", if_none_match=True)
+    return {**state, "result_ref": ref}
