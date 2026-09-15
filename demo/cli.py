@@ -32,6 +32,11 @@ Lambda。可信入口設定是**維護者宣告**的（`TICKET_ENTRIES`／`RELEA
 **O7 未核定**：`demo/seed/approvals/` 的三份核定紀錄是空的，所以 `seed` 會印出
 `missing_approvals` 並回非 0、**一個 item 都不寫**。這是正確行為，不是壞掉；要重新核定是
 維護者的事（`demo/seed_loader.py` 沒有、也不得有任何自動填值路徑）。**沒有 `--force`。**
+
+**`seed` 的寫入要明示 `--apply`**（修正波：final review C#2）：`apply_seed` 以
+`create_only=False` 覆寫 `TUTORIAL#prepare-meeting`、`RULE#R-007`、`FEATURE#Prepare`
+這些正式資料的主鍵，目標由 `load_settings()` 的環境變數決定。沒有 `--apply` 時只印報告與
+**解析出來的 table／bucket**；`TKB_ENV=prod` 時連 `--apply` 都拒絕。
 """
 
 import argparse
@@ -48,6 +53,7 @@ from demo.seed_loader import BANNER, apply_seed, load_seed, render_report, verif
 from training_kb.clock import now_utc, to_iso
 from training_kb.config import load_settings
 from training_kb.errors import PermanentError
+from training_kb.faults import is_production
 from training_kb.ingress import execution_name, operation_id_for
 from training_kb.models import Release, Ticket
 from training_kb.pipeline_starter import state_machine_arns
@@ -90,6 +96,8 @@ PROXY_NOTE = ("rate 是 proxy：窗口內先瀏覽後同群開票的不同使用
 NO_RATING = "尚無評分"
 NO_SAMPLE = "N/A：樣本不足"
 PENDING_APPROVAL = "待維護者核定"
+APPLY_FLAG = "--apply"
+"""`seed` 真的寫入的明示開關（修正波：final review C#2）。沒有它就只報告不寫。"""
 
 
 def _boto_client(service: str) -> Any:
@@ -123,8 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     seed = sub.add_parser(
-        "seed", help=f"載入 Demo 種子；O7 未核定時只報告不寫入（{PENDING_APPROVAL}）")
+        "seed", help=f"載入 Demo 種子；O7 未核定或沒有 {APPLY_FLAG} 時只報告不寫入")
     seed.add_argument("--dir", default=DEFAULT_SEED_DIR, help="種子目錄")
+    seed.add_argument(APPLY_FLAG, action="store_true",
+                      help="真的寫入 DynamoDB 與私有 S3 前綴（覆寫既有的 Demo 主鍵）")
 
     ticket = sub.add_parser("trigger-ticket", help="以種子裡的一張工單觸發正式 Ticket Analysis")
     ticket.add_argument("--ticket-id", required=True, help="種子 tickets.json 的工單 ID")
@@ -180,10 +190,24 @@ def _seed_bundle(directory: str) -> Any:
 
 
 def _seed(args: argparse.Namespace) -> int:
-    """唯一直接寫入的子命令：`load_seed` -> `verify_recipe` -> （核定齊備才）`apply_seed`。
+    """唯一直接寫入的子命令：`load_seed` -> `verify_recipe` -> （兩道門都過才）`apply_seed`。
 
-    `o7_ready` 為假時印出缺哪幾份核定紀錄並回非 0，**不建立任何 client、不寫任何資料**。
-    這是設計 §18 O7 的要求：程式重算成功不等於維護者核定，也沒有 `--force` 這個出口。
+    **兩道門，缺一不可**：
+
+    ```text
+    1 O7 核定齊備   o7_ready；缺核定就印 missing_approvals 回非 0（沒有 --force 這個出口）
+    2 明示 --apply  修正波（final review C#2）：沒有它就只印報告與**解析出來的目標**
+    ```
+
+    第 2 道是修正波加的。`apply_seed` 對 `TUTORIAL#prepare-meeting`、`RULE#R-007`、
+    `RULE#R-012`、`FEATURE#Prepare` 這些**正式資料的主鍵**做 `create_only=False` 覆寫，
+    目標表與 bucket 由 `load_settings()` 決定——維護者的 shell 指到哪就寫到哪。原本唯一的
+    煞車是「O7 還沒核定」，核定一簽下去，`demo.cli seed` 就變成一個沒有確認步驟的覆寫指令。
+
+    `TKB_ENV=prod` 一律拒絕（與 `faults.is_production` 同一個寬鬆比對）：合成資料明示是
+    合成的（`SYNTHETIC_NOTICE`），不該進正式環境。
+
+    印出解析後的表名與 bucket 是刻意的：寫入目標來自環境變數，看得到才確認得了。
     """
     bundle = _seed_bundle(args.dir)
     report = verify_recipe(bundle)
@@ -193,6 +217,14 @@ def _seed(args: argparse.Namespace) -> int:
         print("→ 未寫入任何資料。請維護者在 demo/seed/approvals/ 逐份簽名後再跑一次。")
         return 1
     settings = load_settings()
+    print(f"寫入目標：table={settings.table_name} bucket={settings.content_bucket} "
+          f"region={_region()}")
+    if not args.apply:
+        print(f"→ 未寫入任何資料。確認上面的目標無誤後，加上 {APPLY_FLAG} 再跑一次。")
+        return 0
+    if is_production():
+        print(f"{BANNER}：TKB_ENV 是正式環境，拒絕寫入合成種子資料。", file=sys.stderr)
+        return 2
     region = _region()
     repository = Repository(
         boto3.resource("dynamodb", region_name=region).Table(settings.table_name),

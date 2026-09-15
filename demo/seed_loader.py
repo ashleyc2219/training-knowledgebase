@@ -517,6 +517,12 @@ def _write_version(version: TutorialVersion, content: TutorialContent, *,
 def apply_seed(bundle: SeedBundle, *, repository: Repository, now: datetime) -> tuple[str, ...]:
     """把整份種子寫進 DynamoDB 與私有 S3 前綴；回傳這次實際寫入的 PK 清單。
 
+    **一律 `create_only=False`，也就是覆寫**（修正波：final review C#2 要求寫明）：種子的
+    主鍵是 `TUTORIAL#prepare-meeting`、`RULE#R-007`、`RULE#R-012`、`FEATURE#Prepare` 這些
+    正式資料會用到的名字，所以同名的既有 item 會被合成資料蓋掉。呼叫端有義務先確認目標表
+    ——`demo.cli seed` 因此要 `--apply`、會先印出解析到的 table／bucket，並在
+    `TKB_ENV=prod` 時拒絕。
+
     `now` 是載入時間：模擬 `published_at` 只用於歷史回放（設計 §11.5），晚於載入時間的
     版本一律拒絕，避免把合成的未來時間當成真實發布。
 
@@ -571,6 +577,12 @@ def creation_tickets(bundle: SeedBundle) -> tuple[Ticket, ...]:
 def cluster_demo_tickets(bundle: SeedBundle, *, writer: Writer, repository: Repository,
                          operation_id: str) -> dict[str, str]:
     """逐筆 `ensure_embedding` -> `assign_cluster`，回 `{ticket_id: cluster_id}`。
+
+    **這支函式會寫 DynamoDB**（修正波：final review C#2 要求寫明）：每一筆都做一次
+    `repository.put_meta(..., create_only=False)`，把 embedding 與 `cluster_id` 覆寫回
+    `TICKET#<id>`。`repository` 指到哪張表由呼叫端決定；唯一的正式呼叫端
+    `demo/scripts/cluster_demo_tickets.py` 用 `load_settings()` 解析，所以要 `--write`
+    才會跑（`TKB_ENV=prod` 一律拒絕）。
 
     分群邏輯完全沿用 Phase 38（cosine >= 0.85 取最高、同分 `cluster_id` 升序、無命中開新群），
     本檔**不另寫一套**。每一筆算完就寫回 `cluster_id`，下一筆才比得到前面已成形的群中心。

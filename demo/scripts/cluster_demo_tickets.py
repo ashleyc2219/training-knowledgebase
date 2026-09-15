@@ -1,6 +1,13 @@
 """用**真實** Titan embedding 對二十筆 Demo 工單分群（Phase 56 Task 3）。
 
-    uv run python -m demo.scripts.cluster_demo_tickets [種子目錄]
+    uv run python -m demo.scripts.cluster_demo_tickets --write [種子目錄]
+
+**`--write` 是必要的明示開關（修正波：final review C#2）。** 本檔不只輸出本機 JSON：
+`seed_loader.cluster_demo_tickets` 對二十筆工單各做一次
+`put_meta(..., create_only=False)`，把算出來的 `cluster_id` 寫回 **`load_settings()` 解析出
+來的那張 DynamoDB 表**（正式帳號的 `training_kb`）。原本的 docstring 只提本機 JSON，指令
+本身也沒有任何確認步驟。沒有 `--write` 時本檔**不建立任何 client**、一個位元組都不寫；
+`TKB_ENV=prod` 時連 `--write` 都拒絕。寫入前會先把解析出的 table／bucket 印出來。
 
 流程完全走既有函式，本檔沒有第二份分群邏輯：
 
@@ -41,6 +48,7 @@ from demo.seed_loader import (
 from training_kb.clock import now_utc, to_iso
 from training_kb.config import load_settings
 from training_kb.errors import PermanentError, TransientError
+from training_kb.faults import is_production
 from training_kb.keys import ticket_pk
 from training_kb.models import Ticket
 from training_kb.repository import Repository
@@ -54,6 +62,8 @@ OPERATION_ID = "demo-cluster-01"
 EMBED_NODE = "ticket-embedding"
 BLOCKED = "BLOCKED"
 OBSERVED = "OBSERVED"
+WRITE_FLAG = "--write"
+"""真的寫回 DynamoDB 的明示開關（修正波：final review C#2）。沒有它就什麼都不做。"""
 
 
 def clustering_report(*, status: str, reason: str | None, probed_at: datetime,
@@ -130,8 +140,23 @@ def main(argv: Sequence[str]) -> int:
     """跑一次真實分群；成功寫兩份檔案回 `0`，Bedrock 擋住寫 BLOCKED 報告回 `1`。
 
     退出碼 `1` 是**誠實的失敗**，不是可以忽略的警告：O7 的分群條件沒有取得證據。
+    退出碼 `2` 是「沒有做」：缺 `--write`，或 `TKB_ENV` 是正式環境。
     """
-    directory = Path(argv[0]) if argv else SEED_DIR
+    flags = [item for item in argv if item.startswith("-")]
+    rest = [item for item in argv if not item.startswith("-")]
+    if WRITE_FLAG not in flags:
+        print(f"這支腳本會把 cluster_id 寫回 DynamoDB；要真的執行請加上 {WRITE_FLAG}。",
+              file=sys.stderr)
+        print(f"用法：python -m demo.scripts.cluster_demo_tickets {WRITE_FLAG} [種子目錄]",
+              file=sys.stderr)
+        return 2
+    if is_production():
+        print("TKB_ENV 是正式環境，拒絕寫入合成的 Demo 分群結果。", file=sys.stderr)
+        return 2
+    settings = load_settings()
+    print(f"寫入目標：table={settings.table_name} bucket={settings.content_bucket} "
+          f"region={settings.aws_region}")
+    directory = Path(rest[0]) if rest else SEED_DIR
     bundle = load_seed(directory)
     tickets = creation_tickets(bundle)
     repository, writer, trace = _wiring()

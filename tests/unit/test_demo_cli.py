@@ -305,3 +305,84 @@ def test_cli_source_has_no_credentials_or_region_literal() -> None:
     source = Path("demo/cli.py").read_text(encoding="utf-8")
     for banned in ("AKIA", "aws_secret", "aws_access_key", "us-east-1", "123456789012"):
         assert banned not in source
+
+
+# --- 修正波（final review C#2）：兩條未設防的正式資料寫入路徑 -----------------
+
+
+def _ready_report(bundle: Any) -> Any:
+    """`verify_recipe` 的替身：假裝 O7 核定已齊備，好測 `--apply` 這一層守門。
+
+    **不動 `demo/seed/approvals/`**：那三份核定紀錄是維護者的欄位，程式不得代填。
+    """
+    from dataclasses import replace
+
+    from demo.seed_loader import verify_recipe
+
+    return replace(verify_recipe(bundle), missing_approvals=(), o7_ready=True)
+
+
+
+def test_seed_without_apply_only_reports(
+        aws: FakeAws, capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 核定齊備但沒有 `--apply`，Then 只印報告與解析出的表／bucket，零寫入。
+
+    `apply_seed` 用 `create_only=False` 覆寫 `TUTORIAL#prepare-meeting`、`RULE#R-007`、
+    `FEATURE#Prepare` 這些**正式資料的主鍵**，目標表由 `load_settings()` 決定——維護者
+    的 shell 指到哪就寫到哪。原本唯一的煞車是 O7 還沒核定（final review C#2）。
+    """
+    monkeypatch.setattr("demo.cli.verify_recipe", _ready_report)
+
+    assert run(["seed", "--dir", SEED_DIR], aws) == 0
+
+    printed = capsys.readouterr().out
+    assert "--apply" in printed
+    assert "training_kb" in printed          # 寫之前先把解析出的目標印出來
+    assert aws.services == []                # 連 client 都沒有要過
+
+
+def test_seed_refuses_to_apply_in_production(
+        aws: FakeAws, capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given `TKB_ENV=prod`，Then 連 `--apply` 都拒絕（合成資料不進正式環境）。"""
+    monkeypatch.setattr("demo.cli.verify_recipe", _ready_report)
+    monkeypatch.setenv("TKB_ENV", "prod")
+
+    assert run(["seed", "--dir", SEED_DIR, "--apply"], aws) != 0
+
+    assert "TKB_ENV" in capsys.readouterr().err
+    assert aws.services == []
+
+
+def test_cluster_script_without_write_does_not_touch_dynamodb(
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Given 沒有 `--write`，Then 分群腳本不建立任何 client、也不寫回 `cluster_id`。
+
+    `demo/scripts/cluster_demo_tickets.py` 的 docstring 只承諾輸出本機 JSON，實際上
+    `cluster_demo_tickets` 對二十筆工單各做一次 `put_meta(..., create_only=False)`，
+    目標是 `load_settings()` 解析出來的**正式**表（final review C#2）。
+    """
+    from demo.scripts import cluster_demo_tickets as script
+
+    def refuse() -> Any:
+        raise AssertionError("不該建立任何 client")
+
+    monkeypatch.setattr(script, "_wiring", refuse)
+
+    assert script.main(["--dry-run", SEED_DIR]) == 2
+    assert "--write" in capsys.readouterr().err
+
+
+def test_cluster_script_refuses_to_write_in_production(
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from demo.scripts import cluster_demo_tickets as script
+
+    def refuse() -> Any:
+        raise AssertionError("不該建立任何 client")
+
+    monkeypatch.setattr(script, "_wiring", refuse)
+    monkeypatch.setenv("TKB_ENV", "prod")
+
+    assert script.main(["--write", SEED_DIR]) == 2
+    assert "TKB_ENV" in capsys.readouterr().err
