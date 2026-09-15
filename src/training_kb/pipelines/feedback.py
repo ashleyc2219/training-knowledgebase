@@ -13,13 +13,21 @@ from datetime import datetime
 from typing import Any, Literal
 
 from training_kb.config import Thresholds
-from training_kb.errors import PermanentError
+from training_kb.errors import ContentError, PermanentError
 from training_kb.ingress import DEFAULT_FEEDBACK_CATEGORIES
-from training_kb.models import Feedback, Tutorial, TutorialStatus
+from training_kb.keys import rule_pk
+from training_kb.models import (
+    AuthoringRule,
+    Feedback,
+    RuleStatus,
+    StepType,
+    Tutorial,
+    TutorialStatus,
+)
 from training_kb.repository import Repository, item_to_model
 from training_kb.writing.client import Writer
-from training_kb.writing.prompts import prompt_diagnose_weak
-from training_kb.writing.schemas import WeakDiagnosis
+from training_kb.writing.prompts import prompt_diagnose_weak, prompt_propose_rule
+from training_kb.writing.schemas import RuleProposal, WeakDiagnosis
 
 # ---- Phase 46（owner）：P51 import 同一個，不重新宣告（00A §5.4／§6.9）。 ----
 # controller 2026-09-14 預先宣告（值來自 00A §5.4），讓 W2 併行的 P51 不必等 P46。
@@ -174,13 +182,33 @@ class DiagnosisResult:
 
 def _validated_items(reply: Mapping[str, Any],
                      valid: frozenset[int]) -> tuple[tuple[int, ...], dict[int, str]]:
-    """把模型回的 `items` 過成「編號存在於本版」的診斷，依 `number` 升序輸出。"""
+    """schema 通過之後的業務驗證（設計 §7.6）：只留真實存在、理由非空的步驟，依 `number` 升序。
+
+    四道檢查的順序固定：
+
+    1. `number` 必須是**真正的**整數。`bool` 要先擋——`True` 是 `int` 的子型別，
+       `True in frozenset({1})` 會成立，只比對「編號在不在」擋不掉它。
+    2. `number` 必須是目前這一版真的有的步驟（`valid`），否則整個 item 丟掉；
+       模型指到不存在的步驟時**不可**改成整篇重寫（設計 §14.1）。
+    3. `reason` 去頭尾空白後必須非空，否則整個 item 丟掉：沒有理由的命中無從改寫。
+    4. 同 `number` 重複時，原因相同就去重；**原因不同就丟 `ContentError`**（本計畫選擇）。
+       任選第一筆或最後一筆會讓同一份輸入重送得到不同結果，寧可明確失敗。
+
+    全部被丟掉就回 `((), {})`，也就是 `NO_STEP`——那是合法的業務結果，不是模型故障。
+    """
     reasons: dict[int, str] = {}
     for item in reply.get("items") or ():
         number = item.get("number")
-        if number not in valid:
+        reason = str(item.get("reason") or "").strip()
+        if isinstance(number, bool) or not isinstance(number, int):
             continue
-        reasons[number] = str(item.get("reason"))
+        if number not in valid or not reason:
+            continue
+        if number in reasons and reasons[number] != reason:
+            raise ContentError(
+                f"步驟 {number} 有互相衝突的診斷：{reasons[number]} / {reason}"
+            )
+        reasons[number] = reason
     numbers = tuple(sorted(reasons))
     return numbers, {number: reasons[number] for number in numbers}
 

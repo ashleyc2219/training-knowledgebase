@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from training_kb.errors import ContentError
 from training_kb.models import Feedback, StepType, TutorialStep
 from training_kb.pipelines.feedback import DiagnosisResult, WeakTarget, diagnose_weak
 
@@ -90,3 +91,48 @@ def test_diagnose_weak_keeps_only_existing_steps(
     assert result.reasons == {3: "沒有指出按鈕所在頁面與位置"}
     assert result.version_id == VERSION_ID
     assert result.feedback_ids == weak_target.feedback_ids
+
+
+@pytest.mark.parametrize("items", [
+    [],
+    [{"number": 99, "reason": "不存在"}],
+    [{"number": 1, "reason": "   "}],
+    [{"number": "1", "reason": "編號不是整數"}],
+    [{"number": True, "reason": "布林不是步驟編號"}],
+])
+def test_diagnose_weak_returns_no_step_for_no_valid_item(
+    items: list[dict[str, Any]], fake_repo: FakeRepo, diagnosis_writer: Callable[..., Any],
+    weak_target: WeakTarget,
+) -> None:
+    """Given 模型一個有效 item 都沒回，When 診斷，Then 回空診斷（`NO_STEP`），不是錯誤。
+
+    `True` 這個案例不能省：Python 的 `bool` 是 `int` 的子類，`True in frozenset({1})` 會成立，
+    只比對「編號在不在」擋不掉它。
+    """
+    fake_repo.steps = [step(1)]
+    writer = diagnosis_writer(items)
+    result = diagnose_weak(weak_target, repo=fake_repo, writer=writer,
+                           operation_id="op-no-step")
+    assert result.step_indexes == ()
+    assert result.reasons == {}
+
+
+def test_same_number_with_same_reason_is_deduplicated(
+    fake_repo: FakeRepo, diagnosis_writer: Callable[..., Any], weak_target: WeakTarget,
+) -> None:
+    """Given 同一個步驟編號回了兩次相同原因，When 診斷，Then 去重成一個步驟 3。"""
+    fake_repo.steps = [step(1), step(2), step(3)]
+    writer = diagnosis_writer([HIT, dict(HIT)])
+    result = diagnose_weak(weak_target, repo=fake_repo, writer=writer, operation_id="op-dup")
+    assert result.step_indexes == (3,)
+    assert result.reasons == {3: HIT["reason"]}
+
+
+def test_same_number_with_conflicting_reason_is_rejected(
+    fake_repo: FakeRepo, diagnosis_writer: Callable[..., Any], weak_target: WeakTarget,
+) -> None:
+    """Given 同一個步驟編號回了兩個不同原因，When 診斷，Then 丟 `ContentError`，不任選一筆。"""
+    fake_repo.steps = [step(1), step(2), step(3)]
+    writer = diagnosis_writer([HIT, {"number": 3, "reason": "步驟順序錯誤"}])
+    with pytest.raises(ContentError, match="步驟 3"):
+        diagnose_weak(weak_target, repo=fake_repo, writer=writer, operation_id="op-conflict")
