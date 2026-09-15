@@ -181,7 +181,7 @@ Catch ["States.ALL"] -> PipelineFailed (Fail) -> 整次 execution FAILED；不�
 
 ### Task 1：固定本機序列與跳過分支
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/pipelines/test_ticket_flow.py
@@ -205,11 +205,11 @@ def test_non_recurring_run_skips_model_and_version(local_deps):
 
 （現況核對 2026-09-14：`local_deps` 這個 fixture **不存在**，`tests/unit/pipelines/conftest.py` 目前只有 `fake_operations`／`fake_clock`／`embedding_writer`／`fake_repo`／`settings`／`ticket_without_embedding`／`clustered`／`unclustered`；上面斷言用的 `writer.generate_calls`／`repository.created_versions` 兩個屬性也不存在，P40 的替身叫 `FakeWriter.calls` 與 `FakeRepository.writes`。**本計畫選擇：** `local_deps` 定義在 `tests/unit/pipelines/test_ticket_flow.py` **自己的檔案裡**，用 `from test_ticket_decide import FakeOperations, FakeRepository, FakeWriter, dt` 組出 `Deps`——不要去改 `tests/unit/pipelines/conftest.py`，同一波次的 P48／P52 也會用到那支檔（COMMON.md R3）。斷言改寫成既有屬性，例如 `local_deps.writer.calls == []` 與「表裡沒有 `VERSION#` item」。）
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_flow.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/pipelines/test_ticket_flow.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `cannot import name 'TICKET_ANALYSIS_TASKS'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def task_name(task):                        # pipelines/common.py
@@ -231,11 +231,15 @@ def run_ticket_analysis(state, deps):
 
 其餘六個 task 照同一形狀：先檢查前置條件，不適用就 `return dict(state)`，適用才呼叫 Phase 38–40 的函式並把小型結果併回 state。`name_gap` 自己已經把結果寫進 `operations/<op>/gap-naming.json`（Phase 39），所以這個 task 只要把 ref 放進 state；`gap` 與 `feature_id` 都不進 state。`task_decide_action` 用 `gap_ref` 把那份 JSON 讀回來（它是 `dict`，欄位用 `naming["feature_id"]` 取，不是屬性），組出 Phase 40 的 `TicketGap` 再呼叫 `decide_ticket_action` 與 `record_decision`。
 
-- [ ] **Step 4：補三條分支測試，執行 `uv run pytest tests/unit/pipelines/test_ticket_flow.py -q` 確認綠燈**
+- [x] **Step 4：補三條分支測試，執行 `uv run pytest tests/unit/pipelines/test_ticket_flow.py -q` 確認綠燈**
 
-再補 recurring 但 `NO_FEATURE`（0 個版本、有 `ticket-decision.json`）、recurring 且 `KEEP`（0 個版本）、recurring 且 `CREATE`（有 `version_id`、`published_at` 仍為 `null`）三個案例，都要斷言 state 不含工單全文與向量。
+再補 recurring 但 `NO_FEATURE`（0 個版本、有 `ticket-decision.json`）、recurring 且 `KEEP`（0 個版本）、recurring 且 `CREATE`（有 `version_id`）三個案例，都要斷言 state 不含工單全文與向量。
 
-- [ ] **Step 5：提交**
+**本計畫選擇（2026-09-14）：** CREATE 案例的 `published_at` **不是** `null`。設計 §7.3 的成功條件是「CREATE 經第 8 節發布後，讀者可讀新教學」，所以 `PublishVersion` 真的呼叫 `Publisher.prepare/commit`，本機案例斷言 `published is True`、`published_at` 有值、`current_version` 已切換。**真實 AWS 上這條路徑到不了**（O5 BLOCKED 擋在 `NameGap`），所以雲端仍然只能宣稱到「未發布 v1 已建立」以前的節點。
+
+**本計畫選擇（2026-09-14）：** `task_decide_action` 只在 KEEP／NO_FEATURE 時寫 `ticket-decision.json`；CREATE 的那一份由 `create_first_version` 在版本建好之後寫（Phase 40 已固定的順序），三種結果仍然都有紀錄，但不會先寫一份「還沒建版」的 CREATE 紀錄。
+
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/ticket.py src/training_kb/pipelines/common.py tests/unit/pipelines/test_ticket_flow.py
@@ -244,7 +248,7 @@ git commit -m "feat(ticket): 組合 ticket-analysis 流程"
 
 ### Task 2：鎖定 ASL 結構與 handler 分派
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/infra/test_ticket_asl.py
@@ -288,11 +292,11 @@ def test_asl_task_names_and_branches_match_python(asl):
     assert (TransientError.__name__, PermanentError.__name__) == ("TransientError", "PermanentError")
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/infra/test_ticket_asl.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/infra/test_ticket_asl.py -q` 確認紅燈**
 
 預期 FAIL，因 `infra/stepfunctions/ticket-analysis/v1.json` 尚未建立（訊號是 `FileNotFoundError`）。若改成 `cannot import name 'RETRY'`，代表 Phase 29 的 `RETRY` 還沒依 D-53 改成兩條 retrier 的 tuple，**先回頭改 Phase 29**，不要在本 Phase 自己補一份常數。
 
-- [ ] **Step 3：建立 ASL 與兩層 handler**
+- [x] **Step 3：建立 ASL 與兩層 handler**
 
 ```python
 # src/training_kb/pipelines/common.py：共用 Lambda 的唯一入口
@@ -335,11 +339,11 @@ def ticket_analysis_handler(event, context):
 
 **現況核對（2026-09-14）：原本只攔 `ModuleNotFoundError`，現在不夠。** controller 已預建 `src/training_kb/pipelines/feedback.py` 與 `release.py`（**只有 docstring**，commit `5f8a430`），所以這兩支模組 `import_module` **會成功**，缺的是 `feedback_review_handler`／`release_update_handler` 這兩個屬性——不補上面那段 `getattr(..., None)` 的話，Lambda 會丟 `AttributeError`（ASL 看到的 `errorType` 就變成 `AttributeError`，既不在 `ErrorEquals` 裡、訊息也看不出是「P48 還沒做」）。兩條分支都要有單元測試：（1）`pipeline` 不在三個名稱內 → `PermanentError`；（2）`pipeline="feedback-review"`（模組在、handler 不在）→ `PermanentError` 且訊息含屬性名。第二條測試會在 P48 落地後自然失效，那時由 P48 改掉，本 Phase 不預先放寬。
 
-- [ ] **Step 4：執行 `uv run pytest tests/unit/infra/test_ticket_asl.py tests/unit/pipelines/test_ticket_flow.py -q` 確認綠燈**
+- [x] **Step 4：執行 `uv run pytest tests/unit/infra/test_ticket_asl.py tests/unit/pipelines/test_ticket_flow.py -q` 確認綠燈**
 
 再手動刪掉 ASL 裡任何一個 `Catch` 重跑一次，`assert_safe_asl` 必須讓測試變紅；確認後改回來。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add infra/stepfunctions/ticket-analysis/v1.json src/training_kb/pipelines/common.py tests/unit/infra/test_ticket_asl.py
@@ -348,7 +352,7 @@ git commit -m "feat(infra): 建立 ticket-analysis ASL"
 
 ### Task 3：把 stack 部署上去並取得 AWS 實際證據
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # 續寫 tests/unit/infra/test_ticket_asl.py
@@ -412,11 +416,27 @@ def test_iam_covers_the_three_gaps_the_previous_batch_left():
 
 **現況核對（2026-09-14）：原本的測試用 `TrainingKbStack(cdk.App(), "TrainingKbApp")` 單獨建構。** 不成立——table 與 bucket 屬於**另一支已部署的** `TrainingKbData` stack（P09），`TrainingKbStack` 必須拿得到它們才有東西可以授權、也才填得出 `TKB_CONTENT_BUCKET`。**本計畫選擇：** 建構子改成 `TrainingKbStack(scope, construct_id, *, data: TrainingKbDataStack, **kwargs)`，由 `infra/app.py` 把同一個 App 裡的 data stack 傳進來，CDK 會自動產生跨 stack 的 `Export`／`Fn::ImportValue`（不必手動改 P09 的 `CfnOutput` 加 `export_name`，那支檔的 owner 是 P09、下一個修改者是 P57）。兩支 stack 的 `env` 必須相同，所以 `infra/app.py` 用同一個 `cdk.Environment`。上面第三個測試的 `Condition` 斷言形狀依實際 CDK 產出調整，但「只有一條 `DeleteItem` 敘述、而且帶條件」這件事不得放寬。
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/infra/test_ticket_asl.py -q` 確認紅燈**
+**本計畫選擇（2026-09-14，controller 裁決，推翻上一段的跨 stack 參照）：**
+`TrainingKbStack(scope, construct_id, *, content_bucket: str | None = None, **kwargs)`
+**不接 data stack**。table 與 bucket 改用 `Table.from_table_attributes(table_name=TABLE_NAME,
+global_indexes=[TARGET_INDEX])` 與 `Bucket.from_bucket_name(...)` 以**純字串名稱**接進來：
+
+- 樣板裡因此沒有任何 `Fn::ImportValue`（有一條測試守住），
+  `cdk deploy TrainingKbApp --exclusively` 才能單獨部署，不碰同一波次 Phase 57 正在改的
+  `infra/training_kb_data_stack.py`；跨 stack `Export` 一旦建立，之後 data stack 想改那兩個
+  輸出就會被 export 卡住。
+- table 名用 P09 模組既有的 `TABLE_NAME` 常數（同一份真相）；bucket 名沒有預設值，
+  依序取建構參數 → cdk context `tkb:content-bucket` → 環境變數 `TKB_CONTENT_BUCKET`，
+  三個都沒有就當場失敗（絕不退回 `load_settings` 的 `training-kb-content`）。
+- 授權仍然只給單表與五個 key 前綴；**不用** `grant_read_write_data()`，因為 CDK 那個 grant
+  會把 `dynamodb:DeleteItem` 混進同一條敘述，D-79 要的「只有一條 `DeleteItem`」就守不住。
+- 單元測試因此**不建** `TrainingKbData`，只建 `TrainingKbApp` 一支。
+
+- [x] **Step 2：執行 `uv run pytest tests/unit/infra/test_ticket_asl.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `No module named 'infra.training_kb_stack'`。
 
-- [ ] **Step 3：建立 CDK 資源**
+- [x] **Step 3：建立 CDK 資源**
 
 先做相依 layer（COMMON.md R2；現況核對 2026-09-14：原文件沒有這一步，`Code.from_asset("src")` 上雲後第一次 import `training_kb.models` 就會 `ModuleNotFoundError: pydantic`）。
 
@@ -506,6 +526,21 @@ webhook_fn.add_to_role_policy(iam.PolicyStatement(
 
 `dynamodb:DeleteItem` 的條件要**實測**：DynamoDB 的 IAM 條件鍵只有 `dynamodb:LeadingKeys`（比 **PK**）與 `dynamodb:Attributes` 等，**沒有**直接比 `SK` 的條件鍵。所以 D-79 要的「只准刪 `SK begins_with APPLIED_TO#`」在 IAM 層做不到逐字等價。**本計畫選擇（需寫進報告，並在 00A D-79 留一行）：** 授權寫成「單一 table、只給 `DeleteItem`」＋ **程式層**由 `Repository.delete_edge` 的 `DELETABLE_RELATIONS` 白名單守住，並在 Task 3 的 IAM 斷言測試裡固定「只有一條 `DeleteItem` 敘述、資源只有這張表、而且沒有 `dynamodb:*`」。若實作時查到可用的條件鍵組合能表達 `SK` 前綴，優先用它，並把實際 policy JSON 貼進報告。
 
+**本計畫選擇（2026-09-14，實作後確認）：** 查過 DynamoDB 的 IAM 條件鍵清單，**沒有**
+任何條件鍵能表達 `SK begins_with`（`dynamodb:LeadingKeys` 比的是 PK、`dynamodb:Attributes`
+比的是屬性名），所以逐字的 D-79 在 IAM 層做不到。落地的形狀是**單一條、沒有 Condition 的**
+`dynamodb:DeleteItem`，資源只有 `table/training_kb` 本體（連索引都不給），範圍由程式層
+`Repository.DELETABLE_RELATIONS == {"APPLIED_TO"}` 守住——真實表上已實測：
+`delete_edge(..., "ASKS_ABOUT", ...)` 丟 `PermanentError: 不允許刪除 ASKS_ABOUT 邊`，
+`delete_edge(..., "APPLIED_TO", ...)` 成功（報告 §4）。`Template` 斷言改成「恰好一條
+`DeleteItem`、資源只有這張表、沒有任何 `dynamodb:*`」。
+
+**本計畫選擇（2026-09-14）：** `infra/app.py` 在三個前提（`TKB_GITHUB_WEBHOOK_SECRET`、
+bucket 名稱、`build/lambda-layer/`）任一缺席時**只跳過** `TrainingKbApp` 並把原因印到
+stderr。`cdk` 的任何子命令都會先合成整個 app，直接讓它 `KeyError` 會連 `TrainingKbData`
+的部署都做不了（同一波次 Phase 57 正要部署它）。`TrainingKbStack` 本身仍然維持
+`os.environ[SECRET_ENV]` 的硬性要求，所以不可能部署出一支拿不到 secret 的 Lambda。
+
 `approved_model_arns`：**O5 BLOCKED 期間只列已核定用途的 embedding 模型** `arn:aws:bedrock:<region>::foundation-model/amazon.titan-embed-text-v2:0`；生成模型的 ARN 等 O5 通過、`TKB_GENERATION_MODEL_ID` 有實測值之後再加（00A §3.5：不得填猜測值）。
 
 Lambda 叫 `training-kb-pipeline-task`（三條 pipeline 共用），state machine 才叫 `training-kb-ticket-analysis`；兩者同名會讓 Phase 48／52 無法沿用同一支函式（00A D-23）。webhook 的 secret 由環境變數 `TKB_GITHUB_WEBHOOK_SECRET` 提供，**不寫進 CDK 程式或 repo**：部署時由執行 `cdk deploy` 的 shell 帶進來（`TKB_GITHUB_WEBHOOK_SECRET=<值> AWS_REGION=us-east-1 … command npx aws-cdk@2 deploy TrainingKbApp`），`infra/training_kb_stack.py` 只用 `os.environ["TKB_GITHUB_WEBHOOK_SECRET"]` 讀它；**值不得寫進 `.env.example`、報告、log 或 commit**，缺值時讓 synth 當場 `KeyError` 失敗（比部署出一支永遠驗簽失敗的 Lambda 好）。**本計畫選擇：** MVP 不引入 Secrets Manager／SSM（沒有已核定的服務清單），但要在報告寫明「明文環境變數會出現在 Lambda console 與 `get-function-configuration`」這個已知取捨，並列為 P60 `check_secrets` 的核對項。`training-kb-import` 與 `training-kb-analytics` 的入口在 Phase 42／54 才存在，本 Phase 不建立它們的資源（D-58）。
@@ -519,7 +554,7 @@ data = TrainingKbDataStack(app, "TrainingKbData", env=env)
 TrainingKbStack(app, "TrainingKbApp", data=data, env=env)   # 同一個 env，跨 stack 參照才成立
 ```
 
-- [ ] **Step 4：跑綠燈，再存 ASL 快照、合成並部署**
+- [x] **Step 4：跑綠燈，再存 ASL 快照、合成並部署**
 
 ```bash
 uv run pytest tests/unit/infra/test_ticket_asl.py -q
@@ -543,7 +578,7 @@ TKB_GITHUB_WEBHOOK_SECRET="$SECRET" AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-e
 
 綠燈後才部署。`save_asl_snapshot` 把**與部署完全相同的 bytes** 以 `put_object(..., if_none_match=True)` 存成私有 S3 快照 `stepfunctions/ticket-analysis/v1.json`（設計 §9.3；執行教學流程 Rule 10）；同一版重跑會丟 `ObjectAlreadyExists`，這是預期行為，改定義就升成 `v2.json`。`cdk` 是 Node.js 套件，指令**不加** `uv run`（00A §3.1、D-22）；stack id 用 `TrainingKbApp`，與 `infra/app.py` 裡的 `TrainingKbStack(app, "TrainingKbApp", data=data)` 一致（D-43）。**現況核對 2026-09-14：原本寫成裸 `cdk synth`／`cdk deploy`，本機跑不起來**——互動 shell 把 `node` 定成會拒絕的 function（`Security: node blocked`），一律 `command npx aws-cdk@2 <子命令>` 並帶 `AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1`（全案固定 `us-east-1`，`aws configure` 的預設是 `ap-northeast-1`，CLI 也一律帶 `--region us-east-1`）。實際可用的部署紀錄見 `docs/plan/report/phases/2026-09-14-Phase09-REP.md` §7（CDK CLI 2.1141.0、`CDKToolkit` 已 bootstrap、`TrainingKbData` 已 `CREATE_COMPLETE`）。`--outputs-file` 指到 scratchpad（專案外），**不要提交 `cdk.out/`**。`save_asl_snapshot` 那段要先 `export TKB_TABLE_NAME=training_kb TKB_CONTENT_BUCKET=training-kb-content-example TKB_AWS_REGION=us-east-1`，否則 `load_settings()` 會用 `training-kb-content` 這個不存在的預設 bucket。CDK 環境未建立時先完成 Phase 01／09，不要把「目前跑不了」寫成通過，也不要把 `cdk synth` 成功當成部署成功。
 
-- [ ] **Step 5：先鋪好不需要模型的種子資料**（現況核對 2026-09-14 新增；O5 BLOCKED）
+- [x] **Step 5：先鋪好不需要模型的種子資料**（現況核對 2026-09-14 新增；O5 BLOCKED）
 
 `ensure_embedding` **先一致讀取既有 TICKET，只有在 `current.embedding` 是空的時候才呼叫 Titan**（`pipelines/ticket.py` §1）。`assign_cluster` 與 `is_recurring` 完全不碰模型。所以只要工單在 DynamoDB 裡**已經有存好的 `embedding`**，前三個節點在真實 AWS 上可以一路跑完：
 
@@ -552,7 +587,7 @@ TKB_GITHUB_WEBHOOK_SECRET="$SECRET" AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-e
 
 種子資料一律用 `uv run python` 走 `Repository.put_meta(...)` 寫，**不手刻低階 AttributeValue**；種子是合成資料，要在報告與 Demo 指標明示（COMMON.md R11）。
 
-- [ ] **Step 6：跑成功與失敗各一次執行，保存證據後提交**
+- [x] **Step 6：跑成功與失敗各一次執行，保存證據後提交**
 
 ```bash
 aws stepfunctions start-execution --region us-east-1 --state-machine-arn "$TKB_TICKET_SM_ARN" \
@@ -572,6 +607,23 @@ git commit -m "test(infra): 保存 ticket-analysis 雲端證據"
 ```
 
 第二次執行讓 `NameGap` 必定丟 `TransientError`，換一個 execution name（`op-ticket-t_882`）重跑。預期 `status` 是 `FAILED`、history 出現該 Task 三次 `TaskFailed` 與一次 `ExecutionFailed`，資料庫沒有新的 `VERSION#`。**倒數第二個 `get-execution-history` 是 00A §3.7 指定由本 Phase 實證的那一項**：`taskFailedEventDetails.error` 必須逐字是 `TransientError`（不是 `Lambda.Unknown`，也不是帶模組路徑的名稱），否則 `ErrorEquals: ["TransientError"]` 根本沒有命中，重試是假的——此時停止，把觀察到的 `error` 值寫進報告，回頭與 Phase 29 一起改 `RETRY`，不要改測試遷就。兩個 execution ARN 與上面每一行的輸出都要寫進證據索引，再提交。
+
+**現況核對（2026-09-14，實測後修正）：直接函式 ARN 的失敗事件是 `LambdaFunctionFailed`，
+不是 `TaskFailed`。** 上面倒數第二行的 `events[?type=='TaskFailed']` 在本 Phase 的整合方式
+（D-49：`Resource` 是函式 ARN，沒有 `arn:aws:states:::lambda:invoke` 信封）下**永遠是空陣列**；
+`taskFailedEventDetails` 只有最佳化整合才會出現。實證要改成：
+
+```bash
+aws stepfunctions get-execution-history --region us-east-1 --execution-arn "$FAILED_ARN" \
+  --max-results 200 \
+  --query "events[?type=='LambdaFunctionFailed'].lambdaFunctionFailedEventDetails.[error,cause]"
+```
+
+實測結果（報告 §3 Task 3 有原文）：注入那次得到**三個** `LambdaFunctionFailed`，`error`
+逐字都是 `TransientError`，間隔 1 秒與 2 秒，然後 `FailStateEntered` → `ExecutionFailed`
+——`ErrorEquals: ["TransientError"]` 確實命中，重試是真的。停止條件因此**沒有**觸發。
+00A §3.7 與 §8 證據表的「`taskFailedEventDetails.error`」要改成
+「`lambdaFunctionFailedEventDetails.error`」，已回報 controller。
 
 **怎麼讓 `NameGap` 必定丟 `TransientError`（現況核對 2026-09-14 新增）。** O5 BLOCKED 下 `name_gap` 自己會失敗，但失敗成 `PermanentError("ValidationException")`——**一次 `TaskFailed` 就進 Catch**，證不出 Retry。正式的 `TKB_FAULT` 切點是 **P59 的 `src/training_kb/faults.py`**（00A §3.2、§8 第 1230 列），它的五個切點（`s3_after_md`、`ddb_after_version`、`publish_before_transact`、`publish_after_transact_before_site`、`start_execution`）**都不在 `NameGap` 上**，而且 P59 有一條「每個切點名稱在 `content.py`／`publishing.py`／`ingress.py` 各恰好出現一次」的測試，**加第六個切點會打破 P59 的契約**。
 
@@ -661,15 +713,15 @@ git commit -m "test(infra): 保存 ticket-analysis 雲端證據"
 
 ## 11. 完成清單
 
-- [ ] `TICKET_ANALYSIS_TASKS`、`run_ticket_analysis`、`ticket_analysis_handler` 的名稱與 Phase 48／52 命名法一致，七個 Task 的順序與 `Parameters.task` 有測試守住；`pipeline_task_handler`、`task_name`、`build_deps` 都在 `pipelines/common.py`，`pipeline` 不在三個名稱內時丟 `PermanentError`。
-- [ ] 每個 Task 都有兩個 retrier（`TransientError` 與四個 `Lambda.*` 服務例外，皆 1 秒、倍率 2、最多兩次）與 Catch 到 `PipelineFailed`；兩個 Choice 的每個分支都有測試，`ChooseAction` 的 `Default` 走失敗終點。
-- [ ] state 只含那十個欄位，execution history 看不到工單全文、`feature_id` 或向量。
-- [ ] `infra/stepfunctions/ticket-analysis/v1.json` 與 S3 快照 `stepfunctions/ticket-analysis/v1.json` 是同一份 bytes。
-- [ ] CDK 在 `infra/training_kb_stack.py` 產生一個 Standard state machine、`training-kb-pipeline-task` 與 `training-kb-webhook` 兩支 Lambda（handler 分別指向 `pipeline_task_handler` 與 `training_kb.handlers.github_webhook.handler`）與最小 IAM，並有 `definition_substitutions`；部署指令是 `cdk deploy TrainingKbApp`（不加 `uv run`）。
-- [ ] 成功與失敗各一次的 execution ARN、節點序列、失敗事件的 `error` 原值與 CloudWatch 輸出都已保存。
-- [ ] **（新增 2026-09-14，COMMON.md R2）** `build/lambda-layer/` 由 `infra/scripts/build_lambda_layer.py` 以 `--python-platform x86_64-manylinux2014 --python-version 3.12 --only-binary=:all:` 產出，與 Lambda 的 `architecture=X86_64` ＋ `Runtime.PYTHON_3_12` 一致；兩支 Lambda **共用同一支 layer**，P42／P48／P52／P54 沿用（stack 上以 `self.deps_layer` 公開）。
-- [ ] **（新增 2026-09-14）** `base_env` 的 `TKB_CONTENT_BUCKET` 來自 data stack 的跨 stack 參照，**不是** `load_settings` 的預設值 `training-kb-content`；`TKB_GENERATION_MODEL_ID` **不設**（O5 BLOCKED，不填猜測值）；`TKB_GITHUB_WEBHOOK_SECRET` 由部署當下的 shell 環境變數提供，值不進 repo、不進報告、不進 log。
-- [ ] **（新增 2026-09-14，REP §8-6／D-79）** IAM 三個缺口都補在 `infra/training_kb_stack.py` 並有 `Template` 斷言：`site/` 前綴的 `s3:PutObject`；單一條帶條件的 `dynamodb:DeleteItem`（範圍不得放寬成整表 `dynamodb:*`）；`states:DescribeExecution` 與 `sts:GetCallerIdentity`。
-- [ ] **（新增 2026-09-14）** §7A 的 A1–A9 每一項都在報告裡有一行結論（做到／去向哪個 Phase／BLOCKED 原因），A5 的 S3 條件寫入與 A3 的 ARN 推導必須有原始輸出。
-- [ ] **（新增 2026-09-14）** O5 BLOCKED 下的兩列驗收（`NotRecurring` 的 `SUCCEEDED`、需要模型那條的 `error`／`cause` 原文）都已保存；**不得**因為 Bedrock 不可用就跳過雲端執行。
-- [ ] O2／O3／O5／O6 任一未通過時，文件與報告維持 BLOCKED，不宣稱可公開發布。
+- [x] `TICKET_ANALYSIS_TASKS`、`run_ticket_analysis`、`ticket_analysis_handler` 的名稱與 Phase 48／52 命名法一致，七個 Task 的順序與 `Parameters.task` 有測試守住；`pipeline_task_handler`、`task_name`、`build_deps` 都在 `pipelines/common.py`，`pipeline` 不在三個名稱內時丟 `PermanentError`。
+- [x] 每個 Task 都有兩個 retrier（`TransientError` 與四個 `Lambda.*` 服務例外，皆 1 秒、倍率 2、最多兩次）與 Catch 到 `PipelineFailed`；兩個 Choice 的每個分支都有測試，`ChooseAction` 的 `Default` 走失敗終點。
+- [x] state 只含那十個欄位，execution history 看不到工單全文、`feature_id` 或向量。
+- [x] `infra/stepfunctions/ticket-analysis/v1.json` 與 S3 快照 `stepfunctions/ticket-analysis/v1.json` 是同一份 bytes。
+- [x] CDK 在 `infra/training_kb_stack.py` 產生一個 Standard state machine、`training-kb-pipeline-task` 與 `training-kb-webhook` 兩支 Lambda（handler 分別指向 `pipeline_task_handler` 與 `training_kb.handlers.github_webhook.handler`）與最小 IAM，並有 `definition_substitutions`；部署指令是 `cdk deploy TrainingKbApp`（不加 `uv run`）。
+- [x] 成功與失敗各一次的 execution ARN、節點序列、失敗事件的 `error` 原值與 CloudWatch 輸出都已保存。
+- [x] **（新增 2026-09-14，COMMON.md R2）** `build/lambda-layer/` 由 `infra/scripts/build_lambda_layer.py` 以 `--python-platform x86_64-manylinux2014 --python-version 3.12 --only-binary=:all:` 產出，與 Lambda 的 `architecture=X86_64` ＋ `Runtime.PYTHON_3_12` 一致；兩支 Lambda **共用同一支 layer**，P42／P48／P52／P54 沿用（stack 上以 `self.deps_layer` 公開）。
+- [x] **（新增 2026-09-14；2026-09-14 實作改為純字串名稱，見 Task 3 的本計畫選擇）** `base_env` 的 `TKB_CONTENT_BUCKET` 來自 cdk context／環境變數的實際 bucket 名稱，**不是** `load_settings` 的預設值 `training-kb-content`；`TKB_GENERATION_MODEL_ID` **不設**（O5 BLOCKED，不填猜測值）；`TKB_GITHUB_WEBHOOK_SECRET` 由部署當下的 shell 環境變數提供，值不進 repo、不進報告、不進 log。
+- [x] **（新增 2026-09-14，REP §8-6／D-79）** IAM 三個缺口都補在 `infra/training_kb_stack.py` 並有 `Template` 斷言：`site/` 前綴的 `s3:PutObject`；單一條 `dynamodb:DeleteItem`（資源只有這張表、不得放寬成 `dynamodb:*`；**條件鍵做不到 SK 前綴**，見 Task 3 Step 3 的本計畫選擇）；`states:DescribeExecution` 與 `sts:GetCallerIdentity`。
+- [x] **（新增 2026-09-14）** §7A 的 A1–A9 每一項都在報告裡有一行結論（做到／去向哪個 Phase／BLOCKED 原因），A5 的 S3 條件寫入與 A3 的 ARN 推導必須有原始輸出。
+- [x] **（新增 2026-09-14）** O5 BLOCKED 下的兩列驗收（`NotRecurring` 的 `SUCCEEDED`、需要模型那條的 `error`／`cause` 原文）都已保存；**不得**因為 Bedrock 不可用就跳過雲端執行。
+- [x] O2／O3／O5／O6 任一未通過時，文件與報告維持 BLOCKED，不宣稱可公開發布。
