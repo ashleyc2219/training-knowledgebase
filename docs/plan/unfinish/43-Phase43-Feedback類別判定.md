@@ -30,6 +30,29 @@
 > - **R3**：本 Phase 在 **W3**。`writing/prompts.py` 在 W3 只有 P43 動（P45／P47／P50 在 W1、P46／P51 在 W2 已各自追加過），但**仍然只用 Edit、只加自己的 `# ---- Phase 43 ----` 區段**，不重排、不 `ruff format` 整支檔。`infra/training_kb_stack.py` 在 W3 **同時有 P48（feedback-review state machine）與 P52（release-update state machine）在改**——只用 Edit、`git add` 只加自己的路徑。`ingress.py` 在 W3 只有 P43 動（P59 在 W4）。
 > - **R5**：本文件的程式片段是示意，名稱與簽名以 00A ＋ 既有程式為準。
 > - **R6**：前置 [Phase 42](./42-Phase42-Feedback與View固定匯入.md) 在 W2，本 Phase 開工前先讀它**實際落地**的 `validate_feedback`／`import_feedback`／`_rejected`／`_project_id`／`ImportResult`，以程式為準而不是以 P42 的文件片段為準。
+>
+> **(e) 實作當下追加的裁決（Phase 43 實作者，2026-09-14）**
+> 1. **本計畫選擇（2026-09-14）：** 匯入 Lambda 那條 `bedrock:InvokeModel` 的 `resources` 只放
+>    `arn:aws:bedrock:<region>::foundation-model/amazon.titan-embed-text-v2:0`——O5 BLOCKED 期間
+>    **已核定的模型 ARN 只有 embedding 那一個**，`TKB_GENERATION_MODEL_ID` 不得填猜測值（00A §3.5）。
+>    寫法、範圍與 P41 給 `task_function`／`webhook_function` 的那一條逐字相同；生成模型的 ARN 要等
+>    O5 解除、有實測值之後才加。所以 `tests/unit/infra/test_import_lambda.py` 的新斷言守的是
+>    「有一條 `InvokeModel`、資源是具名 `foundation-model/` ARN、沒有萬用字元」，**不是**「生成模型已核定」。
+> 2. **本計畫選擇（2026-09-14）：** P42 的 `test_the_import_role_gets_no_model_and_no_delete` 原本斷言
+>    「一個 `bedrock:` 動作都沒有」，被本 Phase 的權限改紅。依 COMMON.md R3.5（紅燈源自自己改的共用檔
+>    由自己負責），就地把那一條改成「唯一允許的模型動作是 `bedrock:InvokeModel`」並在 docstring 註明原因，
+>    **不改測試名稱**（P42 報告 §4 引用了它）。
+> 3. **本計畫選擇（2026-09-14）：** 模型回**空字串／全空白／非字串／缺 `category` 欄位**四種「答了等於沒答」
+>    的情況一律收斂成 `待分類`（不是 `None`）：留言非空卻判不出類別是「待分類」，不是「這筆沒有類別」。
+>    `_settle` 的「空值→`None`」語意只服務決策表第 3 列（只有評分）。
+> 4. **本計畫選擇（2026-09-14）：** 跨檔接線做三處。`pipelines/feedback.py` 裡**兩處**暫用
+>    `DEFAULT_FEEDBACK_CATEGORIES` 的地方都改成 `approved_categories(repository)`——`select_weak_targets`
+>    （P44 留下的待辦）與 `task_evaluate_targets` 的 candidate 分群（P48；controller 在 P48 完成後追加指示，
+>    兩處一起改，否則維護者匯入設定之後 REFINE 用設定值、candidate 用初始兩類，同一次執行的核定表會分岔）。
+>    `DEFAULT_FEEDBACK_CATEGORIES` 在那支檔因此不再有使用者，從 import 移除。**沒有循環相依**：
+>    `pipelines/feedback.py` 本來就 import `ingress`，而 `ingress` 只 import `pipelines.common`，方向單向
+>    （已實際 import 驗證）。第三處是替 `handlers/analytics.py::_approved_categories`（P54 的 `importlib`
+>    延後解析）補一條測試，那支程式本身不用改。
 
 **目標：** 決定一筆回饋的問題類別：使用者勾選優先，未勾且留言非空才呼叫一次模型，任何未核定的值都收斂成 `待分類`，核定類別表不自動擴充。
 
@@ -162,7 +185,7 @@ def import_feedback(payload: Mapping[str, object], *, repository: Repository, op
 
 ### Task 1：核定類別表只讀與未知值收斂
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_default_categories_are_used_when_config_item_is_absent(empty_repo) -> None:
@@ -180,7 +203,7 @@ def test_unknown_checkbox_value_settles_to_pending(empty_repo) -> None:
     assert _settle("缺少資訊", approved) == "缺少資訊"
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_category.py -q
@@ -188,7 +211,7 @@ uv run pytest tests/unit/test_feedback_category.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'approved_categories'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 PENDING_CATEGORY = "待分類"
@@ -214,7 +237,7 @@ def _settle(value: str | None, approved: frozenset[str]) -> str | None:
     return name if name in approved or name == PENDING_CATEGORY else PENDING_CATEGORY
 ```
 
-- [ ] **Step 4：補設定 item 形狀並跑完整檔案確認綠燈**
+- [x] **Step 4：補設定 item 形狀並跑完整檔案確認綠燈**
 
 設定 item 由維護者用 Phase 10 的 `put_meta_item("CONFIG#feedback_categories", {"categories": [...]})` 寫入，該原語自己補 `SK=META`、`entity="CONFIG"`、`_revision`，所以固定形狀是 `{"PK": "CONFIG#feedback_categories", "SK": "META", "entity": "CONFIG", "_revision": 1, "categories": [...]}`；`categories` 非 list、空 list 或缺欄位時一律退回預設清單，不得讓錯誤設定把核定表清空。`configured_repo` fixture 就照這個形狀塞一筆含「步驟順序錯誤」的設定，`empty_repo` 則完全不寫這個 PK。
 
@@ -222,7 +245,7 @@ def _settle(value: str | None, approved: frozenset[str]) -> str | None:
 uv run pytest tests/unit/test_feedback_category.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py tests/unit/test_feedback_category.py
@@ -231,7 +254,7 @@ git commit -m "feat(ingress): 讀取核定回饋類別表並收斂未知值"
 
 ### Task 2：四條分支與模型呼叫次數
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 APPROVED = frozenset({"找不到按鈕", "缺少資訊"})
@@ -304,7 +327,7 @@ def test_unknown_model_answer_settles_to_pending_without_a_second_call() -> None
 >
 > `RecordingWriter` 的 `replies` 是佇列，不呼叫就不會被取用，所以「呼叫 0 次」的案例先塞一筆回應也不會出錯。Step 4 的 prompt 斷言改成 `fake_writer.calls[0]["node"]`、`fake_writer.calls[0]["user"]`。整合測試（`tests/integration/test_fixed_import.py`）看不到 `tests/unit/conftest.py`，在那支檔宣告一份**同樣以 dict 記錄 `calls`** 的本地 `FakeWriter`。`tests/unit/conftest.py` 這一批只有 P55 可以動（COMMON.md R3.6），不要把 `RecordingWriter` 搬走或改簽名。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_feedback_category.py -q
@@ -312,7 +335,7 @@ uv run pytest tests/unit/test_feedback_category.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'classify_feedback_category'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def classify_feedback_category(
@@ -333,7 +356,7 @@ def classify_feedback_category(
     return settled or PENDING_CATEGORY
 ```
 
-- [ ] **Step 4：補 prompt 與洩漏測試並跑完整檔案確認綠燈**
+- [x] **Step 4：補 prompt 與洩漏測試並跑完整檔案確認綠燈**
 
 `prompt_classify_comment(comment, approved)` 寫在 `src/training_kb/writing/prompts.py`，沿用 Phase 17 固定的 `<source_data>` 分區與 `_as_data`（`html.escape`）轉義，**不得自創新的標記名稱**（Phase 60 的 `check_output_safety` 只認這一個）：
 
@@ -362,7 +385,7 @@ def prompt_classify_comment(comment: str, approved: frozenset[str]) -> tuple[str
 uv run pytest tests/unit/test_feedback_category.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py src/training_kb/writing/prompts.py tests/unit/test_feedback_category.py
@@ -371,7 +394,7 @@ git commit -m "feat(ingress): 依勾選與留言判定回饋類別"
 
 ### Task 3：接上固定匯入且重送不重複呼叫模型
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_import_saves_settled_category_and_resend_calls_no_model(active_repo, operations) -> None:
@@ -388,7 +411,7 @@ def test_import_saves_settled_category_and_resend_calls_no_model(active_repo, op
 
 `FakeWriter` 與 Task 2 同名同語意，在 `tests/integration/test_fixed_import.py` 裡再宣告一份完全一樣的（這份專案的既有作法就是同形狀 helper 各檔一份，例如 Phase 21／22 的 `four_step_content`）；兩份的 `generate_json` 簽名與 `request_attempts` 必須一致，否則呼叫次數的斷言會分岔。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_fixed_import.py::test_import_saves_settled_category_and_resend_calls_no_model -q
@@ -396,7 +419,7 @@ uv run pytest tests/integration/test_fixed_import.py::test_import_saves_settled_
 
 預期：FAIL，訊號包含 `import_feedback() got an unexpected keyword argument 'writer'`。
 
-- [ ] **Step 3：在 `import_feedback` 的正確位置插入分類**
+- [x] **Step 3：在 `import_feedback` 的正確位置插入分類**
 
 位置固定在「即將 `repository.put_meta` 之前」，也就是 Phase 42 的 `accepted` 分支與**續跑補寫**分支（`accept` 回 duplicate 但物件其實不存在）各呼叫一次；物件已存在的真正 duplicate 直接回傳既有結果，完全不進這條路徑。放到 `accept` 之前會讓每次重送都多一次 Bedrock 呼叫：
 
@@ -422,7 +445,7 @@ def _resolve_category(
 2. `_settle` 只把**非空**值收斂成 `待分類`，空值原樣回 `None`——這正是「只有評分的回饋 `category is None`」那一列（決策表第 3 列）的依據，不要把它改成回 `PENDING_CATEGORY`。
 3. `src/training_kb/handlers/import_.py::_import_one` 也要一起改：`import_feedback(payload, repository=..., operations=..., now=_DEPS.now(), writer=_DEPS.writer)`。`Deps.writer` 預設是 `None`，用 `need_writer()` 會在沒接線時丟 `PermanentError`，而本階段的語意是「沒有 writer 就只收斂勾選值」，所以這裡**直接讀 `_DEPS.writer`、不呼叫 `need_writer()`**。這一行沒補的話，雲端的匯入 Lambda 永遠不分類留言，而 CDK 上的 `bedrock:InvokeModel` 也就白加了。
 
-- [ ] **Step 4：跑整份整合測試並核對副作用**
+- [x] **Step 4：跑整份整合測試並核對副作用**
 
 ```bash
 uv run pytest tests/integration/test_fixed_import.py tests/unit/infra/test_import_lambda.py -q
@@ -450,7 +473,7 @@ def test_import_lambda_can_invoke_only_the_approved_generation_model():
 
 **不新增環境變數**：`TKB_GENERATION_MODEL_ID` 已在 P41 的 `base_env`，O5 BLOCKED 期間不得填猜測值（00A §3.5）。W3 同波次的 P48／P52 也在改這支 stack，只用 Edit、只加自己的區段、`git add` 只加自己的路徑（R3）。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/ingress.py src/training_kb/handlers/import_.py \
@@ -498,13 +521,13 @@ git commit -m "feat(ingress): 匯入時判定並保存回饋類別"
 
 ## 11. 完成清單
 
-- [ ] `approved_categories`、`classify_feedback_category`、`prompt_classify_comment` 簽名與本文件一致。
-- [ ] 核定表初始為「找不到按鈕」「缺少資訊」，用 `get_meta_item` 讀 `CONFIG#feedback_categories`，程式只讀不寫、不自動擴充，讀不到或形狀不合法時退回預設兩類而不是空集合。
-- [ ] 有勾選就不呼叫模型也不被覆蓋、未核定勾選值收斂成 `待分類`；只有評分或留言全是空白時模型呼叫數為 0。
-- [ ] 未勾選且留言非空時恰好呼叫一次、模型回未知值直接收斂成 `待分類`；分類接在永久去重之後，物件已存在的重送不產生新的 Bedrock 呼叫。
-- [ ] `generate_json` 傳的是 `CommentClassification` 這個 schema dict、拿回 dict 後自己讀 `category`，沒有寫成 `type[X] -> X`；prompt 把留言放在 Phase 17 的 `<source_data>` 分區並轉義，偽造的 `</source_data>` 無法提前結束資料區，且不含評分與使用者 ID。
-- [ ] `CommentClassification` 不走 Phase 18 的 correction：直接呼叫 `Writer.generate_json`，未知值由 `_settle` 降級成 `待分類`，全程沒有第二次 request。
-- [ ] `COL` Rule 4、5、6 標為 primary 且各有直接 assertion（已對 00B 第 2 節核對，2026-09-14）；`ING` Rule 25 標為「相關（primary 在 Phase 31）」；未把 FakeWriter 綠燈說成 O5 已通過。
-- [ ] `infra/training_kb_stack.py` 的 `training-kb-import` 多了一條只限核定生成模型 ARN 的 `bedrock:InvokeModel`，並在 `tests/unit/infra/test_import_lambda.py` 有 `Template` 斷言；**沒有**新增任何環境變數（現況核對 2026-09-14）。
-- [ ] `src/training_kb/handlers/import_.py::_import_one` 把 `writer=_DEPS.writer` 傳給 `import_feedback`（直接讀屬性，不用 `need_writer()`），雲端的匯入 Lambda 才真的會分類留言（現況核對 2026-09-14）。
-- [ ] 單元測試用既有的 `fake_writer` fixture、整合測試用形狀相容（`calls` 是 dict）的本地 FakeWriter；沒有動 `tests/unit/conftest.py`（R3.6，只有 P55 可動）。
+- [x] `approved_categories`、`classify_feedback_category`、`prompt_classify_comment` 簽名與本文件一致。
+- [x] 核定表初始為「找不到按鈕」「缺少資訊」，用 `get_meta_item` 讀 `CONFIG#feedback_categories`，程式只讀不寫、不自動擴充，讀不到或形狀不合法時退回預設兩類而不是空集合。
+- [x] 有勾選就不呼叫模型也不被覆蓋、未核定勾選值收斂成 `待分類`；只有評分或留言全是空白時模型呼叫數為 0。
+- [x] 未勾選且留言非空時恰好呼叫一次、模型回未知值直接收斂成 `待分類`；分類接在永久去重之後，物件已存在的重送不產生新的 Bedrock 呼叫。
+- [x] `generate_json` 傳的是 `CommentClassification` 這個 schema dict、拿回 dict 後自己讀 `category`，沒有寫成 `type[X] -> X`；prompt 把留言放在 Phase 17 的 `<source_data>` 分區並轉義，偽造的 `</source_data>` 無法提前結束資料區，且不含評分與使用者 ID。
+- [x] `CommentClassification` 不走 Phase 18 的 correction：直接呼叫 `Writer.generate_json`，未知值由 `_settle` 降級成 `待分類`，全程沒有第二次 request。
+- [x] `COL` Rule 4、5、6 標為 primary 且各有直接 assertion（已對 00B 第 2 節核對，2026-09-14）；`ING` Rule 25 標為「相關（primary 在 Phase 31）」；未把 FakeWriter 綠燈說成 O5 已通過。
+- [x] `infra/training_kb_stack.py` 的 `training-kb-import` 多了一條只限核定生成模型 ARN 的 `bedrock:InvokeModel`，並在 `tests/unit/infra/test_import_lambda.py` 有 `Template` 斷言；**沒有**新增任何環境變數（現況核對 2026-09-14）。
+- [x] `src/training_kb/handlers/import_.py::_import_one` 把 `writer=_DEPS.writer` 傳給 `import_feedback`（直接讀屬性，不用 `need_writer()`），雲端的匯入 Lambda 才真的會分類留言（現況核對 2026-09-14）。
+- [x] 單元測試用既有的 `fake_writer` fixture、整合測試用形狀相容（`calls` 是 dict）的本地 FakeWriter；沒有動 `tests/unit/conftest.py`（R3.6，只有 P55 可動）。
