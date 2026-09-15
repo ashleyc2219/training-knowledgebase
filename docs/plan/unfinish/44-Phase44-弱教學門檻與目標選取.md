@@ -113,6 +113,13 @@ Phase 43：approved_categories(repository) -> frozenset[str]、PENDING_CATEGORY�
 
 `scan_entity` 回的是含 `PK`／`SK`／`entity`／`_revision` 的 raw item，**一律用 `item_to_model` 轉成模型**，不可直接 `Tutorial.model_validate(item)`（`StrictModel` 是 `extra="forbid"`，多一個 `PK` 就 `ValidationError`）；00A D-29 把 Phase 44 列為這個函式的消費者。`meta_only` 預設 `True`，只回 `SK == META` 的 item，所以 `scan_entity("TUTORIAL")` 不會混進 `TUTORIAL#` 底下的關係邊，本階段不必自己過濾，也**不要**把它改成 `False`。`PENDING_CATEGORY` 在程式裡不必特別判斷：`待分類` 不在 `approved` 裡，`_top_category` 的 `row.category in approved` 自然把它擋掉；列在 Consumes 是為了讓測試能直接引用同一個常數。
 
+> **本計畫選擇（2026-09-14）：核定類別表暫時吃 `ingress.DEFAULT_FEEDBACK_CATEGORIES`。**
+> 本 Phase 實作時 Phase 43 尚未合併，`approved_categories(repository)` 與 `PENDING_CATEGORY`
+> 都還不存在（controller 只預先宣告了 `ingress.DEFAULT_FEEDBACK_CATEGORIES`，值就是初始兩類
+> 「找不到按鈕」「缺少資訊」）。`select_weak_targets` 先 import 這個常數，行為與 P43 讀不到
+> `CONFIG#feedback_categories` 時的回傳值相同；**P43 合併後改成 `approved_categories(repository)`
+> 一行即可**，程式裡已留註解，`_top_category` 的 `approved` 仍然是參數、不必改。
+
 ### Produces
 
 ```python
@@ -148,7 +155,7 @@ def select_weak_targets(*, repository: Repository, mode: ReviewMode, now: dateti
 
 - **只看 active Tutorial 的已發布 current_version。** `status != TutorialStatus.ACTIVE`（成員名大寫、值是小寫的 `active`）、`current_version is None`、或該版 `published_at is None` 都直接跳過。設計 §7.5 明講不掃舊版、也不做「上次檢視之後」的浮水印切分，所以每次都重算該版截至 `now` 的**全部**有效回饋。
 - **未四捨五入。** 設計 §11.2：門檻用原始數值比較，顯示才取一位小數。`2.875` 顯示成 `2.9` 但比較用 `2.875`；`3.5` 不算弱，`3.49` 才算。
-- **平均算法與 `n` 的分母必須跟 Phase 53 一模一樣。** 00A D-44：`rating is None` 的回饋不進分子也不進分母。本階段比 [Phase 53](53-Phase53-評分與負面回饋指標.md) 早，不能 import `analytics.ratings`，所以 `_average` 自己實作**同一套算法**（`sum(ratings) / len(ratings)`，沒有任何評分回 `None`），而 `n` 就是 `len(ratings)`——不是 `len(feedback)`。Phase 42 的入口強制 `rating` 必填，正常匯入的資料兩者相等；但種子與歷史匯入可能直接寫 item 而繞過入口，只要分母不同一套，Phase 53 顯示的平均與這裡判斷用的平均就會分岔。Phase 53 §1 已註明「`avg < 3.5` 的門檻判斷屬 Phase 44」，兩份文件必須同時維持這句。00A 第 6 節把 Phase 44 列為 `average_rating` 的消費者，指的是**做完 Phase 53 之後**：把 `_average` 換成 `from training_kb.analytics.ratings import average_rating` 的直接呼叫並刪掉本地副本，本階段的重複實作只是暫時的過渡，在那之前任何一邊改算法都必須同步另一邊。
+- **平均算法與 `n` 的分母必須跟 Phase 53 一模一樣。** 00A D-44：`rating is None` 的回饋不進分子也不進分母。本階段比 [Phase 53](53-Phase53-評分與負面回饋指標.md) 早，不能 import `analytics.ratings`，所以 `_average` 自己實作**同一套算法**（`sum(ratings) / len(ratings)`，沒有任何評分回 `None`），而 `n` 就是 `len(ratings)`——不是 `len(feedback)`。Phase 42 的入口強制 `rating` 必填，正常匯入的資料兩者相等；但種子與歷史匯入可能直接寫 item 而繞過入口，只要分母不同一套，Phase 53 顯示的平均與這裡判斷用的平均就會分岔。Phase 53 §1 已註明「`avg < 3.5` 的門檻判斷屬 Phase 44」，兩份文件必須同時維持這句。00A 第 6 節把 Phase 44 列為 `average_rating` 的消費者，指的是**做完 Phase 53 之後**：把 `_average` 換成 `from training_kb.analytics.ratings import average_rating` 的直接呼叫並刪掉本地副本，本階段的重複實作只是暫時的過渡，在那之前任何一邊改算法都必須同步另一邊。（**本計畫選擇（2026-09-14）：已經換過去了。** 本 Phase 先照文件寫了本地 `_average`，Task 3 結束後 controller 通知 Phase 53 已完成並提交 `src/training_kb/analytics/ratings.py`，因此在 commit `92d584a` 刪掉本地副本、改成 `from training_kb.analytics.ratings import average_rating`。`_average` 這個名稱**已不存在**於 `pipelines/feedback.py`，本 Phase 剩下的 module-private helper 只有 `_top_category`；Task 2 Step 4 與 §5 Produces 裡的 `_average` 片段視為歷史敘述。單元測試保留，改為直接斷言 `average_rating`。)
 - **同類只數核定類別。** `待分類` 與 `None` 不參與同類計數，也不進 `feedback_ids`；設計 §12.1 同樣把 `待分類` 排除在負面回饋之外。同一類別內的 ID 先去重再排序，讓重跑得到相同結果。
 - **平手要有固定順序。** 兩個核定類別筆數相同時，取「筆數多者優先，其次類別名稱升序」；輸出的 target 依 `version_id` 升序。沒有固定順序時重送會得到不同 target，Phase 46 的證據指紋就不穩定。
 - **`now` 是截止點，不重做的判斷也不在這裡。** 只排除 `ts` 晚於 `now` 的回饋（這與 Phase 54 的 O4 重開票窗口 `[p, p+14 天)` 是兩件事，不得互相借用）；`ts` 為 `None` 的回饋無法判斷是否落在截止點之前，一律排除（**本計畫選擇**；Phase 42 的匯入入口一定補上 `ts`，只有種子或歷史資料直接寫 item 才會出現）；「沒有新有效證據就不用同一批證據再產生新版」由 Phase 46 的 `evidence_fingerprint` 與 O2 操作紀錄負責，本階段每次都照實回報命中，否則無法分辨「這次沒有弱教學」與「這次跳過了」。
@@ -157,7 +164,7 @@ def select_weak_targets(*, repository: Repository, mode: ReviewMode, now: dateti
 
 ### Task 1：三條件與兩種 mode 的邊界
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 TH = Thresholds()
@@ -186,7 +193,7 @@ def test_unknown_mode_is_rejected_instead_of_defaulting() -> None:
         is_weak(2.0, 20, 9, mode="loose", thresholds=TH)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_weak_threshold.py -q
@@ -194,7 +201,7 @@ uv run pytest tests/unit/test_weak_threshold.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'is_weak'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 ReviewMode = Literal["formal", "demo"]
@@ -211,7 +218,7 @@ def is_weak(avg: float | None, n: int, top_category_count: int, *,
             and top_category_count >= thresholds.recurring_category)
 ```
 
-- [ ] **Step 4：確認 `Thresholds` 門檻可用並跑完整檔案確認綠燈**
+- [x] **Step 4：確認 `Thresholds` 門檻可用並跑完整檔案確認綠燈**
 
 （現況核對 2026-09-14：原步驟是「在 `src/training_kb/config.py` 的 `Thresholds` 加上 `weak_average: float = 3.5`」，該欄位**已經存在**於 `config.py:16`，本 Phase 不需要修改 `config.py`。）本步驟只要確認三個門檻數字（3.5、10／8、5）**不可寫死在判斷式裡**，一律讀 `Thresholds` 的 `weak_average`、`production_feedback`／`demo_feedback`、`recurring_category`（00A 第 5.4 節；不得自創 `weak_min_feedback_formal` 這類新欄位名），再跑一次 `test_config.py` 確認沒有被本 Phase 影響。
 
@@ -219,7 +226,7 @@ def is_weak(avg: float | None, n: int, top_category_count: int, *,
 uv run pytest tests/unit/test_weak_threshold.py tests/unit/test_config.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/unit/test_weak_threshold.py   # config.py 無變更，不加
@@ -228,7 +235,7 @@ git commit -m "feat(feedback): 鎖定弱教學三條件與兩種門檻"
 
 ### Task 2：只選 active 的已發布 current_version
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_only_active_published_current_versions_are_selected(repository) -> None:
@@ -251,7 +258,7 @@ def test_old_version_feedback_is_not_mixed_into_the_current_one(repository_with_
     assert select_weak_targets(repository=repository_with_v2, mode="demo", now=NOW) == ()
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_weak_targets.py -q
@@ -259,7 +266,7 @@ uv run pytest tests/integration/test_weak_targets.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'select_weak_targets'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 @dataclass(frozen=True)
@@ -289,7 +296,7 @@ def select_weak_targets(*, repository, mode, now, thresholds=None):
     return tuple(sorted(targets, key=lambda target: target.version_id))
 ```
 
-- [ ] **Step 4：補兩個 helper 並跑完整檔案確認綠燈**
+- [x] **Step 4：補兩個 helper 並跑完整檔案確認綠燈**
 
 ```python
 def _average(rated: Sequence[Feedback]) -> float | None:
@@ -317,7 +324,7 @@ def _top_category(feedback: Sequence[Feedback],
 uv run pytest tests/integration/test_weak_targets.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/integration/test_weak_targets.py
@@ -326,7 +333,7 @@ git commit -m "feat(feedback): 選出 active 已發布版本的弱教學目標"
 
 ### Task 3：時間截止點、平手順序與分頁完整性
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/test_weak_threshold.py；fb(id, category) 產生 rating=2、ts=NOW 的 Feedback
@@ -354,7 +361,7 @@ def test_tie_between_two_approved_categories_is_deterministic(tied_repository) -
 
 第一個測試刻意把「缺少資訊」排在清單前面：Task 2 的 `max` 會回它，紅燈才**一定**出現，不必賭 DynamoDB 的回傳順序；整合測試只負責證明同樣的規則在真實查詢路徑上也成立。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_weak_threshold.py tests/integration/test_weak_targets.py -q
@@ -362,7 +369,7 @@ uv run pytest tests/unit/test_weak_threshold.py tests/integration/test_weak_targ
 
 預期：FAIL。`test_tie_break_prefers_the_smaller_category_name` 拿到「缺少資訊」；`test_feedback_after_now_is_excluded` 因為 Task 2 還沒用 `now` 過濾證據，仍然回傳一個 target。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 `select_weak_targets` 取回饋的那一行改成 `feedback = [row for row in repository.list_feedback_of_version(version.version_id) if row.ts is not None and row.ts <= now]`；`_top_category` 的選贏家改成下面這個版本：
 
@@ -381,7 +388,7 @@ def _top_category(feedback: Sequence[Feedback],
 
 `min` 配上 `(-筆數, 類別名)` 這個鍵就是「筆數多者優先、其次類別名稱升序」，不再依賴 dict 的插入順序。
 
-- [ ] **Step 4：補分頁與退役案例並跑完整檔案確認綠燈**
+- [x] **Step 4：補分頁與退役案例並跑完整檔案確認綠燈**
 
 `scan_entity` 與 `list_feedback_of_version` 都必須讀完所有分頁，中間空頁不能提前停止：用「第 2 頁為空、第 3 頁才有 A」的 fake table 驗證 A 仍被選到。再加兩個案例：一個 retired 但回饋滿足全部門檻的 Tutorial，預期不出現在結果中；一批 `category="待分類"` 的回饋，確認它既不進同類計數也不進 `feedback_ids`。
 
@@ -389,7 +396,7 @@ def _top_category(feedback: Sequence[Feedback],
 uv run pytest tests/unit/test_weak_threshold.py tests/integration/test_weak_targets.py -q
 ```
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/unit/test_weak_threshold.py tests/integration/test_weak_targets.py
@@ -433,10 +440,10 @@ git commit -m "feat(feedback): 固定弱教學證據截止點與平手順序"
 
 ## 11. 完成清單
 
-- [ ] `ReviewMode`、`WeakTarget`、`is_weak`、`select_weak_targets` 簽名與本文件一致，`WeakTarget` 欄位與 Phase 45 的 Consumes 逐字相同。
-- [ ] 三個條件同時成立才算弱教學；`avg is None` 不命中。
-- [ ] 門檻值全部來自 `Thresholds`（`weak_average` 已存在於 `config.py`，本 Phase 只讀不改），沒有第二份寫死的數字。
-- [ ] 只選 active Tutorial 的已發布 `current_version`、不混入舊版或未發布版；邊界 9／10、7／8、3.49／3.5、4／5 各有直接 assertion 且比較未四捨五入。
-- [ ] `feedback_ids` 全部屬於同一筆 `WeakTarget` 的 `category`（有直接 assertion），`待分類` 與 `None` 不進去。
-- [ ] 平手類別與輸出順序固定、重跑結果完全相同；`scan_entity` 與 `list_feedback_of_version` 讀完所有分頁，空頁不早停。
-- [ ] `REV` Rule 2、3、4 標為 primary 且各有直接 assertion；Rule 1 標為「相關（primary 在 Phase 48）」、Rule 5–9 標為相關；未把 demo 門檻說成正式門檻已滿足。
+- [x] `ReviewMode`、`WeakTarget`、`is_weak`、`select_weak_targets` 簽名與本文件一致，`WeakTarget` 欄位與 Phase 45 的 Consumes 逐字相同。
+- [x] 三個條件同時成立才算弱教學；`avg is None` 不命中。
+- [x] 門檻值全部來自 `Thresholds`（`weak_average` 已存在於 `config.py`，本 Phase 只讀不改），沒有第二份寫死的數字。
+- [x] 只選 active Tutorial 的已發布 `current_version`、不混入舊版或未發布版；邊界 9／10、7／8、3.49／3.5、4／5 各有直接 assertion 且比較未四捨五入。
+- [x] `feedback_ids` 全部屬於同一筆 `WeakTarget` 的 `category`（有直接 assertion），`待分類` 與 `None` 不進去。
+- [x] 平手類別與輸出順序固定、重跑結果完全相同；`scan_entity` 與 `list_feedback_of_version` 讀完所有分頁，空頁不早停。
+- [x] `REV` Rule 2、3、4 標為 primary 且各有直接 assertion；Rule 1 標為「相關（primary 在 Phase 48）」、Rule 5–9 標為相關；未把 demo 門檻說成正式門檻已滿足。
