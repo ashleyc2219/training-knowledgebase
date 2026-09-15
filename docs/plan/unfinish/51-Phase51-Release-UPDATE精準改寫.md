@@ -207,7 +207,7 @@ lease 的 scope 字串是 `TUTORIAL#<slug>`（Phase 11 自己補 `LEASE#` 前綴
 
 ### Task 1：只改命中步驟，其餘逐字相同
 
-- [ ] **Step 1：建立失敗測試**（`tests/unit/test_release_update.py`）
+- [x] **Step 1：建立失敗測試**（`tests/unit/test_release_update.py`）
 
 ```python
 HITS_STEP3 = (StepHit("prepare-meeting", "prepare-meeting@v2", 3),)   # Phase 50 的輸出
@@ -238,9 +238,9 @@ def test_model_touching_an_extra_step_is_rejected(base_v2, fake_writer, repo, op
     assert repo.created_versions == []
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_release_update.py -q` 確認紅燈。** 預期 FAIL，訊號包含 `cannot import name 'prepare_update'`。
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_release_update.py -q` 確認紅燈。** 預期 FAIL，訊號包含 `cannot import name 'prepare_update'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/pipelines/release.py
@@ -277,12 +277,12 @@ def assert_unchanged(base: TutorialContent, draft: TutorialContent,
 
 `model_copy(update=...)` 在 pydantic v2 不做驗證，所以型態一定要先經 `StepType(...)` 轉換，不能把原始字串直接塞進去。
 
-- [ ] **Step 4：跑 `uv run pytest tests/unit/test_release_update.py -q` 確認綠燈。** 另補三個案例：模型漏回命中步驟、`reply["steps"]` 多一筆造成步驟數量改變、改寫文字去空白後為空，三者都必須是 `ContentError` 且 `repo.created_versions == []`。
-- [ ] **Step 5：提交** `git add src/training_kb/pipelines/release.py tests/unit/test_release_update.py`，再 `git commit -m "feat(release): 只改寫命中步驟"`。
+- [x] **Step 4：跑 `uv run pytest tests/unit/test_release_update.py -q` 確認綠燈。** 另補三個案例：模型漏回命中步驟、`reply["steps"]` 多一筆造成步驟數量改變、改寫文字去空白後為空，三者都必須是 `ContentError` 且 `repo.created_versions == []`。
+- [x] **Step 5：提交** `git add src/training_kb/pipelines/release.py tests/unit/test_release_update.py`，再 `git commit -m "feat(release): 只改寫命中步驟"`。
 
 ### Task 2：固定 reason、diff 與本次注入的規則
 
-- [ ] **Step 1：建立失敗測試（兩個檔案各一組）。** 第一組放 `tests/unit/test_release_update.py`，鎖定 reason 與 diff：
+- [x] **Step 1：建立失敗測試（兩個檔案各一組）。** 第一組放 `tests/unit/test_release_update.py`，鎖定 reason 與 diff：
 
 ```python
 def test_reason_and_rules_come_from_this_run(fake_writer, repo, ops, rule_store):
@@ -317,9 +317,9 @@ def test_only_injected_active_rules_enter_prompt_and_record(fake_writer, repo, o
     assert plans[0].rules_applied == ("R-007",)
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_release_update.py tests/unit/test_release_update_rules.py -q` 確認紅燈。** 預期 FAIL，訊號包含 `cannot import name '_rules_for_hits'`（`load_validated_at` 在 Phase 40 就已經存在，不會是紅燈訊號）。
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_release_update.py tests/unit/test_release_update_rules.py -q` 確認紅燈。** 預期 FAIL，訊號包含 `cannot import name '_rules_for_hits'`（`load_validated_at` 在 Phase 40 就已經存在，不會是紅燈訊號）。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def _rules_for_hits(base: TutorialContent, targets: frozenset[int], *, repository):
@@ -370,12 +370,12 @@ def _prepare_one(release, slug, targets, *, repository, writer, operations, oper
 ```
 
 `create_version` 依 Phase 22／23 寫 `tutorials/<slug>/v<n>.md` 與 `v<n>.diff`，本 Phase 只斷言 diff 範圍；raw item 轉模型一律經 `item_to_model`（00A D-29）。模型輸出的 ref 仍掛在**父** operation 底下（`operations/<operation_id>/rewrite-<slug>.json`，00A §6.9），因為它本來就已經 per-slug，不會兩篇互相覆蓋；只有版號分配走子 operation。
-- [ ] **Step 4：跑 `uv run pytest tests/unit/test_release_update.py tests/unit/test_release_update_rules.py -q` 確認綠燈。** 另補一個案例放 `tests/unit/test_release_update_rules.py`：第 1 步同樣是 `click_ui` 且原文本來就符合 `R-007`，但它沒被改寫，所以 `R-007` **不因它**進入 `rules_applied`（F29）。
-- [ ] **Step 5：提交** `git add src/training_kb/pipelines/release.py src/training_kb/writing/prompts.py tests/unit/test_release_update.py tests/unit/test_release_update_rules.py`，再 `git commit -m "feat(release): 固定改版原因與規則紀錄"`。
+- [x] **Step 4：跑 `uv run pytest tests/unit/test_release_update.py tests/unit/test_release_update_rules.py -q` 確認綠燈。** 另補一個案例放 `tests/unit/test_release_update_rules.py`：第 1 步同樣是 `click_ui` 且原文本來就符合 `R-007`，但它沒被改寫，所以 `R-007` **不因它**進入 `rules_applied`（F29）。
+- [x] **Step 5：提交** `git add src/training_kb/pipelines/release.py src/training_kb/writing/prompts.py tests/unit/test_release_update.py tests/unit/test_release_update_rules.py`，再 `git commit -m "feat(release): 固定改版原因與規則紀錄"`。
 
 ### Task 3：lease 串行、同 operation 重送與整批交付
 
-- [ ] **Step 1：建立失敗測試**（同樣放 `tests/unit/test_release_update.py`）
+- [x] **Step 1：建立失敗測試**（同樣放 `tests/unit/test_release_update.py`）
 
 ```python
 def test_lease_conflict_raises_transient_error(fake_writer, repo, ops, lease_store):
@@ -411,9 +411,9 @@ def test_each_slug_gets_its_own_sub_operation(fake_writer, repo, ops, hits_two_t
 
 `ops` 是同檔 fixture：記憶體 O2 帳本，`accepted_ids` 依接受順序記下每一個 `accept` 進來的 `operation_id`，`op-release-r_42` 這筆父紀錄在 fixture 建立時就已經接受好（`project_id="demo"`）。
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_release_update.py -q` 確認紅燈。** 預期 FAIL：`TransientError` 沒有被拋出，或 `fake_writer.request_attempts == 2`。
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_release_update.py -q` 確認紅燈。** 預期 FAIL：`TransientError` 沒有被拋出，或 `fake_writer.request_attempts == 2`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from training_kb.pipelines.feedback import LEASE_TTL_SECONDS   # owner 是 Phase 46，不重新宣告
@@ -462,7 +462,7 @@ def prepare_update(release, hits, *, repository, writer, operations, operation_i
 
 `finally` 讓 `ContentError` 也會歸還租約，否則同一篇要等 TTL 才解得開。多篇時回一整組 `VersionPlan`，呼叫端把 `version_ids` 一次交給 `Publisher.prepare`；第二篇 inspect 失敗時第一篇也不得被發布（F49），本 Phase 只負責「回傳一整組」與「沒有任何 publish 呼叫」。
 
-- [ ] **Step 4：跑綠燈並執行 O2 整合測試**
+- [x] **Step 4：跑綠燈並執行 O2 整合測試**
 
 ```bash
 uv run pytest tests/unit/test_release_update.py -q
@@ -473,7 +473,7 @@ uv run pytest tests/integration/test_release_update_retry.py -q
 
 （現況核對 2026-09-14：**O2 已 PASS**（P11），所以本 Task **不標 BLOCKED**，照做；但整合檔跑在 **moto**，綠燈只證明資料形狀——真實帳號的重送證據移交 **P52 雲端驗收**，報告要寫清楚哪一段是 moto、哪一段是真實 AWS。仍然不得把記憶體 fake 的綠燈當成 O2 或 O5 已驗證。）
 
-- [ ] **Step 5：提交** `git add src/training_kb/pipelines/release.py tests/unit/test_release_update.py tests/integration/test_release_update_retry.py`，再 `git commit -m "test(release): 驗證改版重送與整批交付"`。
+- [x] **Step 5：提交** `git add src/training_kb/pipelines/release.py tests/unit/test_release_update.py tests/integration/test_release_update_retry.py`，再 `git commit -m "test(release): 驗證改版重送與整批交付"`。
 
 ## 8. 驗收矩陣
 
@@ -520,12 +520,50 @@ uv run pytest tests/integration/test_release_update_retry.py -q
   - Rule 1「CREATE、UPDATE 與 REFINE 在寫作前讀取教學規則」、Rule 7「版本的 rules_applied 記錄本次套用的規則」→ 相關（primary Phase 19）；本 Phase 只證明 UPDATE 這條路徑確實照做。
 - Supporting：F29（沿用原文不算套用）、F35（同篇依接受順序串行）、D26（重試重用版號）、F36（關係不完整不得發布）、F49（整次失敗不發布新版）、D06（改名保留 Feature PK）；設計 §7.4 與 §8.1–8.3。
 
+## 10.1 實作時的裁決與現況核對（2026-09-14）
+
+- **本計畫選擇（2026-09-14）：退役教學一律跳過，不丟例外。** `find_release_hits`（Phase 50）
+  底下的 Phase 27 反查只看「是不是 current 而且已發布」，**不看 `Tutorial.status`**，D-38 也
+  禁止包裝層自己再篩一次，所以退役教學**會**出現在 `hits` 裡。UPDATE 不得替退役教學建新版
+  （設計 §8.1：退役的教學不再維護），因此過濾放在 `prepare_update` 這一層：跳過並用
+  `logging.INFO` 記下 `slug`／`status`／`release_id`，**不丟例外**——那是別篇教學的正常結果，
+  不該讓整次改版失敗。測試 `test_release_update.py::test_retired_tutorial_is_skipped_with_a_reason`
+  （controller 2026-09-14 裁決）。反過來，`hits` 指到一篇**表裡不存在**的教學仍是
+  `ContentError`（資料不一致，不可當成「這篇跳過」），測試 `::test_unknown_tutorial_is_a_content_error`。
+- **現況核對（2026-09-14）：§7 Task 1 的 `match="改寫集合"` 只涵蓋「漏回」與「重複回」。**
+  模型**多改**未命中步驟時，會先被 Phase 18 的 `step_rewrite_validator`（排在 `_apply_rewrite`
+  之前，00A §6.5 指定的接入點）以固定錯誤碼 `step_number_not_in_hit_set` 擋下。兩者都是
+  `ContentError`、都不建立版本，驗收矩陣不受影響；測試分別是
+  `::test_model_touching_an_extra_step_is_rejected`（越界）與 `::test_model_missing_the_hit_step_is_rejected`
+  （漏回）。
+- **本計畫選擇（2026-09-14）：模型對同一個命中步驟回兩份改寫也是 `ContentError`。** 文件的
+  `changed = {int(item["number"]): item …}` 會讓後一筆靜靜蓋掉前一筆，同一份輸入重送就可能
+  得到不同結果；`_apply_rewrite` 因此多比一次 `len(changed) != len(reply["steps"])`。
+  測試 `::test_model_answering_the_same_step_twice_is_rejected`。
+- **現況核對（2026-09-14）：`_prepare_one` 收的是 `Tutorial` 物件而不是 `slug`。** 退役過濾
+  已經在 `prepare_update` 讀過 `get_tutorial(slug)`，再讀一次只是多一個請求；`_prepare_one`
+  是 module-private helper，不在 00A §6.9 的介面清單裡，改簽名不影響 P52。
+- **未做／建議（§現況核對 b6）：`ObjectAlreadyExists` 不轉成「讀回既有輸出」。** `_rewrite_once`
+  的正常重送已由前面那次 `get_object` 涵蓋；會撞到條件寫入就代表兩個執行同時在改同一篇，
+  本 Phase 讓它以 `PermanentError` 交給 ASL 的 Catch，不吞、也不加補救分支。
+- **現況核對（2026-09-14）：`StepRewrite` 的 `maxTokens` 由 P46 補成 2048。** 00A §3.7 把
+  P46／P51 列在「教學寫作模型 `max_tokens` 2048、`temperature` 0.1」那一列，但 P17 原本的
+  `WRITING_MAX_TOKENS` 只有 `TutorialDraft`。P46 在 commit `4d8d3c4` 以 controller 核准的
+  R3.6 例外補上 `"StepRewrite": 2048` 並同步改了 `tests/unit/test_writing_validation.py`；
+  本 Phase 只消費 `inference_config(StepRewrite)`，**沒有**動 `writing/client.py`。截斷
+  （`stopReason == "max_tokens"`）仍由 Phase 15 判成 `PermanentError`，不發布。
+- **現況核對（2026-09-14）：`prompt_release_rewrite` 不自創分區名稱。** 三個分區照
+  `writing/prompts.py` 的共同契約：`<allowed_features>`（程式產生、JSON 編碼）、
+  `<active_rules>`（`render_rules_block` 的結果）、`<source_data>`（`kind`／`feature`／
+  `old_name`／`new_name`／`evidence` 與**命中步驟原文**，全部經 `_as_data`，D-67）。
+  命中編號由列出來的步驟行自己表達，`targets` 只決定列哪幾行，所以沒有 `<targets>` 分區。
+
 ## 11. 完成清單
 
-- [ ] `assert_unchanged` 與 `prepare_update` 的名稱與簽名符合本文件與 00A；命中步驟以外的步驟物件與四個段落都有 byte-for-byte assertion。
-- [ ] 模型越界改寫、漏改、改動 Feature、步驟數量改變、空文字五種情況都以 `ContentError` 結束且無新版本。
-- [ ] `reason` 固定為 `release:<id>`，diff 範圍只含命中步驟，`rules_applied` 只含本次實際注入的 active 規則；驗證時間來自 `analytics/status_writer.py` 的 `load_validated_at(repository)`，本 Phase 沒有第二份 `_load_validated_at`。
-- [ ] lease scope 是 `TUTORIAL#<slug>`、衝突丟 `TransientError`、例外路徑也會 `release_lease`；同 operation 重送取回同一版號且不重呼叫模型。
-- [ ] 每篇教學都先 `accept` 一筆 `operation_id_for("release-update", f"{release.id}--{slug}")` 子 operation，再用它呼叫 `allocate_version`（D-59）；父 operation 不佔版號，也沒有第二次 `record_version`。
-- [ ] REL Rule 8、10、11、13、14 與 APL Rule 8 有直接 assertion，且各自寫明在哪一個測試檔。
-- [ ] 未把 Fake 的 PASS 說成 O2／O3 已通過，也沒有在本 Phase 發布任何版本。
+- [x] `assert_unchanged` 與 `prepare_update` 的名稱與簽名符合本文件與 00A；命中步驟以外的步驟物件與四個段落都有 byte-for-byte assertion。
+- [x] 模型越界改寫、漏改、改動 Feature、步驟數量改變、空文字五種情況都以 `ContentError` 結束且無新版本。
+- [x] `reason` 固定為 `release:<id>`，diff 範圍只含命中步驟，`rules_applied` 只含本次實際注入的 active 規則；驗證時間來自 `analytics/status_writer.py` 的 `load_validated_at(repository)`，本 Phase 沒有第二份 `_load_validated_at`。
+- [x] lease scope 是 `TUTORIAL#<slug>`、衝突丟 `TransientError`、例外路徑也會 `release_lease`；同 operation 重送取回同一版號且不重呼叫模型。
+- [x] 每篇教學都先 `accept` 一筆 `operation_id_for("release-update", f"{release.id}--{slug}")` 子 operation，再用它呼叫 `allocate_version`（D-59）；父 operation 不佔版號，也沒有第二次 `record_version`。
+- [x] REL Rule 8、10、11、13、14 與 APL Rule 8 有直接 assertion，且各自寫明在哪一個測試檔。
+- [x] 未把 Fake 的 PASS 說成 O2／O3 已通過，也沒有在本 Phase 發布任何版本。
