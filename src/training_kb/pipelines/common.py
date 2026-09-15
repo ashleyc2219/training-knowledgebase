@@ -6,16 +6,27 @@
 讓 Step Functions 的 `Catch` 導向 `PipelineFailed`，整次執行不建版、不發布。
 """
 
-from collections.abc import Callable, Sequence
+import os
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, get_args
+from importlib import import_module
+from typing import Any, Literal, get_args
 
+import boto3
+
+from training_kb import faults
+from training_kb.clock import now_utc
 from training_kb.config import Settings
 from training_kb.errors import PermanentError, TransientError
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import Repository
-from training_kb.writing.client import Writer
+from training_kb.writing.client import (
+    BedrockWriter,
+    CallTrace,
+    Writer,
+    build_bedrock_client,
+)
 
 # --- 1. 型別 ---------------------------------------------------------------
 
@@ -105,3 +116,86 @@ def task_name(task: TaskFn) -> str:
     Phase 41 的 `test_ticket_asl.py` 就是拿它逐一比對 ASL 的七個 Task。
     """
     return getattr(task, "__name__", "").removeprefix("task_")
+
+
+_PIPELINE_HANDLERS: dict[str, str] = {
+    "ticket-analysis": "training_kb.pipelines.ticket:ticket_analysis_handler",
+    "release-update": "training_kb.pipelines.release:release_update_handler",
+    "feedback-review": "training_kb.pipelines.feedback:feedback_review_handler",
+}
+"""三條 pipeline 的直接入口；現在就寫滿，所以一律**延後 import**（P48／P52 還沒落地）。"""
+
+FAULT_TASK_ENV = "TKB_FAULT_TASK"
+"""`"<pipeline>:<task>"`：讓指定的那一個 Task 必定丟 `TransientError`（Phase 41 新增）。
+
+不是 `Settings` 欄位，`load_settings` 不讀它（00A §3.5 的執行期開關清單）。
+與 `faults.FAULT_POINTS` 的五個切點**無關**：那五個切點都不在三條 pipeline 的 Task 邊界上，
+而 P59 的契約測試又要求它們在三支檔案裡各恰好出現一次，所以不得加第六個切點。
+"""
+
+
+def maybe_fail_task(pipeline: str, task: str, env: Mapping[str, str] | None = None) -> None:
+    """`TKB_FAULT_TASK` 命中這一個 Task 就丟 `TransientError`；`TKB_ENV=prod` 一律不生效。
+
+    丟的是 `TransientError` **本身**而不是 `faults.InjectedFault`：Step Functions 的
+    `ErrorEquals` 比對 Lambda runtime 回報的**類別名字串**，不認繼承，丟子類等於證出
+    「這個錯誤沒有被重試」的假陰性（Phase 41 §7 的停止條件就是在證這件事）。
+
+    每次 invoke 都重讀環境變數，**不做模組層快取**：雲端是用
+    `aws lambda update-function-configuration` 在兩次執行之間開關它的。
+    """
+    values: Mapping[str, str] = os.environ if env is None else env
+    if values.get(faults.ENV_NAME_ENV) == faults.PRODUCTION:
+        return
+    if values.get(FAULT_TASK_ENV, "") == f"{pipeline}:{task}":
+        raise TransientError(f"注入 Task 故障：{pipeline}:{task}")
+
+
+def build_deps(settings: Settings) -> Deps:
+    """真實 AWS 的相依組裝；形狀照 `ingress._build_wiring`，只是不需要 `PipelineStarter`。
+
+    client 一律在這裡才建立，模組 import 時不碰網路。`BedrockWriter` 在
+    `generation_model_id` 是 `None` 時**建構不會失敗**（只有真的呼叫生成模型才丟
+    `PermanentError`），所以 O5 BLOCKED 不影響這支函式本身。
+    """
+    region = settings.aws_region
+    if not region:
+        raise PermanentError("build_deps 需要 TKB_AWS_REGION")
+    dynamodb = boto3.resource("dynamodb", region_name=region)
+    s3 = boto3.resource("s3", region_name=region)
+    repository = Repository(dynamodb.Table(settings.table_name),
+                            s3.Bucket(settings.content_bucket))
+    writer = BedrockWriter(build_bedrock_client(settings.bedrock_region or region), CallTrace(),
+                           generation_model_id=settings.generation_model_id,
+                           embedding_model_id=settings.embedding_model_id)
+    return Deps(operations=OperationCoordinator(repository), now=now_utc,
+                repository=repository, writer=writer, settings=settings)
+
+
+def pipeline_task_handler(event: dict[str, Any], context: object) -> dict[str, JSONValue]:
+    """共用 Lambda `training-kb-pipeline-task` 的唯一入口（00A D-24）。
+
+    依 `event["pipeline"]` 找到那條 pipeline 的直接入口，**只跑 `event["task"]` 那一個
+    Task**：整條序列由 Step Functions 的 ASL 串，不是由這裡的迴圈串。
+
+    這一層與 `*_handler` 都**不 try／except**：`TransientError` 要讓 ASL 的 Retry 抓到，
+    `PermanentError` 要讓 Catch 抓到。三種「接不起來」的情況一律轉 `PermanentError`，
+    因為它們都是部署或程式錯誤，重試不會變好：pipeline 名稱不在白名單、模組不存在、
+    模組在但 handler 屬性還沒寫（controller 預建的空殼就是這一種，丟 `AttributeError`
+    的話 `errorType` 會變成看不出原因的名字）。
+    """
+    pipeline = str(event.get("pipeline"))
+    target = _PIPELINE_HANDLERS.get(pipeline)
+    if target is None:
+        raise PermanentError(f"未知的 pipeline：{event.get('pipeline')!r}")
+    maybe_fail_task(pipeline, str(event.get("task")))
+    module_name, _, attribute = target.partition(":")
+    try:
+        module = import_module(module_name)
+    except ModuleNotFoundError as error:      # 模組整支不存在
+        raise PermanentError(f"{module_name} 尚未建立") from error
+    handler = getattr(module, attribute, None)
+    if handler is None:                       # 模組在、handler 還沒寫（P48／P52 未實作）
+        raise PermanentError(f"{module_name} 還沒有 {attribute}")
+    result: dict[str, JSONValue] = handler(event, context)
+    return result

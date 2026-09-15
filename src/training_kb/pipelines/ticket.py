@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from training_kb.analytics.status_writer import load_validated_at
 from training_kb.clock import to_iso, utc_date
-from training_kb.config import Thresholds
+from training_kb.config import Thresholds, load_settings
 from training_kb.content import VersionPlan, allocate_version, create_version, validate_content
 from training_kb.errors import ContentError, PermanentError
 from training_kb.keys import META, feature_pk, operation_ref, ticket_pk
@@ -36,7 +36,14 @@ from training_kb.models import (
     TutorialStatus,
 )
 from training_kb.operations import OperationCoordinator
-from training_kb.pipelines.common import Deps, JSONValue, TaskFn, run_sequence
+from training_kb.pipelines.common import (
+    Deps,
+    JSONValue,
+    TaskFn,
+    build_deps,
+    run_sequence,
+    task_name,
+)
 from training_kb.publishing import Publisher, PublishRequest
 from training_kb.repository import DynamoItem, Repository, item_to_model
 from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
@@ -735,3 +742,27 @@ def run_ticket_analysis(state: dict[str, JSONValue], deps: Deps) -> dict[str, JS
     兩邊共用同一組函式，所以本機序列與雲端分支不會長出兩套語意。
     """
     return run_sequence("ticket-analysis", state, TICKET_ANALYSIS_TASKS, deps)
+
+
+_TASK_BY_NAME: dict[str, TaskFn] = {task_name(task): task for task in TICKET_ANALYSIS_TASKS}
+"""ASL `Parameters.task` -> Task 函式；名稱由 `task_name` 導出，不另打一份字串表。"""
+
+_DEPS: Deps | None = None
+"""Lambda 容器層級的相依快取：同一個容器只組一次 boto3 client 與 `BedrockWriter`。"""
+
+
+def ticket_analysis_handler(event: dict[str, Any], context: object) -> dict[str, JSONValue]:
+    """`ticket-analysis` 的直接入口：**只跑 `event["task"]` 指定的那一個 Task**。
+
+    不 try／except：`TransientError` 要讓 ASL 的 Retry 抓到，`PermanentError` 要讓 Catch
+    抓到（設計 §14.2）。相依在第一次 invoke 時才組（模組 import 時不碰網路），之後同一個
+    容器沿用；環境變數類的執行期開關**不跟著快取**（見 `common.maybe_fail_task`）。
+    """
+    global _DEPS
+    task = _TASK_BY_NAME.get(str(event.get("task")))
+    if task is None:
+        raise PermanentError(f"ticket-analysis 沒有名為 {event.get('task')!r} 的 task")
+    if _DEPS is None:
+        _DEPS = build_deps(load_settings())
+    state = event.get("state")
+    return task(dict(state) if isinstance(state, dict) else {}, _DEPS)

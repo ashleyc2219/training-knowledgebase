@@ -22,10 +22,16 @@ import pytest
 from test_ticket_decide import FakeOperations, FakeRepository, FakeWriter, dt
 
 from training_kb.config import Settings
-from training_kb.errors import PermanentError
+from training_kb.errors import PermanentError, TransientError
 from training_kb.keys import META, operation_ref, ticket_pk, tutorial_pk
 from training_kb.models import Ticket, Tutorial, TutorialStatus, TutorialVersion
-from training_kb.pipelines.common import Deps, task_name
+from training_kb.pipelines import ticket as ticket_pipeline
+from training_kb.pipelines.common import (
+    Deps,
+    build_deps,
+    pipeline_task_handler,
+    task_name,
+)
 from training_kb.pipelines.ticket import (
     TICKET_ANALYSIS_TASKS,
     TICKET_STATE_FIELDS,
@@ -326,3 +332,112 @@ def test_failure_inside_a_task_is_recorded_and_reraised(local_deps: Deps) -> Non
 
     assert [row[0] for row in local_deps.operations.failures] == [OPERATION_ID]
     assert local_deps.operations.failures[0][2] is False      # 不是暫時錯誤
+
+
+# --- Task 2 Step 3：兩層 handler 分派 ----------------------------------------
+
+
+@pytest.fixture
+def wired(local_deps: Deps, monkeypatch: pytest.MonkeyPatch) -> Deps:
+    """把 `ticket_analysis_handler` 的模組層相依換成本機替身，不連 AWS。"""
+    monkeypatch.setattr(ticket_pipeline, "_DEPS", local_deps)
+    monkeypatch.delenv("TKB_FAULT_TASK", raising=False)
+    monkeypatch.delenv("TKB_ENV", raising=False)
+    return local_deps
+
+
+def event(task: str, state: dict[str, Any] | None = None,
+          pipeline: str = "ticket-analysis") -> dict[str, Any]:
+    return {"pipeline": pipeline, "task": task,
+            "state": start_state() if state is None else state}
+
+
+def test_handler_runs_exactly_one_task(wired: Deps) -> None:
+    """Given ASL 一次只給一個 task，Then handler 只跑那一個，不會跑成整條序列。"""
+    result = pipeline_task_handler(event("ensure_embedding"), None)
+
+    assert result["ticket_id"] == "t_881"
+    assert "cluster_id" not in result and "is_recurring" not in result
+
+
+def test_handler_passes_the_state_through_for_the_next_task(wired: Deps) -> None:
+    """Given 上一個 Task 的輸出，Then 下一個 Task 接得起來（雲端就是這樣串的）。"""
+    first = pipeline_task_handler(event("ensure_embedding"), None)
+    second = pipeline_task_handler(event("assign_cluster", first), None)
+
+    assert second["cluster_id"] == "c1"
+
+
+def test_unknown_pipeline_is_a_permanent_error(wired: Deps) -> None:
+    with pytest.raises(PermanentError, match="nope"):
+        pipeline_task_handler(event("ensure_embedding", pipeline="nope"), None)
+
+
+def test_module_without_its_handler_is_a_permanent_error(wired: Deps) -> None:
+    """Given controller 預建的空殼（模組 import 得到、handler 屬性還沒有），Then 明確失敗。
+
+    這條測試會在 P48 落地 `feedback_review_handler` 之後自然失效，那時由 P48 改掉；
+    本 Phase 不預先放寬（不然 Lambda 會丟 `AttributeError`，`errorType` 就看不出原因）。
+    """
+    with pytest.raises(PermanentError, match="feedback_review_handler"):
+        pipeline_task_handler(event("list_targets", pipeline="feedback-review"), None)
+
+
+def test_unknown_task_name_is_a_permanent_error(wired: Deps) -> None:
+    with pytest.raises(PermanentError, match="nope"):
+        pipeline_task_handler(event("nope"), None)
+
+
+# --- Task 2 Step 3：TKB_FAULT_TASK 故障注入 ----------------------------------
+
+
+def test_fault_task_raises_transient_error_itself(wired: Deps,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given `TKB_FAULT_TASK` 命中，Then 丟的類別名逐字是 `TransientError`。
+
+    ASL 的 `ErrorEquals: ["TransientError"]` 比對**類別名字串**，不認繼承，所以注入
+    一定要丟 `TransientError` 本身；丟子類（例如 P59 的 `InjectedFault`）在雲端不會
+    命中第一條 retrier，證出來的是假陰性。
+    """
+    monkeypatch.setenv("TKB_FAULT_TASK", "ticket-analysis:name_gap")
+
+    with pytest.raises(TransientError) as caught:
+        pipeline_task_handler(event("name_gap"), None)
+
+    assert type(caught.value).__name__ == "TransientError"
+
+
+def test_fault_task_only_hits_the_named_task(wired: Deps,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TKB_FAULT_TASK", "ticket-analysis:name_gap")
+
+    assert pipeline_task_handler(event("ensure_embedding"), None)["ticket_id"] == "t_881"
+
+
+def test_fault_task_never_fires_in_prod(wired: Deps,
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TKB_FAULT_TASK", "ticket-analysis:ensure_embedding")
+    monkeypatch.setenv("TKB_ENV", "prod")
+
+    assert pipeline_task_handler(event("ensure_embedding"), None)["ticket_id"] == "t_881"
+
+
+def test_fault_task_is_read_on_every_invoke(wired: Deps,
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 環境變數在兩次 invoke 之間才設上去，Then 第二次就生效（不做模組層快取）。"""
+    pipeline_task_handler(event("ensure_embedding"), None)
+    monkeypatch.setenv("TKB_FAULT_TASK", "ticket-analysis:ensure_embedding")
+
+    with pytest.raises(TransientError):
+        pipeline_task_handler(event("ensure_embedding"), None)
+
+
+def test_build_deps_wires_the_four_dependencies() -> None:
+    """Given 一份 `Settings`，Then `build_deps` 組出四個相依（形狀照 `_build_wiring`）。"""
+    deps = build_deps(Settings(table_name="training_kb", content_bucket="tkb",
+                               aws_region="us-east-1"))
+
+    assert deps.need_settings().table_name == "training_kb"
+    assert deps.need_repository().table_name == "training_kb"
+    assert deps.need_writer() is not None
+    assert deps.operations is not None

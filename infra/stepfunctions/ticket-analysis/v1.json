@@ -1,0 +1,342 @@
+{
+  "Comment": "Ticket Analysis（Phase 41）：七個 Task、兩個 Choice、四個成功終點。",
+  "StartAt": "EnsureEmbedding",
+  "States": {
+    "AssignCluster": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "EvaluateRecurring",
+      "Parameters": {
+        "pipeline": "ticket-analysis",
+        "state.$": "$",
+        "task": "assign_cluster"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "ChooseAction": {
+      "Choices": [
+        {
+          "Next": "CreateFirstVersion",
+          "StringEquals": "CREATE",
+          "Variable": "$.action"
+        },
+        {
+          "Next": "Kept",
+          "StringEquals": "KEEP",
+          "Variable": "$.action"
+        },
+        {
+          "Next": "GapRetained",
+          "StringEquals": "NO_FEATURE",
+          "Variable": "$.action"
+        }
+      ],
+      "Default": "PipelineFailed",
+      "Type": "Choice"
+    },
+    "CreateFirstVersion": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "PublishVersion",
+      "Parameters": {
+        "pipeline": "ticket-analysis",
+        "state.$": "$",
+        "task": "create_first_version"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "DecideAction": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "ChooseAction",
+      "Parameters": {
+        "pipeline": "ticket-analysis",
+        "state.$": "$",
+        "task": "decide_action"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "EnsureEmbedding": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "AssignCluster",
+      "Parameters": {
+        "pipeline": "ticket-analysis",
+        "state.$": "$",
+        "task": "ensure_embedding"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "EvaluateRecurring": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "IsRecurring",
+      "Parameters": {
+        "pipeline": "ticket-analysis",
+        "state.$": "$",
+        "task": "evaluate_recurring"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "GapRetained": {
+      "Type": "Succeed"
+    },
+    "IsRecurring": {
+      "Choices": [
+        {
+          "BooleanEquals": true,
+          "Next": "NameGap",
+          "Variable": "$.is_recurring"
+        }
+      ],
+      "Default": "NotRecurring",
+      "Type": "Choice"
+    },
+    "Kept": {
+      "Type": "Succeed"
+    },
+    "NameGap": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "DecideAction",
+      "Parameters": {
+        "pipeline": "ticket-analysis",
+        "state.$": "$",
+        "task": "name_gap"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "NotRecurring": {
+      "Type": "Succeed"
+    },
+    "PipelineFailed": {
+      "Cause": "以失敗結束，不發布新版本",
+      "Error": "PipelineFailed",
+      "Type": "Fail"
+    },
+    "PublishVersion": {
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PipelineFailed",
+          "ResultPath": "$.failure"
+        }
+      ],
+      "Next": "Published",
+      "Parameters": {
+        "pipeline": "ticket-analysis",
+        "state.$": "$",
+        "task": "publish_version"
+      },
+      "Resource": "${PipelineTaskFunctionArn}",
+      "Retry": [
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "TransientError"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        },
+        {
+          "BackoffRate": 2,
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Type": "Task"
+    },
+    "Published": {
+      "Type": "Succeed"
+    }
+  }
+}
