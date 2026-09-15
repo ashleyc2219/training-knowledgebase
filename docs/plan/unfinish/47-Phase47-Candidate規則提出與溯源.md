@@ -196,7 +196,7 @@ propose_candidate（每組最多呼叫模型一次）
 
 ### Task 1：同版同類分組與五筆邊界
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/test_rule_proposal.py
@@ -231,7 +231,7 @@ def test_duplicate_ids_and_unapproved_categories_do_not_count():
     assert candidate_groups(mixed, APPROVED) == ()
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_rule_proposal.py -q
@@ -239,7 +239,7 @@ uv run pytest tests/unit/test_rule_proposal.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'candidate_groups' from 'training_kb.pipelines.feedback'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/pipelines/feedback.py（檔案由 Phase 44 建立，本階段追加）
@@ -272,7 +272,7 @@ def candidate_groups(feedback: Iterable[Feedback],
 
 `item.category` 可能是 `None` 或 `待分類`；兩者都不在核定類別表裡，所以 `in approved` 直接排除，不需要額外分支。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_rule_proposal.py -q
@@ -280,7 +280,7 @@ uv run pytest tests/unit/test_rule_proposal.py -q
 
 預期：三個測試全部 `passed`；4／5 邊界、跨版 3+2、重複 ID 與未核定類別都不會湊足門檻。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/unit/test_rule_proposal.py
@@ -289,7 +289,7 @@ git commit -m "feat(rules): 建立同版同類候選群組"
 
 ### Task 2：鎖定 `applies_when` 與溯源欄位
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # 續寫 tests/unit/test_rule_proposal.py
@@ -357,7 +357,7 @@ def test_proposal_rejects_illegal_model_fields(field, value):
     assert repository.saved == [] and writer.calls == ["propose_rule"]
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_rule_proposal.py -q
@@ -365,7 +365,7 @@ uv run pytest tests/unit/test_rule_proposal.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'propose_candidate'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/pipelines/feedback.py（續）
@@ -420,7 +420,7 @@ def propose_candidate(group: CandidateGroup, *, writer: Writer, repo: Repository
 
 `isinstance(value, bool)` 要單獨擋掉：Python 的 `bool` 是 `int` 的子類，這一行直接說明「`True` 不是合法值」，日後放寬型別也不會破功。`prompt_propose_rule` 沿用 [Phase 17](17-Phase17-Claude結構化輸出與Prompt.md) 的分區寫法：`<derived_from>`、`<category>`、`<evidence_ids>` 由程式產生，回饋留言是不可信文字，一律先經 Phase 17 的 `_as_data`（`html.escape`）轉義再包進 `<source_data>`，當資料不當指令（D-67）；不得自創新的分區名稱。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_rule_proposal.py -q
@@ -428,7 +428,7 @@ uv run pytest tests/unit/test_rule_proposal.py -q
 
 預期：合法案例寫出一筆 `status=candidate` 的 `AuthoringRule`，模型回傳的 `evidence`／`derived_from` 被忽略；十一個非法欄位參數案例（七個 `applies_when`、四個 `rule`）全部 `ContentError` 且 `repository.saved == []`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py src/training_kb/writing/prompts.py tests/unit/test_rule_proposal.py
@@ -437,7 +437,7 @@ git commit -m "feat(rules): 提出可追溯的 candidate 規則"
 
 ### Task 3：決定性 `rule_id` 與兩條分支互不依賴
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # 續寫 tests/unit/test_rule_proposal.py
@@ -475,7 +475,7 @@ def test_rating_does_not_change_the_candidate_threshold():
     assert candidate_groups(too_few, APPROVED) == () and writer.calls == []
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_rule_proposal.py -q
@@ -483,7 +483,7 @@ uv run pytest tests/unit/test_rule_proposal.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'candidate_rule_id'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/pipelines/feedback.py（續）
@@ -498,7 +498,7 @@ def candidate_rule_id(group: CandidateGroup) -> str:
 
 `propose_candidate` 在 Task 2 已經有「`RULE#<rule_id>` 已存在就回既有規則」的分支，所以這個 Task 只補決定性 ID；兩者合起來就是「同一組證據重送不會多出第二條規則、也不會多打一次模型」。`"R-f6c7a0d2"` 是上面五個 ID 那組的實際輸出；換掉 `separators`、`ensure_ascii` 或排序方式都會改變它，測試會立刻紅燈。（現況核對 2026-09-14：三個期望值已用本片段的實作重算過——`(prepare-meeting@v1, 找不到按鈕, f_1..f_5)` → `R-f6c7a0d2`；`(prepare-meeting@v2, 同上)` → `R-7e16d4f3`；§2 八筆證據那組 → `R-ad0afde8`，與 00A §6.9 的範例一致。）
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_rule_proposal.py -q
@@ -506,7 +506,7 @@ uv run pytest tests/unit/test_rule_proposal.py -q
 
 預期：全部 `passed`；`writer.calls` 長度為 1 證明第二次沒有呼叫模型，`rating=5` 與 `rating=1` 兩個案例證明提案門檻與評分完全無關。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/unit/test_rule_proposal.py
@@ -559,15 +559,27 @@ git commit -m "feat(rules): 以決定性規則 ID 避免重複提案"
 - 設計決策：F25（證據僅同一 TutorialVersion）、F26（不必先達弱教學門檻）、F27（一般寫作不自動試用 candidate）、D15（`evidence` 只存 ID 清單）、D16（`applies_when` 只支援 `step.type` 等於 `click_ui`／`input`／`read`）、D18（`derived_from` 恰好一個）。
 - [00A 共用契約與名詞](00A-共用契約與名詞.md) 第 5.1 節（`AuthoringRule` 欄位）、第 6.5 節（`RuleProposal` required 欄位）、第 6.9 節（本 Phase 的 owner 名稱）、第 8 節 D-02 與 D-10。
 
+## 10.1 實作裁決（2026-09-14）
+
+**本計畫選擇（2026-09-14）：** 以下七點是實作時就地裁決的，語意與 §7 的示意片段相同，只是寫法不同；詳見 `docs/plan/report/phases/2026-09-14-Phase47-REP.md` 第 5 節。
+
+1. **`writing/schemas.py` 不改。** 實查 `writing/schemas.py:66` 的 `RuleProposal`，四個 required 欄位、`applies_when` 的 `enum` 與 `evidence` 的 `minItems: 5` 都在，`additionalProperties: False` 也在，本 Phase 沒有 `git add` 這支檔（呼應 §4 的現況核對 (b)1）。
+2. **`candidate_groups` 的類別判斷寫成 `if category is None or category not in approved: continue`。** §7 Task 1 的片段是 `if item.category in approved:`，語意相同，但 `mypy --strict` 看不出分桶 key 的第二欄一定是 `str`（`Feedback.category` 是 `str | None`）。多一個 `is None` 分支只是讓型別檢查過，不改變任何行為。
+3. **`_require_step_type` 把 `isinstance(value, bool)` 放在 `or` 的**前面**。** §7 Task 2 的片段是 `if not isinstance(value, str) or isinstance(value, bool)`，第二段在 `value` 已被窄化成 `str` 之後才執行，等於永遠是 `False`。改成 `if isinstance(value, bool) or not isinstance(value, str)` 後，「`True` 不是合法值」這一句是真的在擋，`True` 的測試案例仍然 `ContentError`。
+4. **`prompt_propose_rule` 的四個分區。** 順序固定 `<derived_from>` → `<category>` → `<evidence_ids>` → `<source_data>`；前兩個雖然來自自家資料仍一併 `_as_data`，`<evidence_ids>` 沿用同檔 `<allowed_features>` 的 `json.dumps(..., ensure_ascii=False)` 寫法，留言用 `"\n".join` 串好後經 `_as_data` 放進 `<source_data>`（D-67）。沒有自創新的分區名稱。
+5. **測試用本檔自己的 `FakeWriter`／`FakeRepository`**（形狀與 `tests/unit/conftest.py` 的 `RecordingWriter` 相容），**沒有**取名 `fake_writer` 以免蓋掉既有 fixture；`pytest.mark.parametrize` 的第一個參數叫 `field_name` 而不是 §7 片段的 `field`，避免遮蔽同檔 `from dataclasses import field`。
+6. **`REV` Rule 9 用 AST 靜態斷言。** 讀 `pipelines/ticket.py`、`pipelines/release.py` 與 `analytics/*.py` 的原始碼後**以 `ast` 取程式碼中的名稱**（`ImportFrom`／`Name`／`Attribute`／`FunctionDef`），而不是整份字串 `in`：後者會被註解或 docstring 裡的「不呼叫 `propose_candidate`」誤判成違規。
+7. **驗收矩陣之外多加四個測試**（都在 `tests/unit/test_rule_proposal.py`）：`prompt_propose_rule` 的分區與轉義、prompt 只帶 group 內 ID 的留言（同版別組的留言不外洩）、手工造出的四筆 group 連模型都不打、以及 §2／00A §6.9 的八筆證據範例 `R-ad0afde8`。
+
 ## 11. 完成清單
 
-- [ ] 同版、同類、不同 ID、至少五筆四個條件各有直接測試。
-- [ ] 跨版 3+2、重複 ID、`待分類` 與 `None` 類別都不會湊足門檻。
-- [ ] `evidence` 只存 Feedback ID，`derived_from` 恰好一個版本。
-- [ ] `AuthoringRule.applies_when` 是 `StepType`，模型輸出的字串驗證後才轉型。
-- [ ] `status` 固定 `candidate`、`applied_to` 初始為空，而且不是由模型決定。
-- [ ] `rule_id` 由 `candidate_rule_id(group)` 決定性產生，重送不重複提案也不重複呼叫模型。
-- [ ] candidate 分支不讀 `rating`、不呼叫 `is_weak`，與弱教學門檻完全分開。
-- [ ] `PRP` Rule 1–5 與 `REV` Rule 9 有直接 assertion；其餘相關 Rule 已標明 primary 在哪一份。
-- [ ] 文件與報告沒有把 candidate 寫成已驗證、已生效或可供一般寫作使用（O7 未到、O5 **BLOCKED**；O2 已 PASS 但本 Phase 不依賴它）。
-- [ ] `pipelines/feedback.py` 與 `writing/prompts.py` 只用 Edit 追加 `# ---- Phase 47 ----` 自己的區段，沒有動 P44／P45 的程式；`writing/schemas.py` 若未實際缺欄位就不提交。
+- [x] 同版、同類、不同 ID、至少五筆四個條件各有直接測試。
+- [x] 跨版 3+2、重複 ID、`待分類` 與 `None` 類別都不會湊足門檻。
+- [x] `evidence` 只存 Feedback ID，`derived_from` 恰好一個版本。
+- [x] `AuthoringRule.applies_when` 是 `StepType`，模型輸出的字串驗證後才轉型。
+- [x] `status` 固定 `candidate`、`applied_to` 初始為空，而且不是由模型決定。
+- [x] `rule_id` 由 `candidate_rule_id(group)` 決定性產生，重送不重複提案也不重複呼叫模型。
+- [x] candidate 分支不讀 `rating`、不呼叫 `is_weak`，與弱教學門檻完全分開。
+- [x] `PRP` Rule 1–5 與 `REV` Rule 9 有直接 assertion；其餘相關 Rule 已標明 primary 在哪一份。
+- [x] 文件與報告沒有把 candidate 寫成已驗證、已生效或可供一般寫作使用（O7 未到、O5 **BLOCKED**；O2 已 PASS 但本 Phase 不依賴它）。
+- [x] `pipelines/feedback.py` 與 `writing/prompts.py` 只用 Edit 追加 `# ---- Phase 47 ----` 自己的區段，沒有動 P44／P45 的程式；`writing/schemas.py` 若未實際缺欄位就不提交。
