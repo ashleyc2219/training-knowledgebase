@@ -31,11 +31,7 @@ from training_kb.errors import (
     PermanentError,
     TransientError,
 )
-from training_kb.ingress import (
-    DEFAULT_FEEDBACK_CATEGORIES,
-    approved_categories,
-    operation_id_for,
-)
+from training_kb.ingress import approved_categories, operation_id_for
 from training_kb.keys import operation_ref, rule_pk
 from training_kb.models import (
     AuthoringRule,
@@ -851,9 +847,9 @@ def task_evaluate_targets(state: dict[str, JSONValue], deps: Deps) -> dict[str, 
     """
     repository, writer = deps.need_repository(), deps.need_writer()
     operation_id = str(state["operation_id"])
-    # P43 併入後改成 `approved_categories(repository)`（00A §6.9）；與 `select_weak_targets`
-    # 目前用的是同一個常數，兩條分支的核定類別表不會分岔。
-    approved = DEFAULT_FEEDBACK_CATEGORIES
+    # Phase 43 已併入：與 `select_weak_targets` 讀**同一張**核定表
+    # （`CONFIG#feedback_categories`），兩條分支的核定類別表不會分岔。
+    approved = approved_categories(repository)
     weak = {target.version_id: target
             for target in select_weak_targets(repository=repository, mode=_review_mode(state),
                                               now=deps.now(),

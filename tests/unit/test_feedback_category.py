@@ -11,7 +11,7 @@ Pydantic 模型，00A §3.6），並把每次讀寫記下來——「核定表�
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -51,11 +51,17 @@ class FakeRepository:
         self.reads: list[str] = []
         self.writes: list[str] = []
         self.tutorials: list[dict[str, Any]] = []
+        self.objects: dict[str, bytes] = {}
 
     def scan_entity(self, entity: str, *, meta_only: bool = True,
                     consistent: bool = False) -> list[dict[str, Any]]:
-        """只給 `select_weak_targets` 的接線測試用；沒有教學可掃就沒有弱教學。"""
+        """只給兩條接線測試用；沒有教學可掃就沒有弱教學、也沒有 candidate。"""
         return list(self.tutorials) if entity == "TUTORIAL" else []
+
+    def put_object(self, key: str, body: bytes, content_type: str, *,
+                   if_none_match: bool) -> None:
+        """`task_evaluate_targets` 收尾會寫 `review-no-change.json`；本檔只要它別炸。"""
+        self.objects[key] = body
 
     def get_meta_item(self, pk: str) -> dict[str, Any] | None:
         self.reads.append(pk)
@@ -295,6 +301,33 @@ def test_select_weak_targets_now_reads_the_approved_table(
     configured_repo.tutorials = []
     assert select_weak_targets(repository=configured_repo, mode="formal", now=NOW) == ()
     assert FEEDBACK_CATEGORIES_PK in configured_repo.reads
+
+
+def test_task_evaluate_targets_now_reads_the_approved_table(
+        configured_repo: FakeRepository, fake_writer: "RecordingWriter") -> None:
+    """Given P48 的每日檢視 Task／When 執行一次／Then 它也去讀了 `CONFIG#feedback_categories`。
+
+    `pipelines/feedback.py` 有**兩處**暫用 `DEFAULT_FEEDBACK_CATEGORIES`：`select_weak_targets`
+    與 `task_evaluate_targets`（candidate 分群）。兩處都要換，否則維護者匯入設定之後，
+    REFINE 分支用設定值、candidate 分支用初始兩類，同一次執行的核定表會分岔。
+
+    沒有教學可掃、`target_version_ids` 是空的，所以兩條分支的迴圈都不會進去；這裡要的證據
+    是那次讀取。`operations` 傳一個不會被用到的替身（迴圈沒進去就不會 `accept`）。
+    """
+    from training_kb.config import load_settings
+    from training_kb.pipelines.common import Deps
+    from training_kb.pipelines.feedback import task_evaluate_targets
+
+    deps = Deps(operations=cast(Any, object()), now=lambda: NOW,
+                repository=cast(Any, configured_repo), writer=fake_writer,
+                settings=load_settings({}))
+    state: dict[str, Any] = {"operation_id": "op-feedback-review-demo-2026-09-14",
+                             "mode": "formal", "project_id": "demo",
+                             "target_version_ids": []}
+    result = task_evaluate_targets(state, deps)
+    assert result["candidate_rule_ids"] == [] and result["prepared_version_ids"] == []
+    assert FEEDBACK_CATEGORIES_PK in configured_repo.reads
+    assert fake_writer.request_attempts == 0
 
 
 def test_the_analytics_handler_resolves_the_real_approved_table(
