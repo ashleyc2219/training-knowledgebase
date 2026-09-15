@@ -36,8 +36,11 @@ from training_kb.models import (
     TutorialStatus,
 )
 from training_kb.operations import OperationCoordinator
+from training_kb.pipelines.common import Deps, JSONValue, TaskFn, run_sequence
+from training_kb.publishing import Publisher, PublishRequest
 from training_kb.repository import DynamoItem, Repository, item_to_model
 from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
+from training_kb.site import SiteRenderer
 from training_kb.vectors import centroid, cosine
 from training_kb.writing.client import Writer, generate_validated_json
 from training_kb.writing.prompts import prompt_name_gap, prompt_write_tutorial
@@ -558,3 +561,177 @@ def create_first_version(gap: TicketGap, *, repository: Repository, writer: Writ
     create_version(plan, content, repository)
     record_decision("CREATE", gap, repository=repository, operation_id=operation_id, now=now)
     return plan
+
+
+# --- 8. Task 包裝與 handler（Phase 41） --------------------------------------
+
+TICKET_STATE_FIELDS: tuple[str, ...] = (
+    "operation_id", "project_id", "input_ref", "ticket_id", "cluster_id",
+    "is_recurring", "gap_ref", "action", "version_id", "published")
+"""`ticket-analysis` 的 state 只有這十個欄位（設計 §14.3、00A 第 7 節）。
+
+工單全文、向量、`feature_id` 與模型輸出全文都不進 state：execution history 會被保留，
+放進去等於把私有內容留在 Step Functions 的紀錄裡。名稱與 P52 的 `RELEASE_STATE_FIELDS`
+同一種用途，測試用 `set(result) <= set(TICKET_STATE_FIELDS)` 守住。
+"""
+
+
+def _text(state: dict[str, JSONValue], field: str) -> str:
+    """從 state 取一個必填的非空字串；缺了就當場說出缺哪一個欄位。"""
+    value = state.get(field)
+    if not isinstance(value, str) or not value:
+        raise PermanentError(f"ticket-analysis state 缺少 {field}")
+    return value
+
+
+def _input_ticket(state: dict[str, JSONValue], repository: Repository) -> Ticket:
+    """把接入層存下的 canonical 輸入（`input_ref`）讀回成 `Ticket`。
+
+    state 只帶 ref 不帶工單全文，所以第一個 Task 一定要自己讀回來；pydantic 的
+    `ValidationError` 轉成 `PermanentError`，ASL 才看得到已知的錯誤名稱而不是
+    `ValidationError`（`ErrorEquals` 比對的是類別名字串）。
+    """
+    ref = _text(state, "input_ref")
+    body = repository.get_object(ref)
+    if body is None:
+        raise PermanentError(f"讀不到 canonical 輸入 {ref}")
+    try:
+        return Ticket.model_validate(json.loads(body.decode("utf-8")))
+    except (ValidationError, ValueError) as error:
+        raise PermanentError(f"canonical 輸入不是合法 Ticket：{ref}") from error
+
+
+def _stored_ticket(state: dict[str, JSONValue], repository: Repository) -> Ticket:
+    """一致讀回 `TICKET#<ticket_id>`；前一個 Task 寫回的向量或群號一定看得到。"""
+    ticket_id = _text(state, "ticket_id")
+    stored = repository.get_meta(ticket_pk(ticket_id), Ticket, consistent=True)
+    if stored is None:
+        raise PermanentError(f"工單 {ticket_id} 不存在")
+    return stored
+
+
+def _gap_of(state: dict[str, JSONValue], repository: Repository) -> TicketGap:
+    """用 `gap_ref` 把 Phase 39 的命名結果讀回來，組出 Phase 40 的 `TicketGap`。
+
+    `name_gap` 回的是 **dict**（`GapNaming` 是 JSON schema 不是型別，D-02），所以取值
+    一律 `naming["feature_id"]`。成員是**同群**工單的 ID 升序，與 `is_recurring`
+    走同一條 `list_tickets`（MVP 單專案，與 `name_gap` 的掃描結果一致）。
+    """
+    ref = _text(state, "gap_ref")
+    body = repository.get_object(ref)
+    if body is None:
+        raise PermanentError(f"讀不到 gap 命名結果 {ref}")
+    naming: dict[str, Any] = json.loads(body.decode("utf-8"))
+    cluster_id = _text(state, "cluster_id")
+    feature_id = naming.get("feature_id")
+    members = tuple(one.id for one in repository.list_tickets(_text(state, "project_id"))
+                    if one.cluster_id == cluster_id)
+    return TicketGap(cluster_id=cluster_id, gap=str(naming["gap"]),
+                     feature_id=None if feature_id is None else str(feature_id),
+                     ticket_ids=members)
+
+
+def task_ensure_embedding(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """缺向量才呼叫 Titan，並把 `ticket_id` 放進 state（Phase 38 `ensure_embedding`）。"""
+    repository = deps.need_repository()
+    ticket = ensure_embedding(_input_ticket(state, repository), writer=deps.need_writer(),
+                              repository=repository, operation_id=_text(state, "operation_id"))
+    return {**state, "ticket_id": ticket.id}
+
+
+def task_assign_cluster(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """判斷該屬於哪一群，**並把 `cluster_id` 寫回 TICKET**（`assign_cluster` 只判斷）。"""
+    repository = deps.need_repository()
+    ticket = _stored_ticket(state, repository)
+    cluster_id = assign_cluster(ticket, repository=repository)
+    if ticket.cluster_id != cluster_id:
+        repository.put_meta(ticket.model_copy(update={"cluster_id": cluster_id}),
+                            create_only=False)
+    return {**state, "cluster_id": cluster_id}
+
+
+def task_evaluate_recurring(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """同群工單在 anchor 的十四天 UTC 窗口內有沒有到門檻（Phase 39 `is_recurring`）。"""
+    repository = deps.need_repository()
+    ticket = _stored_ticket(state, repository)
+    cluster_id = _text(state, "cluster_id")
+    if ticket.cluster_id != cluster_id:      # 寫回失敗也要用本輪判定的群，不改判別結果
+        ticket = ticket.model_copy(update={"cluster_id": cluster_id})
+    return {**state, "is_recurring": is_recurring(ticket, repository=repository)}
+
+
+def task_name_gap(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """recurring 才命名 Knowledge Gap；不適用就原樣回傳（本機與雲端語意一致）。"""
+    if not state.get("is_recurring"):
+        return dict(state)
+    operation_id = _text(state, "operation_id")
+    name_gap(_text(state, "cluster_id"), repository=deps.need_repository(),
+             writer=deps.need_writer(), operation_id=operation_id,
+             operations=deps.operations)
+    # `name_gap` 自己已經把結果寫進 `operations/<op>/gap-naming.json`，這裡只放 ref：
+    # `gap` 與 `feature_id` 都不進 state。
+    return {**state, "gap_ref": operation_ref(operation_id, "gap-naming")}
+
+
+def task_decide_action(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """CREATE／KEEP／NO_FEATURE 三選一（Phase 40 `decide_ticket_action`）。
+
+    KEEP 與 NO_FEATURE 在這裡就寫 `operations/<op>/ticket-decision.json`；CREATE 的那一份
+    由 `create_first_version` 在版本建好之後寫（Phase 40 已固定的順序），所以三種結果都有
+    紀錄，而且不會先寫一份「還沒建版」的 CREATE 紀錄再被覆寫。
+    """
+    if not state.get("is_recurring"):
+        return dict(state)
+    repository = deps.need_repository()
+    gap = _gap_of(state, repository)
+    action = decide_ticket_action(gap, repository=repository)
+    if action != "CREATE":
+        record_decision(action, gap, repository=repository,
+                        operation_id=_text(state, "operation_id"), now=deps.now())
+    return {**state, "action": action}
+
+
+def task_create_first_version(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """CREATE 才寫出未發布的 v1（Phase 40 `create_first_version`）。"""
+    if state.get("action") != "CREATE":
+        return dict(state)
+    repository = deps.need_repository()
+    plan = create_first_version(_gap_of(state, repository), repository=repository,
+                                writer=deps.need_writer(), operations=deps.operations,
+                                operation_id=_text(state, "operation_id"), now=deps.now())
+    return {**state, "version_id": plan.version_id}
+
+
+def task_publish_version(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """把本輪建立的 v1 發布出去（Phase 24 `Publisher`）；CREATE 以外一律原樣回傳。
+
+    `commit` 的第一件事就是 `inspect`，檢查沒過會丟 `PublishError`，所以這裡不重複呼叫
+    一次 `inspect`。條件不符**不是例外**而是 `PublishResult.failed`（DynamoDB 已經擋下
+    這次切換，兩個欄位都沒變），所以它只讓 `published` 是 `False`，不讓整條流程失敗。
+    """
+    version_id = state.get("version_id")
+    if state.get("action") != "CREATE" or not isinstance(version_id, str) or not version_id:
+        return dict(state)
+    repository = deps.need_repository()
+    publisher = Publisher(repository, SiteRenderer(), deps.operations)
+    request = PublishRequest(version_ids=(version_id,),
+                             operation_id=_text(state, "operation_id"))
+    prepared = publisher.prepare(request, now=deps.now())
+    result = publisher.commit(prepared, now=deps.now())
+    return {**state, "published": result.failed is None}
+
+
+TICKET_ANALYSIS_TASKS: tuple[TaskFn, ...] = (
+    task_ensure_embedding, task_assign_cluster, task_evaluate_recurring, task_name_gap,
+    task_decide_action, task_create_first_version, task_publish_version)
+"""七個 Task 的固定順序；`task_name(...)` 的結果就是 ASL 的 `Parameters.task`。"""
+
+
+def run_ticket_analysis(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """本機把七個 Task 依序跑完（測試與 Demo 用）。
+
+    雲端**不走這條**：Step Functions 每個 Task 各 invoke 一次 Lambda，由
+    `pipeline_task_handler` → `ticket_analysis_handler` 只跑其中一個 Task。
+    兩邊共用同一組函式，所以本機序列與雲端分支不會長出兩套語意。
+    """
+    return run_sequence("ticket-analysis", state, TICKET_ANALYSIS_TASKS, deps)

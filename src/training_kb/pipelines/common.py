@@ -91,3 +91,17 @@ def run_sequence(pipeline: PipelineName, payload: dict[str, JSONValue],
                              isinstance(error, TransientError), now=deps.now())
         raise
     return value
+
+
+# ---- Phase 41 ----------------------------------------------------------------
+# 共用 Lambda `training-kb-pipeline-task` 的入口與相依組裝（00A D-24）。
+# 本段只由 Phase 41 建立，Phase 48／52 追加各自的區段，不改寫這裡的既有行數。
+
+
+def task_name(task: TaskFn) -> str:
+    """Task 函式名去掉 `task_` 前綴，就是 ASL `Parameters.task` 的值（00A D-24）。
+
+    名稱由函式本身導出，所以 ASL 與 Python 兩邊不可能各打一份字串而默默分岔；
+    Phase 41 的 `test_ticket_asl.py` 就是拿它逐一比對 ASL 的七個 Task。
+    """
+    return getattr(task, "__name__", "").removeprefix("task_")
