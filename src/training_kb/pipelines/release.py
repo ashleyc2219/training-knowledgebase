@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from training_kb.config import Thresholds
 from training_kb.content import parse_version_id
 from training_kb.errors import PermanentError
-from training_kb.keys import META
+from training_kb.keys import META, feature_pk
 from training_kb.models import Feature, Release
 from training_kb.repository import Repository, item_to_model
 from training_kb.vectors import cosine
@@ -132,6 +132,50 @@ def locate_feature(release: Release, *, repository: Repository, writer: Writer,
     return _normalized_match(features, keys) or _semantic_match(
         features, keys, writer=writer, operation_id=operation_id
     )
+
+
+def update_feature_aliases(feature: Feature, *, old_name: str, new_name: str,
+                           repository: Repository) -> Feature:
+    """改名收尾：把顯示名稱換成 `new_name`、把 `old_name` 收進 aliases，**主鍵不動**（D06）。
+
+    這是一次**全有或全無**的檢查：先組出目標 `aliases = (舊 aliases + old_name) - new_name`，
+    再把「新名稱與全部目標別名」逐一比對其他 Feature 的 name 與 aliases，**全部通過才**呼叫
+    `update_meta`。順序不能換——先寫再檢查會留下「name 已改、alias 撞名」的半套資料，而
+    撞名依 D07 必須整次拒絕（`PermanentError`），不可降級成 KEEP。
+
+    把 `new_name` 從 aliases 移除是**本計畫選擇（2026-09-14）**：唯一性檢查就不必對自己開
+    例外。移除用 `normalize_feature_name` 比對，所以 `prepare` 這種只差大小寫的舊別名也會
+    一併移掉，不會留下「自己的別名等於自己的名字」（那是 `Feature` 的模型不變量）。
+    aliases 固定 `sorted`，重跑寫出去的 byte 相同。
+
+    `model_copy(update=...)` **不重新驗證**，所以 `name` 與 aliases 在這裡就先 `strip` 過；
+    `Feature` 的 `bare_id` 只擋空字串、前後空白與 `#`／控制字元，中間空白本來就合法。
+    `expected_revision` 的唯一取值來源是 `Repository.revision_of(pk)`（Phase 06 §5）：
+    item 上的欄位叫 `_revision` 而且 `get_meta` 會濾掉它，不得自己挖 item 湊一個。
+    本函式只在 `kind == "renamed"` 的流程末端（Phase 52 的 `UpdateAliases`，排在
+    `PublishBatch` 之後）呼叫，所以兩個名稱任一為空就是呼叫端接錯線，直接 `PermanentError`。
+    """
+    display, previous = new_name.strip(), old_name.strip()
+    if not display or not previous:
+        raise PermanentError("old_name 與 new_name 都不可為空")
+    wanted = normalize_feature_name(display)
+    candidates = {previous, *(item.strip() for item in feature.aliases)}
+    aliases = sorted({item for item in candidates
+                      if item and normalize_feature_name(item) != wanted})
+    mine = {wanted, *(normalize_feature_name(item) for item in aliases)}
+    for other in _all_features(repository):
+        if other.feature_id == feature.feature_id:
+            continue
+        clash = sorted(mine & _names_of(other))
+        if clash:
+            raise PermanentError(f"alias 與 {other.feature_id} 衝突：{clash}")
+    pk = feature_pk(feature.feature_id)
+    repository.update_meta(
+        pk,
+        {"name": display, "aliases": aliases},
+        expected_revision=repository.revision_of(pk),
+    )
+    return feature.model_copy(update={"name": display, "aliases": aliases})
 
 
 # ---- Phase 50：步驟反查與 Safety Net（設計 §7.4、§10、F16／F17／F18） ----
