@@ -27,6 +27,7 @@ import pytest
 from moto import mock_aws
 
 from training_kb.analytics.status_writer import VALIDATED_AT_KEY
+from training_kb.clock import to_iso
 from training_kb.content import (
     MARKDOWN_CONTENT_TYPE,
     markdown_key,
@@ -417,20 +418,26 @@ def test_lease_conflict_raises_transient_error(world: World) -> None:
 
 
 def test_lease_is_released_even_when_the_rewrite_fails(world: World) -> None:
-    """Given 改寫在 lease 之內失敗，When 同 operation 重送，Then 租約已釋放且不再打模型。
+    """Given 改寫在 lease 之內失敗，When 同 operation 重送，Then 租約已釋放、版本沒建出來。
 
     重送仍然是同一個 `ContentError`（不是 `TransientError`）這件事本身就證明租約還回去了
-    ——沒還的話 `acquire_lease` 會先失敗。模型輸出在呼叫後**立刻**保存（設計 §14.2），
-    所以重送沿用同一份不合格的輸出：`ContentError` 是 `PermanentError`，走 Catch 不重試，
-    要重跑必須換一批證據（換指紋＝換 operation），不是讓模型再擲一次骰子。
+    ——沒還的話 `acquire_lease` 會先失敗。
+
+    **現況核對（修正波 2026-09-15，final review A#3）：** 本測試原本還斷言
+    `request_attempts == 1`，也就是「重送沿用同一份不合格的輸出，不讓模型再擲一次骰子」。
+    修正波把 `_reuse_or_call` 改成「存下來的改寫對不上這次的命中集合就丟掉重打」——
+    不這樣做的話，一份改寫集合永遠對不上的輸出會讓這批證據**永遠**走不完（controller
+    裁決 4）。所以現在第二次會再打一次模型（`request_attempts == 2`），要守的行為
+    ——租約有還、版本沒建出來、錯誤型別不變——完全沒變。
     """
-    queue(world, REWRITE, {"number": 2, "text": "偷改的第二步。",
-                           "feature_id": FEATURE, "type": "read"})
+    bad = {"number": 2, "text": "偷改的第二步。", "feature_id": FEATURE, "type": "read"}
+    queue(world, REWRITE, bad)
     with pytest.raises(ContentError, match="改寫集合"):
         run(world)
+    queue(world, REWRITE, bad)
     with pytest.raises(ContentError, match="改寫集合"):
         run(world)
-    assert world.writer.request_attempts == 1
+    assert world.writer.request_attempts == 2
     assert world.repo.versions.get(V2) is None
 
 
@@ -454,10 +461,15 @@ def test_operation_must_be_accepted_first(world: World) -> None:
 
 
 def test_no_step_and_same_evidence_return_none(world: World) -> None:
-    """Given NO_STEP 或同一批證據第二次送，When 改寫，Then 都回 None 且只產生過一個 v2。
+    """Given NO_STEP 或同一批證據**已經發布**之後再送，When 改寫，Then 都回 None。
 
     `NO_STEP`（F24）與 `no_new_evidence`（F23）都是**合法業務結果**，不是錯誤；兩者都不配
     版號、不呼叫模型。
+
+    **現況核對（修正波 2026-09-15，final review A#2）：** F23 的短路條件從「完整」收緊成
+    「完整**且已發布**」。本 Phase 不發布，所以這裡自己把 v2 的 `published_at` 補上，
+    重現「上一批真的發布出去了」——沒補的話第二次會拿回既有版本的 `RefinePlan`
+    （見 `test_an_unpublished_complete_version_is_offered_for_republish`）。
     """
     queue(world, REWRITE)
     empty = DiagnosisResult(V1, (), {}, world.diagnosis.feedback_ids)
@@ -466,7 +478,37 @@ def test_no_step_and_same_evidence_return_none(world: World) -> None:
                           operation_id=world.operation_id) is None
     first = run(world)
     assert first is not None and first.version_id == V2
-    assert run(world) is None  # 同一批證據：no_new_evidence（F23）
+    publish(world, V2)
+    assert run(world) is None  # 同一批證據且已發布：no_new_evidence（F23）
+    assert world.writer.request_attempts == 1
+    assert sorted(key for key in world.repo.versions if key.startswith(f"{SLUG}@")) == [V1, V2]
+
+
+def publish(world: World, version_id: str) -> None:
+    """把一版切成已發布；`Publisher.commit` 在真實流程裡做的就是這件事的一半。"""
+    pk = version_pk(version_id)
+    world.repo.update_meta(pk, {"published_at": to_iso(NOW)},
+                           expected_revision=world.repo.revision_of(pk))
+
+
+def test_an_unpublished_complete_version_is_offered_for_republish(world: World) -> None:
+    """Given 版本已建好但還沒發布，When 同一批證據再送，Then 拿回**既有版本**的 RefinePlan。
+
+    修正波（final review A#2）：原本這裡回 `None`（`no_new_evidence`），所以
+    「上一次在 Prepare／Inspect／Commit 掛掉」之後，後續每一次 Review 都會短路成沒有新
+    證據——`prepared_version_ids` 是空的、整條流程 `Succeeded`，那一版卻永遠不會發布。
+
+    回傳的是既有產物，不是重做一次：不打模型、不配新版號、版本總數不變。
+    """
+    queue(world, REWRITE)
+    first = run(world)
+    assert first is not None and first.version_id == V2
+
+    again = run(world)
+
+    assert again is not None and again.version_id == V2
+    assert again.evidence_fingerprint == first.evidence_fingerprint
+    assert again.content == first.content
     assert world.writer.request_attempts == 1
     assert sorted(key for key in world.repo.versions if key.startswith(f"{SLUG}@")) == [V1, V2]
 

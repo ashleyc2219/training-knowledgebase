@@ -215,10 +215,14 @@ def run_retry_scenario(scenario: Scenario) -> dict[str, Any]:
     created = scenario.repo.get_version(scenario.next_version_id)
     assert created is not None and created.published_at is None  # 未發布（不碰 site/）
 
+    # 修正波（final review A#2）：F23 的短路條件是「完整**且已發布**」。這裡的 v2 還沒發布
+    # （本 Phase 不碰 site/），所以第三次拿回的是**既有版本**的 RefinePlan——讓上一次沒發布
+    # 完的那一版回到下一批重新發布，而不是短路成「沒有新證據」讓它永遠停在未發布。
+    # 重點不變：不再打模型、不配新版號。
     third = prepare_refine(scenario.diagnosis, repo=scenario.repo, writer=writer,
                            operations=scenario.operations,
                            operation_id=scenario.operation_id)
-    assert third is None                                        # no_new_evidence（F23）
+    assert third is not None and third.version_id == scenario.next_version_id
     assert writer.request_attempts == 1
 
     return {

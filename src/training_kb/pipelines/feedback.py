@@ -57,9 +57,11 @@ from training_kb.pipelines.common import (
 )
 from training_kb.publishing import (
     MAX_BATCH_VERSIONS,
+    PENDING_PROMOTE_NAME,
     PreparedPublish,
     Publisher,
     PublishRequest,
+    public_site_keys,
 )
 from training_kb.repository import Repository, item_to_model
 from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
@@ -638,9 +640,28 @@ def _known_feature_ids(repo: Repository) -> frozenset[str]:
                      for item in repo.scan_entity("FEATURE"))
 
 
+def _rewritten_steps(reply: object) -> frozenset[int] | None:
+    """`StepRewrite` 回覆改到哪幾個步驟；形狀不對就回 `None`（代表「不可沿用」）。
+
+    只讀 `number`，不看文字：這裡要回答的是「這份存下來的改寫，命中集合還對不對得上
+    這一次的診斷」，不是「內容好不好」。
+    """
+    steps = reply.get("steps") if isinstance(reply, Mapping) else None
+    if not isinstance(steps, list):
+        return None
+    numbers: set[int] = set()
+    for item in steps:
+        number = item.get("number") if isinstance(item, Mapping) else None
+        if isinstance(number, bool) or not isinstance(number, int):
+            return None
+        numbers.add(number)
+    return frozenset(numbers)
+
+
 def _reuse_or_call(base: TutorialContent, diagnosis: DiagnosisResult, category: str,
-                   rules: Sequence[AuthoringRule], *, record: OperationRecord,
-                   repo: Repository, writer: Writer, operations: OperationCoordinator,
+                   rules: Sequence[AuthoringRule], *, targets: frozenset[int],
+                   record: OperationRecord, repo: Repository, writer: Writer,
+                   operations: OperationCoordinator,
                    operation_id: str) -> Mapping[str, Any]:
     """取得這次的模型輸出；**儲存重試一律沿用既有的，不再呼叫模型**（設計 §14.2）。
 
@@ -650,12 +671,21 @@ def _reuse_or_call(base: TutorialContent, diagnosis: DiagnosisResult, category: 
 
     ref 讀不回來（物件被清掉）才重打：此時仍寫回**同一個** ref，`record_model_output`
     對同一個 ref 不重複附加，所以 `model_output_refs` 不會愈重試愈長。
+
+    **存下來的改寫對不上這次的命中集合就丟掉重打**（修正波：final review A#3）：診斷本身
+    是模型輸出，重跑時可能給出不同的 `step_indexes`；沿用舊改寫會讓 `_apply_rewrite` 的
+    「改寫集合必須等於命中集合」**永遠**丟 `ContentError`，這批證據再也走不完。解析不出來
+    （物件被寫壞、不是 JSON）同樣視為不可沿用——重打一次是可回復的，卡死不是。
     """
     if record.model_output_refs:
         stored = repo.get_object(record.model_output_refs[-1])
         if stored is not None:
-            reused: dict[str, Any] = json.loads(stored.decode("utf-8"))
-            return reused
+            try:
+                reused: dict[str, Any] = json.loads(stored.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                reused = {}
+            if _rewritten_steps(reused) == targets:
+                return reused
     system, user = prompt_refine_steps(base, diagnosis, category, render_rules_block(rules))
     reply = writer.generate_json(system, user, StepRewrite,
                                  operation_id=operation_id, node=REFINE_NODE)
@@ -666,10 +696,16 @@ def _reuse_or_call(base: TutorialContent, diagnosis: DiagnosisResult, category: 
     return reply
 
 
-def _guard(diagnosis: DiagnosisResult, category: str, feedback_ids: Sequence[str], *,
+def _published_already(version_id: str, repo: Repository) -> bool:
+    """這一版是不是已經發布（`published_at` 有值）；VERSION item 不在就當成沒發布。"""
+    version = repo.get_version(version_id)
+    return version is not None and version.published_at is not None
+
+
+def _guard(version_id: str, category: str, feedback_ids: Sequence[str], *,
            repo: Repository, operations: OperationCoordinator,
            operation_id: str) -> OperationRecord | None:
-    """三道守門：指紋相符、O2 已接受、這批證據還沒產出完整版本。
+    """三道守門：指紋相符、O2 已接受、這批證據還沒產出**已發布**的完整版本。
 
     回 `None` 代表 `no_new_evidence`（F23）——不是錯誤，呼叫端據此回 `None`。
     兩種 `CoordinationError` 的訊息刻意分開寫（**本計畫選擇**）：指紋不符是呼叫端組錯了
@@ -678,15 +714,45 @@ def _guard(diagnosis: DiagnosisResult, category: str, feedback_ids: Sequence[str
     「已產版」用 `verify_version_complete` 判斷，**不是** `record.status`：狀態只說流程走到
     哪，產物齊不齊要看 S3 全文、VERSION item、STEP 與三種邊。有 `version_id` 但不完整代表
     上次寫到一半，要沿用同版號補齊，不能當成重複證據跳過。
+
+    **完整但還沒發布也不算 `no_new_evidence`**（修正波：final review A#2）。原本只看
+    `verify_version_complete`，所以「上一次在 Prepare／Inspect／Commit 掛掉」之後，後續每
+    一次 Review 都會短路成「沒有新證據」→ `prepared_version_ids` 空的 →
+    整條流程 `Succeeded` 卻什麼都沒發布，那一版永遠不會變成 `current_version`。改成
+    「完整**且**已發布」才短路，呼叫端就能把它放回這一批重新發布（見 `prepare_refine`）。
     """
-    if operation_id != refine_operation_id(diagnosis.version_id, category, feedback_ids):
+    if operation_id != refine_operation_id(version_id, category, feedback_ids):
         raise CoordinationError(f"{operation_id} 與本批證據的指紋不符")
     record = operations.load(operation_id)
     if record is None:
         raise CoordinationError(f"{operation_id} 尚未被 O2 接受")
-    if record.version_id and verify_version_complete(record.version_id, repo):
+    if (record.version_id and verify_version_complete(record.version_id, repo)
+            and _published_already(record.version_id, repo)):
         return None  # no_new_evidence（F23）
     return record
+
+
+def _recorded_plan(version_id: str, diagnosis: DiagnosisResult, category: str,
+                   feedback_ids: Sequence[str], *, repo: Repository) -> RefinePlan:
+    """把**已經建好、還沒發布**的那一版原樣包成 `RefinePlan`（修正波：final review A#2）。
+
+    七個欄位一律取自產物本身（VERSION item 的 `supersedes`／`reason`／`rules_applied`、
+    S3 全文），不重算也不重打模型：那一版已經通過 `verify_version_complete`，重跑只會多
+    一次模型呼叫並且可能寫出與 `.md`／`.diff` 對不上的內容。
+
+    `changed_indexes` 用**這一次**的診斷，因為它描述的是「這批證據命中哪幾步」，而證據
+    指紋沒變、命中步驟就該一樣；真的變了也只影響這個回報欄位，不影響要發布的 bytes。
+    """
+    version = repo.get_version(version_id)
+    if version is None:
+        raise ContentError(f"操作紀錄指向不存在的版本：{version_id}")
+    body = repo.get_object(version.s3_key)
+    if body is None:
+        raise ContentError(f"{version_id} 的全文不存在：{version.s3_key}")
+    return RefinePlan(version_id, version.supersedes or diagnosis.version_id, version.reason,
+                      parse_markdown(body.decode("utf-8")),
+                      tuple(sorted(diagnosis.step_indexes)), tuple(version.rules_applied),
+                      evidence_fingerprint(diagnosis.version_id, category, feedback_ids))
 
 
 def prepare_refine(diagnosis: DiagnosisResult, *, repo: Repository, writer: Writer,
@@ -699,7 +765,8 @@ def prepare_refine(diagnosis: DiagnosisResult, *, repo: Repository, writer: Writ
     ```text
     step_indexes == ()  -> None（NO_STEP，F24）
     evidence_of         -> 跨類別或有缺漏 -> ContentError
-    _guard              -> 指紋不符／未接受 -> CoordinationError；已產完整版 -> None（F23）
+    _guard              -> 指紋不符／未接受 -> CoordinationError；已產完整版**且已發布**
+                           -> None（F23）；完整但未發布 -> 直接回既有版本的 RefinePlan
     基底核對            -> 不是該篇最近已發布的版本 -> ContentError
     acquire_lease       -> 拿不到 -> TransientError（交 ASL Retry，不自行迴圈等待）
     選規則 -> 配版號 -> 模型（或重用）-> 程式核對 -> validate -> create_version -> verify
@@ -719,10 +786,15 @@ def prepare_refine(diagnosis: DiagnosisResult, *, repo: Repository, writer: Writ
     if not diagnosis.step_indexes:
         return None  # NO_STEP（F24）：記錄即可，不配版號、不建版、不整篇重寫
     category, feedback_ids = evidence_of(diagnosis, repo=repo)
-    record = _guard(diagnosis, category, feedback_ids, repo=repo, operations=operations,
-                    operation_id=operation_id)
+    record = _guard(diagnosis.version_id, category, feedback_ids, repo=repo,
+                    operations=operations, operation_id=operation_id)
     if record is None:
         return None  # no_new_evidence（F23）：不配版號、不呼叫模型
+    if record.version_id and verify_version_complete(record.version_id, repo):
+        # 完整但還沒發布：上一次在 Prepare／Inspect／Commit 掛掉（修正波：final review A#2）。
+        # 版本已經齊了，不必再配版號、再打模型、再建一次——把既有版本原樣交回去，讓
+        # `task_evaluate_targets` 把它放回這一批重新發布。
+        return _recorded_plan(record.version_id, diagnosis, category, feedback_ids, repo=repo)
     base_version = repo.get_version(diagnosis.version_id)
     if base_version is None:  # get_version 回 TutorialVersion | None
         raise ContentError(f"{diagnosis.version_id} 不存在")
@@ -743,8 +815,9 @@ def prepare_refine(diagnosis: DiagnosisResult, *, repo: Repository, writer: Writ
         plan = allocate_version(base_version.slug, operation_id, operations, repository=repo,
                                 reason=refine_reason(category, feedback_ids),
                                 rules_applied=applied_rule_ids(rules))
-        reply = _reuse_or_call(base, diagnosis, category, rules, record=record, repo=repo,
-                               writer=writer, operations=operations, operation_id=operation_id)
+        reply = _reuse_or_call(base, diagnosis, category, rules, targets=targets,
+                               record=record, repo=repo, writer=writer,
+                               operations=operations, operation_id=operation_id)
         draft = _apply_rewrite(base, reply, targets)
         validate_content(draft, _known_feature_ids(repo))
         create_version(plan, draft, repo)
@@ -772,7 +845,15 @@ REVIEW_MODES: tuple[ReviewMode, ...] = ("formal", "demo")
 PUBLISH_REQUEST_NAME = "publish-request"
 REVIEW_RESULT_NAME = "review-result"
 REVIEW_NO_CHANGE_NAME = "review-no-change"
-"""三個私有產物的檔名；完整 key 一律由 `operation_ref(operation_id, 名稱)` 產生。"""
+DIAGNOSIS_NAME = "diagnose-weak"
+"""四個私有產物的檔名；完整 key 一律由 `operation_ref(operation_id, 名稱)` 產生。
+
+`diagnose-weak` 是修正波（final review A#3）加的：診斷本身也是模型輸出，卻沒有被存下來，
+所以同一天重送會對每個 target 再打一次模型，而且重打出來的 `step_indexes` 可能與上一次
+存下的改寫對不上。存在**固定 key** 底下（不進 `OperationRecord.model_output_refs`）：
+`_reuse_or_call` 取的是 `model_output_refs[-1]`，把診斷也記進去會讓「只打了診斷就中斷」
+的那次重試把診斷當成改寫回覆讀回來。
+"""
 
 
 def _review_mode(state: Mapping[str, Any]) -> ReviewMode:
@@ -848,6 +929,84 @@ def task_list_targets(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSON
             "target_version_ids": _ids(_review_targets(deps.need_repository()))}
 
 
+def _restored_diagnosis(target: WeakTarget, body: bytes | None) -> DiagnosisResult | None:
+    """把存下來的診斷還原成 `DiagnosisResult`；對不上這個 target 就回 `None`（重打一次）。
+
+    核對 `version_id` 與證據 ID：證據指紋相同才會落到同一筆子 operation，所以正常一定
+    對得上；對不上代表產物被外力改過或 target 的證據換了，**沿用會改錯步驟**。形狀壞掉
+    （不是 JSON、欄位型別不對）同樣回 `None`——重打一次是可回復的。
+    """
+    if body is None:
+        return None
+    try:
+        saved: Any = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(saved, Mapping):
+        return None
+    wanted = tuple(sorted(set(target.feedback_ids)))
+    numbers = saved.get("step_indexes")
+    reasons = saved.get("reasons")
+    if saved.get("version_id") != target.version_id or not isinstance(numbers, list):
+        return None
+    if [str(item) for item in saved.get("feedback_ids") or ()] != list(wanted):
+        return None
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in numbers):
+        return None
+    texts = reasons if isinstance(reasons, Mapping) else {}
+    return DiagnosisResult(target.version_id, tuple(sorted(numbers)),
+                           {int(key): str(value) for key, value in texts.items()}, wanted)
+
+
+def _reuse_or_diagnose(target: WeakTarget, *, repo: Repository, writer: Writer,
+                       operation_id: str) -> DiagnosisResult:
+    """這個 target 的診斷；**同 operation 重送一律沿用存下來的那一份，不再呼叫模型**。
+
+    存在 `operations/<op>/diagnose-weak.json`（修正波：final review A#3）。原本每一次
+    `EvaluateTargets` 都無條件 `diagnose_weak(...)`，所以同一天重送會對每個弱教學再打一次
+    模型；更糟的是重打出來的 `step_indexes` 可能與上一次存下來的改寫對不上，`_apply_rewrite`
+    就會永遠丟 `ContentError`。
+
+    `if_none_match=False`：同一個 operation 重送要能覆寫成同一份內容（第一次寫進去之後
+    就不會再被改寫，因為讀得回來就直接沿用）。
+    """
+    ref = operation_ref(operation_id, DIAGNOSIS_NAME)
+    restored = _restored_diagnosis(target, repo.get_object(ref))
+    if restored is not None:
+        return restored
+    diagnosis = diagnose_weak(target, repo=repo, writer=writer, operation_id=operation_id)
+    payload = {"version_id": diagnosis.version_id,
+               "step_indexes": list(diagnosis.step_indexes),
+               "reasons": {str(key): value for key, value in diagnosis.reasons.items()},
+               "feedback_ids": list(diagnosis.feedback_ids)}
+    repo.put_object(ref, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    "application/json", if_none_match=False)
+    return diagnosis
+
+
+def refine_target(target: WeakTarget, *, repo: Repository, writer: Writer,
+                  operations: OperationCoordinator, operation_id: str) -> RefinePlan | None:
+    """一個弱教學 target 的完整 REFINE：**先看子 operation 紀錄，再決定要不要打模型**。
+
+    順序是修正波的必修項（final review A#3）：原本寫成
+    `prepare_refine(diagnose_weak(...))`，Python 先算內層，所以 F23 的短路發生在**模型已經
+    打完之後**——同一天重送每個 target 都白白多一次模型呼叫（O5 解開後就是真金白銀）。
+    現在 `_guard` 先跑，回 `None` 就直接跳過這個 target，一次都不打。
+
+    `_guard` 在這裡與 `prepare_refine` 裡各跑一次是刻意的：它是純讀取的守門（一次
+    `operations.load` ＋ 至多一次 `verify_version_complete`），而 `prepare_refine` 仍然是
+    可以單獨呼叫的公開函式，不能把它的守門搬走。
+    """
+    feedback_ids = tuple(sorted(set(target.feedback_ids)))
+    if _guard(target.version_id, target.category, feedback_ids, repo=repo,
+              operations=operations, operation_id=operation_id) is None:
+        return None  # no_new_evidence（F23）：連診斷都不打
+    diagnosis = _reuse_or_diagnose(target, repo=repo, writer=writer,
+                                   operation_id=operation_id)
+    return prepare_refine(diagnosis, repo=repo, writer=writer, operations=operations,
+                          operation_id=operation_id)
+
+
 def task_evaluate_targets(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
     """`EvaluateTargets`：同一個 Task 裡跑 candidate 與 REFINE **兩條獨立分支**。
 
@@ -858,7 +1017,11 @@ def task_evaluate_targets(state: dict[str, JSONValue], deps: Deps) -> dict[str, 
     **每個弱教學 target 都有自己的子 operation（00A D-59）**：`allocate_version` 以
     `operation_id` 當唯一鍵、`OperationRecord.version_id` 只有一個值，兩篇共用當日的
     review operation 會互相搶同一個版號。所以先用 `refine_operation_id(...)` `accept`
-    一筆子 operation，再把它當成 `diagnose_weak`／`prepare_refine` 的 `operation_id`。
+    一筆子 operation，再把它當成 `refine_target` 的 `operation_id`。
+
+    REFINE 分支走 `refine_target`（修正波：final review A#3），不再自己把
+    `diagnose_weak(...)` 當成 `prepare_refine` 的引數——那個寫法讓 F23 的短路永遠發生在
+    模型已經打完之後。
 
     逐篇的「沒有改動」理由**不進 state**（00A §7 只有八個欄位）：寫進私有
     `operations/<op>/review-no-change.json`，`CommitBatch` 再把它併進 `review-result.json`。
@@ -890,10 +1053,8 @@ def task_evaluate_targets(state: dict[str, JSONValue], deps: Deps) -> dict[str, 
                 canonical_id=evidence_fingerprint(target.version_id, target.category,
                                                   target.feedback_ids),
                 project_id=str(state["project_id"]), now=deps.now()))
-            plan = prepare_refine(diagnose_weak(target, repo=repository, writer=writer,
-                                                operation_id=refine_id),
-                                  repo=repository, writer=writer, operations=deps.operations,
-                                  operation_id=refine_id)
+            plan = refine_target(target, repo=repository, writer=writer,
+                                 operations=deps.operations, operation_id=refine_id)
             if plan is not None:
                 # 子 operation 走完就收尾（review 修正回合 1 第 6 項）：`OPS#` 不會一直停在
                 # `accepted`，維護者查得出「這批證據已經產出版本了」。`plan is None` 的兩種
@@ -952,12 +1113,19 @@ def _restored(state: Mapping[str, Any], deps: Deps) -> PreparedPublish | None:
     body = deps.need_repository().get_object(ref)
     if body is None:
         raise PermanentError(f"publish request 讀不回來，無法重建這一批：{ref}")
-    saved: dict[str, Any] = json.loads(body.decode("utf-8"))
-    version_ids = tuple(str(value) for value in saved["version_ids"])
+    try:
+        saved: Any = json.loads(body.decode("utf-8"))
+        version_ids = tuple(str(value) for value in saved["version_ids"])
+        staged_keys = tuple(str(value) for value in saved["staged_keys"])
+        prepared_at = parse_iso(str(saved["prepared_at"]))
+    except (ValueError, UnicodeDecodeError, KeyError, TypeError) as error:
+        # 修正波（final review A 的 P48 ledger 項）：壞掉的產物原本會以 `KeyError`／
+        # `JSONDecodeError` 漏出去——兩者都不是 `PermanentError`，ASL 的 Catch 分不到
+        # 失敗終點，呼叫端也接不到（00A §4.1）。舊版寫的檔沒有 `prepared_at`，也走這裡。
+        raise PermanentError(f"publish request 的內容不合法，無法重建這一批：{ref}") from error
     request = PublishRequest(version_ids=version_ids, operation_id=str(state["operation_id"]))
     return PreparedPublish(request=request, version_ids=version_ids,
-                           staged_keys=tuple(str(value) for value in saved["staged_keys"]),
-                           prepared_at=parse_iso(str(saved["prepared_at"])))
+                           staged_keys=staged_keys, prepared_at=prepared_at)
 
 
 def _publish_split(version_ids: Sequence[str],
@@ -1013,6 +1181,55 @@ def task_inspect_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSO
     return dict(state)
 
 
+def _assert_finished_here(prepared: PreparedPublish, repository: Repository,
+                          operation_id: str, operations: OperationCoordinator) -> None:
+    """跳過交易之前的守門：這一批真的是**這一筆 operation** 發布完成的嗎？
+
+    修正波（final review A#1，[Critical]）。`Publisher._after_transaction` 先切
+    `published_at`、**再**寫 `site/`，所以「每一版都有 `published_at`」與「公開站已經寫好」
+    不是同一件事：切點 4（`a2_after_transact_before_site`）與切點 5
+    （`a3_after_first_site_before_second`）留下的正是「全部已發布、`site/` 半寫」。原本的
+    跳過分支只看 `published_at`，於是重跑會寫出 `review-result.json`、`complete` 這筆
+    operation、整條流程 `Succeeded`——對外宣稱整批發布成功，公開頁卻缺一半。
+
+    兩道檢查：
+
+    ```text
+    1 公開物件齊不齊   public_site_keys(version_ids) 每一個都要 object_exists
+    2 是不是本 operation 發的
+        多篇  operations/<op>/pending-promote.json 存在（Publisher._record_pending_promote）
+        單篇  ledger 的 OPS#<op>.version_id 等於那一版（Publisher._record_versions）
+    ```
+
+    第 2 道的兩種輸入是**互補**的，與 `publishing._resume_targets` 完全同一套（00A §6.7）：
+    父 operation 依 D-59 不持有版號，所以多篇只有待補清單；單篇不寫待補清單，證據在 ledger。
+    controller 裁決 2 只點名了待補清單，這裡照 00A §6.7 補上單篇的那一半，並在報告說明——
+    否則單篇批次的合法續跑會變成永久失敗。
+
+    任一道不過一律 `PermanentError`，訊息指名 `publishing.resume_publish`：那才是「交易已
+    提交、公開物件沒補完」的復原入口，而且它會先重跑 `prepare` 再 `promote_site_objects`
+    （切點 4 留下的 staging 帶著 `UNPUBLISHED_MARKER`，直接 promote 會被守門擋下）。
+    """
+    missing = [key for key in public_site_keys(prepared.version_ids)
+               if not repository.object_exists(key)]
+    if missing:
+        raise PermanentError(
+            f"這一批的 published_at 都有值，但公開物件還缺 {missing}；"
+            f"請以 publishing.resume_publish('{operation_id}') 補完再重跑")
+    if len(prepared.version_ids) >= 2:
+        if repository.object_exists(operation_ref(operation_id, PENDING_PROMOTE_NAME)):
+            return
+    else:
+        record = operations.load(operation_id)
+        if record is not None and record.version_id == prepared.version_ids[0]:
+            return
+    evidence = ("pending-promote.json" if len(prepared.version_ids) >= 2
+                else "OPS# 的 version_id")
+    raise PermanentError(
+        f"這一批的 published_at 都有值，但找不到 {operation_id} 發布過它的紀錄（{evidence}）；"
+        f"請以 publishing.resume_publish 確認發布來源再重跑")
+
+
 def task_commit_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
     """`CommitBatch`：一次交易切完整批，再把本次結果寫成 `review-result.json`。
 
@@ -1045,12 +1262,32 @@ def task_commit_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSON
                 raise PermanentError(f"整批提交失敗：{result.failed}；{'；'.join(result.reasons)}")
             published = result.published
         else:
+            _assert_finished_here(prepared, repository, operation_id, deps.operations)
             published = tuple(prepared.version_ids)   # 上一次已經切完，本次只續寫結果
     key = operation_ref(operation_id, REVIEW_RESULT_NAME)
     repository.put_object(key, _review_result(state, repository, operation_id, published),
                           "application/json", if_none_match=False)
     deps.operations.complete(operation_id, now=deps.now())
     return {**state, "result_ref": key}
+
+
+def _loaded_mapping(body: bytes | None, key: str) -> dict[str, Any]:
+    """讀一個私有 JSON 物件；不存在回 `{}`，壞掉一律 `PermanentError`。
+
+    修正波（final review A 的 P48 ledger 項）：原本是裸的 `json.loads`，壞 UTF-8 會丟
+    `UnicodeDecodeError`、壞 JSON 會丟 `json.JSONDecodeError`，兩者都不是 `PermanentError`
+    ——ASL 的 Catch 分不到失敗終點（00A §4.1）。做法與 `status_writer.load_validated_at`
+    同一條慣例。
+    """
+    if body is None:
+        return {}
+    try:
+        payload: Any = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as error:
+        raise PermanentError(f"{key} 的內容損壞，無法讀回") from error
+    if not isinstance(payload, dict):
+        raise PermanentError(f"{key} 必須是 JSON 物件")
+    return dict(payload)
 
 
 def _review_result(state: Mapping[str, Any], repository: Repository, operation_id: str,
@@ -1065,7 +1302,7 @@ def _review_result(state: Mapping[str, Any], repository: Repository, operation_i
     為什麼沒動」，以最新一次為準。
     """
     saved = repository.get_object(operation_ref(operation_id, REVIEW_RESULT_NAME))
-    previous: dict[str, Any] = json.loads(saved.decode("utf-8")) if saved else {}
+    previous = _loaded_mapping(saved, operation_ref(operation_id, REVIEW_RESULT_NAME))
 
     def union(field: str, values: Sequence[str]) -> list[str]:
         return sorted({*_listed(previous.get(field)), *values})
@@ -1078,7 +1315,8 @@ def _review_result(state: Mapping[str, Any], repository: Repository, operation_i
         "prepared_version_ids": union("prepared_version_ids",
                                       _listed(state.get("prepared_version_ids"))),
         "published_version_ids": union("published_version_ids", list(published)),
-        "no_change_reasons": json.loads((reasons or b"{}").decode("utf-8")),
+        "no_change_reasons": _loaded_mapping(
+            reasons, operation_ref(operation_id, REVIEW_NO_CHANGE_NAME)),
     }, ensure_ascii=False).encode("utf-8")
 
 

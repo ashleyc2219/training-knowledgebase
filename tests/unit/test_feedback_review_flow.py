@@ -414,8 +414,9 @@ def shift_the_base(world: ReviewWorld, slug: str) -> None:
     住**：`prepare` 照樣把兩篇的 staging 都寫出來，所以測試證的是「檢查失敗時零篇公開」，
     不是「產物根本沒做出來」。
 
-    **不動** staging 物件：`_prepared` 每個 Task 都重跑一次 `prepare`，刪掉的 staging 會被
-    重新寫回來，製造不出「檢查不通過」這個狀態。
+    **不動** staging 物件：`PrepareBatch` 已經把 staging 寫好，後兩個 Task 只從
+    `publish-request.json` 重建（`_restored`），刪掉 staging 也不會讓它們重新寫一次，
+    製造出來的會是「產物不見了」而不是「檢查不通過」。
     """
     pk = tutorial_pk(slug)
     world.repository.update_meta(pk, {"current_version": f"{slug}@v9"},
@@ -624,6 +625,177 @@ def test_handler_runs_exactly_one_task(review_deps: ReviewWorld,
     assert state["target_version_ids"] == ["b@v1", "c@v1", "d@v1"]
     assert "candidate_rule_ids" not in state        # EvaluateTargets 沒有被一起跑掉
     assert review_deps.writer.calls == []
+
+
+
+# --- 修正波（final review A#1／A#2／A#3 ＋ P48 ledger 項）---------------------
+
+
+def delete_site_objects(world: ReviewWorld) -> list[str]:
+    """把公開前綴的版本頁刪掉，重現「交易已提交、`site/` 只寫了一半」的切點 4／5。"""
+    bucket = boto3.resource("s3", region_name=MOTO_REGION).Bucket(BUCKET_NAME)
+    removed = [row.key for row in bucket.objects.filter(Prefix="site/tutorials/b/")]
+    for key in removed:
+        bucket.Object(key).delete()
+    return removed
+
+
+def published_state(world: ReviewWorld) -> dict[str, Any]:
+    """跑到 `CommitBatch` 之前的 state，並且真的把這一批發布出去。"""
+    deps = world.deps
+    state = task_inspect_batch(task_prepare_batch(
+        task_evaluate_targets(task_list_targets({"mode": "formal"}, deps), deps), deps), deps)
+    task_commit_batch(state, deps)
+    return state
+
+
+def test_commit_batch_refuses_when_the_public_objects_are_missing(
+        review_deps_two_weak: ReviewWorld) -> None:
+    """Given published_at 都有值但 `site/` 缺頁，Then `PermanentError` 指名 resume_publish。
+
+    `Publisher._after_transaction` 先切 `published_at` 再寫 `site/`，所以「全部已發布」
+    與「公開站已寫好」不是同一件事（切點 4／5）。原本的跳過分支只看 `published_at`，
+    重跑會寫出 `review-result.json` 並 `complete`，對外宣稱整批成功、公開頁卻缺一半
+    （final review A#1，[Critical]）。
+    """
+    state = published_state(review_deps_two_weak)
+    removed = delete_site_objects(review_deps_two_weak)
+    assert removed, "測試前置失敗：本來就沒有公開物件"
+
+    with pytest.raises(PermanentError, match="resume_publish"):
+        task_commit_batch(state, review_deps_two_weak.deps)
+
+
+def test_commit_batch_refuses_when_this_operation_never_published_the_batch(
+        review_deps_two_weak: ReviewWorld) -> None:
+    """Given 公開物件齊了但本 operation 沒有發布紀錄，Then `PermanentError`。
+
+    多篇的證據是 `operations/<op>/pending-promote.json`（`Publisher._record_pending_promote`
+    在寫 `site/` 之前就寫好）。它不在代表這一批是**別的途徑**發布的，不是本次可以續寫
+    結果的狀態。
+    """
+    state = published_state(review_deps_two_weak)
+    bucket = boto3.resource("s3", region_name=MOTO_REGION).Bucket(BUCKET_NAME)
+    bucket.Object(f"operations/{OP}/pending-promote.json").delete()
+
+    with pytest.raises(PermanentError, match="resume_publish"):
+        task_commit_batch(state, review_deps_two_weak.deps)
+
+
+def test_commit_batch_still_resumes_a_genuine_batch(
+        review_deps_two_weak: ReviewWorld) -> None:
+    """Given 公開物件齊、待補清單也在，Then 照舊跳過交易續寫結果（合法續跑不受影響）。"""
+    state = published_state(review_deps_two_weak)
+
+    again = task_commit_batch(state, review_deps_two_weak.deps)
+
+    result = review_deps_two_weak.object_of(str(again["result_ref"]))
+    assert result["published_version_ids"] == ["b@v2", "c@v2"]
+
+
+def test_commit_batch_resumes_a_single_version_batch_from_the_ledger(
+        review_deps: ReviewWorld) -> None:
+    """Given 單篇批次（不寫待補清單，00A §6.7），Then 用 ledger 的版號當本 operation 的證據。
+
+    controller 裁決 2 只點名 `pending-promote.json`；單篇依 00A §6.7 **本來就不寫**那個檔，
+    證據在 `OPS#<op>.version_id`（`Publisher._record_versions`）。兩種輸入互補，與
+    `publishing._resume_targets` 同一套。
+    """
+    state = published_state(review_deps)
+    assert review_deps.repository.get_object(f"operations/{OP}/pending-promote.json") is None
+
+    again = task_commit_batch(state, review_deps.deps)
+
+    assert review_deps.object_of(str(again["result_ref"]))["published_version_ids"] == ["c@v2"]
+
+
+def test_an_unpublished_complete_version_is_republished_instead_of_skipped(
+        review_deps: ReviewWorld) -> None:
+    """Given 上一次建好版本卻沒發布，When 隔天重跑，Then 那一版回到這一批，不是「沒有新證據」。
+
+    final review A#2：原本 `_guard` 只看 `verify_version_complete`，所以一次在
+    Prepare／Inspect／Commit 掛掉之後，後續每一次 Review 都短路成 `no_new_evidence`——
+    `prepared_version_ids` 空的、流程 `Succeeded`，那一版永遠不會變成 `current_version`。
+    """
+    deps = review_deps.deps
+    first = task_evaluate_targets(task_list_targets({"mode": "formal"}, deps), deps)
+    assert first["prepared_version_ids"] == ["c@v2"]
+    assert review_deps.repository.get_version("c@v2").published_at is None
+    calls = list(review_deps.writer.calls)
+
+    second = task_evaluate_targets(task_list_targets({"mode": "formal"}, deps), deps)
+
+    assert second["prepared_version_ids"] == ["c@v2"]     # 重新發布，不是「沒有新證據」
+    assert review_deps.writer.calls == calls              # 一次模型都沒有多打
+    versions = {str(row["version_id"])
+                for row in review_deps.repository.scan_entity("VERSION")}
+    assert versions == {"a@v1", "b@v1", "c@v1", "c@v2", "d@v1", "e@v1"}   # 沒有 c@v3
+
+
+def test_the_diagnosis_is_stored_under_the_operation_and_reused(
+        review_deps: ReviewWorld) -> None:
+    """Given 同一筆子 operation 重送，Then 診斷從 `diagnose-weak.json` 讀回，不重打模型。
+
+    final review A#3：診斷本身也是模型輸出，原本沒有被存下來，所以重送會對每個弱教學
+    再打一次；重打出來的 `step_indexes` 還可能與存下的改寫對不上而永遠 `ContentError`。
+    """
+    deps = review_deps.deps
+    task_evaluate_targets(task_list_targets({"mode": "formal"}, deps), deps)
+    sub = next(row for row in review_deps.operations.accepted_ids if row != OP)
+
+    stored = review_deps.object_of(f"operations/{sub}/diagnose-weak.json")
+
+    assert stored["version_id"] == "c@v1"
+    assert stored["step_indexes"] == [HIT_STEP]
+    assert stored["feedback_ids"] == sorted(C_IDS)
+
+
+def test_the_guard_runs_before_the_model_is_called(review_deps: ReviewWorld) -> None:
+    """Given 這批證據已經發布過，When 再跑一次，Then 連診斷都不打（F23 的短路提前）。
+
+    原本寫成 `prepare_refine(diagnose_weak(...))`，Python 先算內層，所以 F23 的短路發生在
+    模型已經打完之後——每個 target 每天白白多一次模型呼叫（final review A#3）。
+    """
+    deps = review_deps.deps
+    state = published_state(review_deps)
+    assert review_deps.repository.get_version("c@v2").published_at is not None
+    calls = list(review_deps.writer.calls)
+
+    again = task_evaluate_targets(task_list_targets(state, deps), deps)
+
+    assert again["prepared_version_ids"] == []            # no_new_evidence（F23）
+    assert review_deps.writer.calls == calls              # 診斷也沒有被打
+
+
+def test_a_corrupt_publish_request_is_a_permanent_error(
+        review_deps_two_weak: ReviewWorld) -> None:
+    """Given `publish-request.json` 被寫壞，Then `PermanentError`。
+
+    原本漏出去的是 `KeyError`／`JSONDecodeError`。
+
+    兩者都不是 `PermanentError`，漏出去的話 ASL 的 Catch 分不到失敗終點（00A §4.1）。
+    """
+    deps = review_deps_two_weak.deps
+    state = task_prepare_batch(
+        task_evaluate_targets(task_list_targets({"mode": "formal"}, deps), deps), deps)
+    review_deps_two_weak.repository.put_object(
+        str(state["publish_request_ref"]), b'{"version_ids": ["b@v2"]}',
+        "application/json", if_none_match=False)
+
+    with pytest.raises(PermanentError, match="publish request"):
+        task_inspect_batch(state, deps)
+
+
+def test_a_corrupt_review_result_is_a_permanent_error(review_deps: ReviewWorld) -> None:
+    """Given 既有的 `review-result.json` 不是 JSON，Then `PermanentError`。"""
+    deps = review_deps.deps
+    state = task_inspect_batch(task_prepare_batch(
+        task_evaluate_targets(task_list_targets({"mode": "formal"}, deps), deps), deps), deps)
+    review_deps.repository.put_object(f"operations/{OP}/review-result.json", b"{not json",
+                                      "application/json", if_none_match=False)
+
+    with pytest.raises(PermanentError, match="review-result"):
+        task_commit_batch(state, deps)
 
 
 # --- Task 3：ASL、每日排程與 CDK template ------------------------------------
