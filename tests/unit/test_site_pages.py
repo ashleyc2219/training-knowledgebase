@@ -133,17 +133,35 @@ def test_version_page_v1_says_no_previous(
     assert "v0.html" not in page
 
 
-def test_version_page_without_supersedes_beyond_v1_raises(
-        renderer: SiteRenderer, tutorial: Tutorial,
-        steps: list[TutorialStep], content: TutorialContent) -> None:
-    """Given v3 卻沒有 `supersedes`／When 渲染／Then `PermanentError`，不輸出半對的頁面。
+def test_version_page_without_supersedes_but_with_an_older_current_raises(
+        renderer: SiteRenderer, steps: list[TutorialStep], content: TutorialContent) -> None:
+    """Given 目前版本是 v2、這一版卻是沒有 `supersedes` 的 v3／When 渲染／Then `PermanentError`。
 
     00A §6.7 明訂這裡丟 `PermanentError`（不是 `PublishError`）：資料不完整是永久性錯誤，
-    重試同一份輸入不會變好。
+    重試同一份輸入不會變好，輸出半對的頁面比停下來危險。
     """
     with pytest.raises(PermanentError, match="supersedes"):
-        renderer.render_version_page(tutorial, make_version(V3, supersedes=None),
-                                     steps, content)
+        renderer.render_version_page(make_tutorial(current_version=V2),
+                                     make_version(V3, supersedes=None), steps, content)
+
+
+def test_a_version_number_gap_without_supersedes_is_legitimate(
+        renderer: SiteRenderer, steps: list[TutorialStep], content: TutorialContent) -> None:
+    """Given v1 永久失敗、v3 是第一個成功的版本／When 渲染／Then 正常輸出無前版文案。
+
+    本計畫選擇（2026-09-14）：守門條件是「有更舊的已發布版卻缺 `supersedes`」，不是
+    00A §6.7 字面上的「版號大於 1」。理由在 `site._diff_block` 的 docstring：
+    `content._base_version` 在 `current_version is None` 時回 `(None, 0)`，
+    `_next_free_number` 又會跳過永久失敗占用的號碼，所以 `v3 + supersedes=None` 是合法資料
+    （設計 §8.1 允許版號缺口）。`tests/integration/test_batch_publish_cutpoints.py`（P25）
+    seed 的 `prepare-meeting@v2 + supersedes=None` 就是這一類。
+    """
+    page = renderer.render_version_page(make_tutorial(current_version=None),
+                                        make_version(V3, supersedes=None), steps, content)
+    assert NO_PREVIOUS_TEXT in page
+    page_as_current = renderer.render_version_page(
+        make_tutorial(current_version=V3), make_version(V3, supersedes=None), steps, content)
+    assert NO_PREVIOUS_TEXT in page_as_current
 
 
 def test_version_switch_marks_the_current_version(

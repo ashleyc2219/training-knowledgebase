@@ -147,16 +147,30 @@ def _page_href(version_id: str, suffix: str) -> str:
     return f"{_version_number(version_id)}{suffix}"
 
 
-def _diff_block(version: TutorialVersion) -> str:
-    """與前一版的差異連結；v1 顯示 `NO_PREVIOUS_TEXT`（設計 §8.2）。
+def _diff_block(tutorial: Tutorial, version: TutorialVersion) -> str:
+    """與前一版的差異連結；沒有前一版時顯示 `NO_PREVIOUS_TEXT`（設計 §8.2）。
 
-    版號大於 1 卻沒有 `supersedes` 代表資料不完整，丟 `PermanentError`（00A §6.7）而**不是**
-    靜默顯示成第一版：靜默的話讀者會以為這篇沒有歷史，而重試同一份輸入也不會變好。
+    **本計畫選擇（2026-09-14）：守門條件不是「版號大於 1」，而是「這篇明明有一個更舊的
+    已發布版，這一版卻沒有 `supersedes`」。** 00A §6.7 原本寫「版號大於 1 卻缺 `supersedes`
+    丟 `PermanentError`」，但那條與既有程式衝突（R5 以既有程式為準）：`content._base_version`
+    在 `current_version is None` 時回 `(None, 0)`，而 `_next_free_number` 會跳過被永久失敗的
+    未發布版占用的號碼——所以「v1 建到一半永久失敗、v2 才是第一個成功的版本」會產生
+    **合法的** `v2 + supersedes=None`（設計 §8.1 明文允許版號缺口）。把它當成資料不完整，
+    等於讓一篇正常的教學永遠渲染不出來。
+
+    改用 `tutorial.current_version` 判斷：它是更舊的版號時，代表這篇**真的**有前一版可以
+    比較，缺 `supersedes` 就是資料不完整 → `PermanentError`（永久性，重試同一份輸入不會
+    變好）。等於本頁自己就是 `current_version`、或 `current_version` 更新（在看歷史版）、
+    或整篇還沒有任何已發布版本時，都不算不完整。
     """
-    _, number = parse_version_id(version.version_id)
     if version.supersedes is None:
-        if number != 1:
-            raise PermanentError(f"{version.version_id} 缺少 supersedes")
+        _, number = parse_version_id(version.version_id)
+        base = tutorial.current_version
+        if base is not None and base != version.version_id:
+            _, base_number = parse_version_id(base)
+            if base_number < number:
+                raise PermanentError(
+                    f"{version.version_id} 缺少 supersedes（這篇的目前版本是 {base}）")
         return f'<p class="diff-note">{escape_text(NO_PREVIOUS_TEXT)}</p>'
     _, previous = parse_version_id(version.supersedes)
     return (f'<p class="diff-note">'
@@ -291,7 +305,7 @@ class SiteRenderer:
             f"<h1>{escape(content.title)}</h1>"
             f'<p class="version">{escape(version.version_id)}</p>'
             f"{_version_switch(tutorial, version)}"
-            f"{_diff_block(version)}"
+            f"{_diff_block(tutorial, version)}"
             f"<h2>{_SECTIONS[0]}</h2><p>{escape(content.problem)}</p>"
             f"<h2>{_SECTIONS[1]}</h2><ul>{_items(content.prerequisites)}</ul>"
             f"<h2>{_SECTIONS[2]}</h2>"
