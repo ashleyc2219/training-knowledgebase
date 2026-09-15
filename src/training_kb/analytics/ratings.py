@@ -52,9 +52,7 @@ def cross_version_average(values: Sequence[float | None]) -> float | None:
     return sum(present) / len(present)
 
 
-def negative_feedback_ids(
-    feedback: Iterable[Feedback], approved: frozenset[str]
-) -> frozenset[str]:
+def negative_feedback_ids(feedback: Iterable[Feedback], approved: frozenset[str]) -> frozenset[str]:
     """負面回饋的 **Feedback ID 集合**：`rating <= 2` 或 `category` 屬核定類別表。
 
     回 `frozenset` 而不是計數，呼叫端就沒有機會把同一筆算兩次（設計 §12.1

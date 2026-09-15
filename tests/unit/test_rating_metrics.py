@@ -20,8 +20,16 @@ V1 = "prepare-meeting@v1"
 V2 = "prepare-meeting@v2"
 # 核定類別表自備，不 import Phase 43 的 DEFAULT_FEEDBACK_CATEGORIES（值相同，但不建相依）。
 APPROVED = frozenset({"找不到按鈕", "缺少資訊"})
-V1_RATINGS = [("f_12", 2), ("f_15", 2), ("f_19", 3), ("f_23", 3),
-              ("f_27", 3), ("f_31", 3), ("f_34", 3), ("f_40", 4)]
+V1_RATINGS = [
+    ("f_12", 2),
+    ("f_15", 2),
+    ("f_19", 3),
+    ("f_23", 3),
+    ("f_27", 3),
+    ("f_31", 3),
+    ("f_34", 3),
+    ("f_40", 4),
+]
 
 
 def fb(fid, rating, category=None, version=V1):
@@ -92,13 +100,14 @@ def test_negative_ids_skip_unclassified_and_high_rating():
 
 def test_negative_ids_cover_three_independent_boundaries():
     """Given 三個獨立邊界，When 取負面集合，Then 四個 ID 都在且同筆重複只算一次。"""
-    rows = [fb("f_301", None, "找不到按鈕"),   # 沒有評分，但類別已核定
-            fb("f_302", 2, "待分類"),          # 待分類，但低分條件獨立成立
-            fb("f_303", 3, "缺少資訊"),        # 不低分，但類別已核定
-            fb("f_304", 1, "缺少資訊")]        # 兩個條件同時命中
-    rows.append(rows[-1])                      # 同一筆重複出現
-    assert negative_feedback_ids(rows, APPROVED) == frozenset(
-        {"f_301", "f_302", "f_303", "f_304"})
+    rows = [
+        fb("f_301", None, "找不到按鈕"),  # 沒有評分，但類別已核定
+        fb("f_302", 2, "待分類"),  # 待分類，但低分條件獨立成立
+        fb("f_303", 3, "缺少資訊"),  # 不低分，但類別已核定
+        fb("f_304", 1, "缺少資訊"),  # 兩個條件同時命中
+    ]
+    rows.append(rows[-1])  # 同一筆重複出現
+    assert negative_feedback_ids(rows, APPROVED) == frozenset({"f_301", "f_302", "f_303", "f_304"})
 
 
 def test_rating_true_is_rejected_by_the_model_layer():
