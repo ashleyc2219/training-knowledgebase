@@ -1,0 +1,43 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "batch_label": "demo-seed-01",
+  "items": [
+    {
+      "batch_id": "R007-B1",
+      "rule_id": "R-007",
+      "slug": "prepare-meeting",
+      "before_version_id": "prepare-meeting@v1",
+      "after_version_id": "prepare-meeting@v2",
+      "cluster_id": "c12",
+      "project_id": "demo",
+      "synthetic": true,
+      "approved_by": "",
+      "approved_at": ""
+    },
+    {
+      "batch_id": "R012-B1",
+      "rule_id": "R-012",
+      "slug": "weekly-digest",
+      "before_version_id": "weekly-digest@v1",
+      "after_version_id": "weekly-digest@v2",
+      "cluster_id": "c58",
+      "project_id": "demo",
+      "synthetic": true,
+      "approved_by": "",
+      "approved_at": ""
+    },
+    {
+      "batch_id": "R012-B2",
+      "rule_id": "R-012",
+      "slug": "weekly-digest",
+      "before_version_id": "weekly-digest@v3",
+      "after_version_id": "weekly-digest@v4",
+      "cluster_id": "c58",
+      "project_id": "demo",
+      "synthetic": true,
+      "approved_by": "",
+      "approved_at": ""
+    }
+  ]
+}

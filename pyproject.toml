@@ -28,6 +28,9 @@ training_kb = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# demo/ 與 infra/ 不在 [tool.setuptools.packages.find] 的 where = ["src"] 內，
+# 但測試要 import 它們；pytest 8 內建的 pythonpath 把專案根加進 sys.path（Phase 56）。
+pythonpath = ["."]
 markers = [
     "aws: 需要真實 AWS 帳號與憑證的整合測試；未設 TKB_RUN_AWS_INTEGRATION=1 時由 tests/conftest.py 自動跳過",
 ]
@@ -42,4 +45,4 @@ select = ["E", "F", "I", "UP"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "infra"]
+files = ["src", "infra", "demo"]

@@ -1,0 +1,45 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "batch_label": "demo-seed-01",
+  "items": [
+    {
+      "rule_id": "R-007",
+      "rule": "click_ui 步驟要指出頁面與控制項位置",
+      "applies_when": "click_ui",
+      "evidence": [
+        "f_12",
+        "f_15",
+        "f_19",
+        "f_23",
+        "f_27",
+        "f_31",
+        "f_34",
+        "f_40"
+      ],
+      "status": "candidate",
+      "applied_to": [
+        "prepare-meeting@v2"
+      ],
+      "derived_from": "prepare-meeting@v1"
+    },
+    {
+      "rule_id": "R-012",
+      "rule": "每步不超過兩句",
+      "applies_when": "read",
+      "evidence": [
+        "f_301",
+        "f_302",
+        "f_303",
+        "f_304",
+        "f_305"
+      ],
+      "status": "active",
+      "applied_to": [
+        "weekly-digest@v2",
+        "weekly-digest@v4"
+      ],
+      "derived_from": "weekly-digest@v1"
+    }
+  ]
+}

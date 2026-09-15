@@ -1,0 +1,18 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "batch_label": "demo-seed-01",
+  "items": [
+    {
+      "id": "r_42",
+      "source_event_id": "gh-pr-42",
+      "source": "github_pr",
+      "feature": "Prepare",
+      "kind": "renamed",
+      "old_name": "Meeting Summary",
+      "new_name": "Prepare",
+      "evidence": "PR #42：將 Meeting Summary 改名為 Prepare",
+      "ts": "2026-09-01T00:00:00Z"
+    }
+  ]
+}

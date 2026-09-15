@@ -1,0 +1,67 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "batch_label": "demo-seed-01",
+  "items": [
+    {
+      "feature_id": "Prepare",
+      "name": "Meeting Summary",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    },
+    {
+      "feature_id": "Open Meeting",
+      "name": "Open Meeting",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    },
+    {
+      "feature_id": "Meeting List",
+      "name": "Meeting List",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    },
+    {
+      "feature_id": "Share Link",
+      "name": "Share Link",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    },
+    {
+      "feature_id": "Share Summary",
+      "name": "Share Summary",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    },
+    {
+      "feature_id": "Settings Page",
+      "name": "Settings Page",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    },
+    {
+      "feature_id": "Notification Settings",
+      "name": "Notification Settings",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    },
+    {
+      "feature_id": "Notification Channel",
+      "name": "Notification Channel",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    },
+    {
+      "feature_id": "Export Notes",
+      "name": "Export Notes",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    },
+    {
+      "feature_id": "Weekly Digest",
+      "name": "Weekly Digest",
+      "aliases": [],
+      "first_seen": "2026-07-01T00:00:00Z"
+    }
+  ]
+}

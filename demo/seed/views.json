@@ -1,0 +1,357 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "batch_label": "demo-seed-01",
+  "items": [
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_01",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_02",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_03",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_04",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_05",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_06",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_07",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_08",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_09",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v1",
+      "user": "u_10",
+      "ts": "2026-08-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_01",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_02",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_03",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_04",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_05",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_06",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_07",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_08",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_09",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "prepare-meeting@v2",
+      "user": "u_10",
+      "ts": "2026-08-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_01",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_02",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_03",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_04",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_05",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_06",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_07",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_08",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_09",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v1",
+      "user": "u_10",
+      "ts": "2026-06-02T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_01",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_02",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_03",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_04",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_05",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_06",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_07",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_08",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_09",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v2",
+      "user": "u_10",
+      "ts": "2026-06-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_01",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_02",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_03",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_04",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_05",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_06",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_07",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_08",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_09",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v3",
+      "user": "u_10",
+      "ts": "2026-07-05T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_01",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_02",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_03",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_04",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_05",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_06",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_07",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_08",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_09",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_10",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_11",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_12",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_13",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_14",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_15",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_16",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_17",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_18",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_19",
+      "ts": "2026-07-21T09:00:00Z"
+    },
+    {
+      "tutorial_version": "weekly-digest@v4",
+      "user": "u_20",
+      "ts": "2026-07-21T09:00:00Z"
+    }
+  ]
+}

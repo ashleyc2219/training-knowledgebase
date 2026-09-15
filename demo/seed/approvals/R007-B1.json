@@ -1,0 +1,19 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。",
+  "batch_id": "R007-B1",
+  "rule_id": "R-007",
+  "before_version_id": "prepare-meeting@v1",
+  "after_version_id": "prepare-meeting@v2",
+  "synthetic": true,
+  "recomputed": {
+    "before_average": 2.875,
+    "after_average": 4.4,
+    "before_rate": 0.7,
+    "after_rate": 0.2
+  },
+  "recipe_report_sha256": "",
+  "seed_commit": "",
+  "approved_by": "",
+  "approved_at": "",
+  "statement": "我已核對本批次為合成資料、數值可由 demo/seed 重算，同意作為 O7 驗證批次。"
+}

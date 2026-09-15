@@ -1,0 +1,529 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "batch_label": "demo-seed-01",
+  "items": [
+    {
+      "id": "f_12",
+      "tutorial_version": "prepare-meeting@v1",
+      "rating": 2,
+      "category": "找不到按鈕",
+      "comment": "第三步沒有指出按鈕在哪一頁與位置",
+      "user": "u_01",
+      "ts": "2026-08-02T00:00:00Z"
+    },
+    {
+      "id": "f_15",
+      "tutorial_version": "prepare-meeting@v1",
+      "rating": 2,
+      "category": "找不到按鈕",
+      "comment": "第三步沒有指出按鈕在哪一頁與位置",
+      "user": "u_02",
+      "ts": "2026-08-02T00:00:00Z"
+    },
+    {
+      "id": "f_19",
+      "tutorial_version": "prepare-meeting@v1",
+      "rating": 3,
+      "category": "找不到按鈕",
+      "comment": "第三步沒有指出按鈕在哪一頁與位置",
+      "user": "u_03",
+      "ts": "2026-08-02T00:00:00Z"
+    },
+    {
+      "id": "f_23",
+      "tutorial_version": "prepare-meeting@v1",
+      "rating": 3,
+      "category": "找不到按鈕",
+      "comment": "第三步沒有指出按鈕在哪一頁與位置",
+      "user": "u_04",
+      "ts": "2026-08-02T00:00:00Z"
+    },
+    {
+      "id": "f_27",
+      "tutorial_version": "prepare-meeting@v1",
+      "rating": 3,
+      "category": "找不到按鈕",
+      "comment": "第三步沒有指出按鈕在哪一頁與位置",
+      "user": "u_05",
+      "ts": "2026-08-02T00:00:00Z"
+    },
+    {
+      "id": "f_31",
+      "tutorial_version": "prepare-meeting@v1",
+      "rating": 3,
+      "category": "找不到按鈕",
+      "comment": "第三步沒有指出按鈕在哪一頁與位置",
+      "user": "u_06",
+      "ts": "2026-08-02T00:00:00Z"
+    },
+    {
+      "id": "f_34",
+      "tutorial_version": "prepare-meeting@v1",
+      "rating": 3,
+      "category": "找不到按鈕",
+      "comment": "第三步沒有指出按鈕在哪一頁與位置",
+      "user": "u_07",
+      "ts": "2026-08-02T00:00:00Z"
+    },
+    {
+      "id": "f_40",
+      "tutorial_version": "prepare-meeting@v1",
+      "rating": 4,
+      "category": "找不到按鈕",
+      "comment": "第三步沒有指出按鈕在哪一頁與位置",
+      "user": "u_08",
+      "ts": "2026-08-02T00:00:00Z"
+    },
+    {
+      "id": "f_101",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 2,
+      "category": "缺少資訊",
+      "comment": "資訊仍不夠完整",
+      "user": "u_01",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_102",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 2,
+      "category": "缺少資訊",
+      "comment": "資訊仍不夠完整",
+      "user": "u_02",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_103",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_03",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_104",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_04",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_105",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_05",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_106",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_06",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_107",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_07",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_108",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_08",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_109",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_09",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_110",
+      "tutorial_version": "prepare-meeting@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_10",
+      "ts": "2026-08-21T00:00:00Z"
+    },
+    {
+      "id": "f_301",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_01",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_302",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_02",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_303",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_03",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_304",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_04",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_305",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_05",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_306",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_06",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_307",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_07",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_308",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_08",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_309",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_09",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_310",
+      "tutorial_version": "weekly-digest@v1",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_10",
+      "ts": "2026-06-02T12:00:00Z"
+    },
+    {
+      "id": "f_311",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_01",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_312",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_02",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_313",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_03",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_314",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_04",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_315",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_05",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_316",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_06",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_317",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_07",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_318",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_08",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_319",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_09",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_320",
+      "tutorial_version": "weekly-digest@v2",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_10",
+      "ts": "2026-06-21T12:00:00Z"
+    },
+    {
+      "id": "f_321",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_01",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_322",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_02",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_323",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_03",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_324",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_04",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_325",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_05",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_326",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_06",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_327",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_07",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_328",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_08",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_329",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_09",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_330",
+      "tutorial_version": "weekly-digest@v3",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_10",
+      "ts": "2026-07-05T12:00:00Z"
+    },
+    {
+      "id": "f_331",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_01",
+      "ts": "2026-07-21T12:00:00Z"
+    },
+    {
+      "id": "f_332",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_02",
+      "ts": "2026-07-21T12:00:00Z"
+    },
+    {
+      "id": "f_333",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_03",
+      "ts": "2026-07-21T12:00:00Z"
+    },
+    {
+      "id": "f_334",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_04",
+      "ts": "2026-07-21T12:00:00Z"
+    },
+    {
+      "id": "f_335",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 3,
+      "category": "缺少資訊",
+      "comment": "每一步的說明太長，重點被埋住了",
+      "user": "u_05",
+      "ts": "2026-07-21T12:00:00Z"
+    },
+    {
+      "id": "f_336",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_06",
+      "ts": "2026-07-21T12:00:00Z"
+    },
+    {
+      "id": "f_337",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_07",
+      "ts": "2026-07-21T12:00:00Z"
+    },
+    {
+      "id": "f_338",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_08",
+      "ts": "2026-07-21T12:00:00Z"
+    },
+    {
+      "id": "f_339",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 5,
+      "category": null,
+      "comment": null,
+      "user": "u_09",
+      "ts": "2026-07-21T12:00:00Z"
+    },
+    {
+      "id": "f_340",
+      "tutorial_version": "weekly-digest@v4",
+      "rating": 4,
+      "category": null,
+      "comment": null,
+      "user": "u_10",
+      "ts": "2026-07-21T12:00:00Z"
+    }
+  ]
+}

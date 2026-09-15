@@ -1,0 +1,165 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "batch_label": "demo-seed-01",
+  "items": [
+    {
+      "version": {
+        "version_id": "prepare-meeting@v1",
+        "slug": "prepare-meeting",
+        "supersedes": null,
+        "reason": "gap:c12",
+        "rules_applied": [],
+        "s3_key": "tutorials/prepare-meeting/v1.md",
+        "published_at": "2026-08-01T00:00:00Z"
+      },
+      "content": {
+        "title": "準備會議：在會議開始前取得重點摘要",
+        "problem": "開會前想先看系統整理好的重點，卻不知道從哪裡打開。",
+        "prerequisites": [
+          "已登入並且至少有一場已排定的會議"
+        ],
+        "expected_outcome": "你會看到這場會議的重點摘要，並且可以把它匯出成筆記。"
+      }
+    },
+    {
+      "version": {
+        "version_id": "prepare-meeting@v2",
+        "slug": "prepare-meeting",
+        "supersedes": "prepare-meeting@v1",
+        "reason": "feedback:8 則 找不到按鈕",
+        "rules_applied": [
+          "R-007"
+        ],
+        "s3_key": "tutorials/prepare-meeting/v2.md",
+        "published_at": "2026-08-20T00:00:00Z"
+      },
+      "content": {
+        "title": "準備會議：在會議開始前取得重點摘要",
+        "problem": "開會前想先看系統整理好的重點，卻不知道從哪裡打開。",
+        "prerequisites": [
+          "已登入並且至少有一場已排定的會議"
+        ],
+        "expected_outcome": "你會看到這場會議的重點摘要，並且可以把它匯出成筆記。"
+      }
+    },
+    {
+      "version": {
+        "version_id": "share-summary@v1",
+        "slug": "share-summary",
+        "supersedes": null,
+        "reason": "gap:c31",
+        "rules_applied": [],
+        "s3_key": "tutorials/share-summary/v1.md",
+        "published_at": "2026-07-20T00:00:00Z"
+      },
+      "content": {
+        "title": "分享摘要：把會議重點傳給沒有參加的同事",
+        "problem": "想把整理好的會議重點分享出去，卻不確定要從哪一頁產生連結。",
+        "prerequisites": [
+          "已經有一場產生過重點摘要的會議"
+        ],
+        "expected_outcome": "同事會收到一個可以直接開啟的重點摘要連結。"
+      }
+    },
+    {
+      "version": {
+        "version_id": "notification-settings@v1",
+        "slug": "notification-settings",
+        "supersedes": null,
+        "reason": "gap:c47",
+        "rules_applied": [],
+        "s3_key": "tutorials/notification-settings/v1.md",
+        "published_at": "2026-07-20T00:00:00Z"
+      },
+      "content": {
+        "title": "設定通知：自己決定收到哪些會議提醒",
+        "problem": "會議提醒太多或太少，想自己挑要收到哪些通知、從哪個管道收。",
+        "prerequisites": [
+          "已登入並且有權限修改個人設定"
+        ],
+        "expected_outcome": "你只會在自己選定的管道收到選定類型的會議提醒。"
+      }
+    },
+    {
+      "version": {
+        "version_id": "weekly-digest@v1",
+        "slug": "weekly-digest",
+        "supersedes": null,
+        "reason": "gap:c58",
+        "rules_applied": [],
+        "s3_key": "tutorials/weekly-digest/v1.md",
+        "published_at": "2026-06-01T00:00:00Z"
+      },
+      "content": {
+        "title": "每週摘要：一次看完這週的會議重點",
+        "problem": "一週開了很多場會，想一次看完所有重點而不是一場一場點開。",
+        "prerequisites": [
+          "本週至少有一場已經結束的會議"
+        ],
+        "expected_outcome": "你會看到本週所有會議的重點整理，並且可以存成筆記。"
+      }
+    },
+    {
+      "version": {
+        "version_id": "weekly-digest@v2",
+        "slug": "weekly-digest",
+        "supersedes": "weekly-digest@v1",
+        "reason": "feedback:5 則 缺少資訊",
+        "rules_applied": [
+          "R-012"
+        ],
+        "s3_key": "tutorials/weekly-digest/v2.md",
+        "published_at": "2026-06-20T00:00:00Z"
+      },
+      "content": {
+        "title": "每週摘要：一次看完這週的會議重點",
+        "problem": "一週開了很多場會，想一次看完所有重點而不是一場一場點開。",
+        "prerequisites": [
+          "本週至少有一場已經結束的會議"
+        ],
+        "expected_outcome": "你會看到本週所有會議的重點整理，並且可以存成筆記。"
+      }
+    },
+    {
+      "version": {
+        "version_id": "weekly-digest@v3",
+        "slug": "weekly-digest",
+        "supersedes": "weekly-digest@v2",
+        "reason": "feedback:5 則 缺少資訊",
+        "rules_applied": [],
+        "s3_key": "tutorials/weekly-digest/v3.md",
+        "published_at": "2026-07-01T00:00:00Z"
+      },
+      "content": {
+        "title": "每週摘要：一次看完這週的會議重點",
+        "problem": "一週開了很多場會，想一次看完所有重點而不是一場一場點開。",
+        "prerequisites": [
+          "本週至少有一場已經結束的會議"
+        ],
+        "expected_outcome": "你會看到本週所有會議的重點整理，並且可以存成筆記。"
+      }
+    },
+    {
+      "version": {
+        "version_id": "weekly-digest@v4",
+        "slug": "weekly-digest",
+        "supersedes": "weekly-digest@v3",
+        "reason": "feedback:5 則 缺少資訊",
+        "rules_applied": [
+          "R-012"
+        ],
+        "s3_key": "tutorials/weekly-digest/v4.md",
+        "published_at": "2026-07-20T00:00:00Z"
+      },
+      "content": {
+        "title": "每週摘要：一次看完這週的會議重點",
+        "problem": "一週開了很多場會，想一次看完所有重點而不是一場一場點開。",
+        "prerequisites": [
+          "本週至少有一場已經結束的會議"
+        ],
+        "expected_outcome": "你會看到本週所有會議的重點整理，並且可以存成筆記。"
+      }
+    }
+  ]
+}
