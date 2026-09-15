@@ -276,7 +276,7 @@ def dashboard_view(*, repository, approved, project_id, batch) -> dict: ...
 
 ### Task 1：六個子命令與唯一的寫入路徑
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -297,7 +297,7 @@ def test_trigger_review_rejects_unknown_mode():
         build_parser().parse_args(["trigger-review", "--mode", "loose"])
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_demo_cli.py -q
@@ -305,15 +305,15 @@ uv run pytest tests/unit/test_demo_cli.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'build_parser'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 `build_parser()` 用 `argparse.ArgumentParser` 加一個 `add_subparsers(dest="command", required=True)`，六個子命令逐一註冊：`seed`（`--dir`，預設 `demo/seed`）、`trigger-ticket`（`--ticket-id`）、`trigger-release`（`--release-id`）、`trigger-review`（`--mode`，`choices=("formal", "demo")`，型別對應 Phase 44 的 `ReviewMode`）、`import`（`--file`、`--kind`，`choices=("feedback", "view")`）、`metrics`（`--version`）。`main()` 依 `command` 分派，每個 handler 回傳 0 或非 0 的退出碼；AWS client 一律 `boto3.client(..., region_name=load_settings().aws_region)`，不寫死區域也不接受金鑰參數。
 
-- [ ] **Step 4：補寫入路徑測試並跑綠燈**
+- [x] **Step 4：補寫入路徑測試並跑綠燈**
 
 用假的 boto3 client 斷言四件事：`trigger-ticket`、`trigger-release`、`metrics` 只呼叫 `lambda.invoke`；`import` 讀進 Phase 57 widget 的 `{kind, source, generated_at, note, items}` 封套後，**每個 item 各送一次 `lambda.invoke`**（`items` 只放一筆，對應 Phase 42 的一次 `import_feedback`／`import_view` 與一個 `ImportResult`），並逐筆印出 `saved`／`duplicate`／`rejected`；`trigger-review` 只呼叫 `stepfunctions.start_execution`，input **逐字**是 `{"mode": "demo"}`——**只有 `mode` 一個欄位**，沒有 `project_id`，也沒有任何「排程時刻」欄位（時間一律由 Phase 48 的 `deps.now()` 決定，`project_id` 缺值時用 `Settings.project_id`），與 EventBridge Scheduler 送給同一條 state machine 的形狀完全相同（00A §7、D-61）；execution name 是 `execution_name(operation_id_for("feedback-review", f"{project_id}-{date}"))`，其中 `project_id = load_settings().project_id`、`date` 是當日 UTC 日期（`datetime.now(UTC).date().isoformat()`），所以 demo 專案在 2026-09-13 得到 `op-feedback-review-demo-2026-09-13`——與 Phase 48 `review_operation_id` 的算式逐字相同（canonical id 中間用 `-` 不用 `#`），同一天重送才會落在同一筆 operation 紀錄；以上四者都沒有呼叫任何 `dynamodb` 方法。`seed` 是唯一例外，只呼叫 `load_seed` → `verify_recipe` → `apply_seed`，且 `verify_recipe` 的 `o7_ready` 為假時印出 `missing_approvals` 並回非 0，不寫入任何資料。執行 `uv run pytest tests/unit/test_demo_cli.py -q`，預期整個檔案全綠。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add demo/cli.py tests/unit/test_demo_cli.py pyproject.toml
@@ -322,7 +322,7 @@ git commit -m "feat(demo): 建立控制台六個子命令"
 
 ### Task 2：B 規則開關的隔離預覽
 
-- [ ] **Step 1：建立失敗測試**（`dump_table` 把整張表的 item 依 PK／SK 排序後轉成 list，`written_keys` 回 moto bucket 內全部 key）
+- [x] **Step 1：建立失敗測試**（`dump_table` 把整張表的 item 依 PK／SK 排序後轉成 list，`written_keys` 回 moto bucket 內全部 key）
 
 ```python
 from demo.preview import run_rule_toggle_preview
@@ -338,7 +338,7 @@ def test_rule_toggle_preview_writes_only_two_keys(repository, fake_writer, ticke
     assert result.model_calls == 2 and result.rule_id == rule.rule_id
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_demo_preview.py -q
@@ -346,17 +346,17 @@ uv run pytest tests/integration/test_demo_preview.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'run_rule_toggle_preview'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 同一批 `tickets` 各跑一次 `Writer.generate_json`：第一次規則區塊傳空字串，第二次傳 `render_rules_block([rule])`；兩份輸出各自 `TutorialContent.model_validate(...)` 後經 `render_markdown` 轉成 Markdown，前面加上固定檔頭（`SYNTHETIC_NOTICE`、`run_id`、規則開關狀態），再用 `Repository.put_object(key, body.encode("utf-8"), "text/markdown; charset=utf-8", if_none_match=True)` 寫到 `PREVIEW_PREFIX + run_id + "/off.md"` 與 `"/on.md"`。函式全程不呼叫 `put_meta`、`put_edge`、`update_meta`、`allocate_version`、`create_version`，也不回傳任何 `version_id`。
 
 （現況核對 2026-09-14：`Writer.generate_json` 的 `node` 是**必填** keyword，`generate_json` 會把它原樣寫進 `CallTrace`，所以兩次呼叫要傳**不同**的 node 名（例如 `preview-off`／`preview-on`），`call_breakdown` 才分得開。測試用 `tests/unit/conftest.py` 的 `RecordingWriter`，`replies` 先排好兩個 `TutorialContent` 形狀的 dict。**O5 BLOCKED** → 真實 Bedrock 上這兩次呼叫會 `PermanentError`；本 Task 的綠燈全部在 moto ＋ `RecordingWriter` 上取得，現場演練的失敗照實記 BLOCKED 並用 `Banner.fallback_reason` 標示「目前顯示預先執行結果」。）
 
-- [ ] **Step 4：補污染防護測試並跑綠燈**
+- [x] **Step 4：補污染防護測試並跑綠燈**
 
 加入四個案例：同一個 `run_id` 重跑丟 `ObjectAlreadyExists`、且第二次沒有任何新寫入；預覽跑完後 `list_rules()` 每條規則的 `applied_to` 長度不變；預覽跑完後同一版的 `version_metrics` 結果與跑前逐欄位相同；`site/` 前綴的物件數量不變。執行 `uv run pytest tests/integration/test_demo_preview.py -q`，預期整個檔案全綠。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add demo/preview.py tests/integration/test_demo_preview.py
@@ -365,7 +365,7 @@ git commit -m "feat(demo): 隔離的規則開關預覽"
 
 ### Task 3：四個區塊的 view model 與真實呼叫數
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from demo.view_model import DASHBOARD_BLOCKS, call_breakdown, dashboard_view
@@ -387,7 +387,7 @@ def test_call_breakdown_counts_every_attempt(trace):
 
 `trace` fixture 用 Phase 15 的 `CallTrace`，塞入五筆紀錄：`embed` 一筆、`draft` 兩筆（`attempt` 1 與 2）、`name-gap` 一筆、Rote 節點一筆。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_demo_view_model.py -q
@@ -395,15 +395,15 @@ uv run pytest tests/unit/test_demo_view_model.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'dashboard_view'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 `dashboard_view` 逐一呼叫 Phase 53／54 的函式填四個 key，不自己寫任何平均或比例公式：區塊 2 用 `version_metrics(...)` 的 `average`／`sample_size`／`negative_ids`，區塊 3 把同一個結果的 `reopen.count`／`reopen_users`／`viewers`／`rate` 映成 `count`／`numerator`／`denominator`／`rate` 並固定附上 proxy 說明的 `note`，區塊 4 用 `rule_counts` 與 `applied_count`。零評分填 `None` 並附「尚無評分」，零分母（`rate is None`）填 `None` 並附「N/A：樣本不足」。`call_breakdown` 的 `total` 直接用 `bedrock_call_count(trace)`，再以 `json.loads(trace.to_json())` 依 `node` 分組、數 `attempt >= 2` 的筆數當 `retries`。
 
-- [ ] **Step 4：補邊界案例並跑綠燈**
+- [x] **Step 4：補邊界案例並跑綠燈**
 
 加入零評分版本、零瀏覽版本、candidate 與 active 混合的規則清單三個案例，斷言畫面不會出現 0 分或 0%，且 candidate 的筆數與 active 分開列出、不寫成已有效。執行 `uv run pytest tests/unit/test_demo_view_model.py -q`，預期整個檔案全綠。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add demo/view_model.py tests/unit/test_demo_view_model.py
@@ -412,7 +412,7 @@ git commit -m "feat(demo): 四區塊 view model 與呼叫數"
 
 ### Task 4：標示護欄與 Dashboard 原始碼守門
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from pathlib import Path
@@ -434,7 +434,7 @@ def test_dashboard_never_writes_dynamodb_or_embeds_keys():
         assert banned not in source
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_demo_dashboard_guard.py -q
@@ -442,15 +442,15 @@ uv run pytest tests/unit/test_demo_dashboard_guard.py -q
 
 預期：FAIL，`demo/dashboard.py` 與 `render_banner` 都還不存在。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 `render_banner` 固定輸出「【合成資料示範】｜批次：<batch>｜時間標示：即時執行／模擬時間」，`fallback_reason` 非空時追加「｜目前顯示預先執行結果；本次現場失敗原因：<reason>」。`demo/dashboard.py` 只 import `demo.view_model` 與 `streamlit`，用 `st.session_state` 保存批次與備援選項，用 `boto3` 預設憑證鏈建立**唯讀**的 Repository 取資料，不建立任何 DynamoDB 寫入 client，也不呼叫 `apply_seed`。
 
-- [ ] **Step 4：補時間分離測試並跑綠燈**
+- [x] **Step 4：補時間分離測試並跑綠燈**
 
 斷言即時執行與模擬歷史資料分別放在兩個 key、view model 不提供把兩者相加的欄位，並斷言畫面文案出現「待維護者核定」而非「O7 已通過」；再以 `uv run streamlit run demo/dashboard.py` 人工開一次，確認橫幅永遠在最上方。執行 `uv run pytest tests/unit/test_demo_dashboard_guard.py tests/unit/test_demo_view_model.py -q`，預期整個檔案全綠。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add demo/dashboard.py demo/view_model.py tests/unit/test_demo_dashboard_guard.py
@@ -499,18 +499,58 @@ git commit -m "feat(demo): Dashboard 標示與唯讀守門"
 
 ## 11. 完成清單
 
-- [ ] 六個子命令齊全，`--mode` 只接受 `formal` 與 `demo`，環境設定一律走 `load_settings()` 與 `TKB_` 長名。
-- [ ] `trigger-review` 的 input 逐字只有 `{"mode": <mode>}`，execution name 來自 `execution_name(operation_id_for("feedback-review", f"{project_id}-{date}"))`，與 Phase 48 的排程與 `review_operation_id` 完全一致（D-61）。
-- [ ] `trigger-ticket` 能在 `R-007` 轉 active 後跑出正式的 B v1 且 `rules_applied == ["R-007"]`，並在畫面上與隔離預覽分開標示（D-68）。
-- [ ] CLI 與 Dashboard 都沒有直接寫入 DynamoDB 業務 item，也沒有金鑰字面值；`import` 逐筆呼叫 Phase 42 的單筆匯入。
-- [ ] 規則開關預覽只寫私有 `demo/previews/<run_id>/off.md` 與 `on.md`，整張表與 `site/` 不變，同 `run_id` 重跑會被擋下。
-- [ ] 四個區塊名稱與 `DASHBOARD_BLOCKS` 一致，數值全部由 Phase 53／54 重算，公式沒有第二份實作。
-- [ ] 重開票率同時顯示筆數、分子、分母與 proxy 說明；零分母顯示 N/A。
-- [ ] 呼叫數含 embedding、Rote、Map 與重試，來源是 `bedrock_call_count` 與 `trace.to_json()`。
-- [ ] 橫幅固定顯示合成資料與批次；即時與模擬時間分開；備援標為「預先執行結果」。
-- [ ] 未把程式重算成功寫成 O7 已核定或雲端驗收已通過。
-- [ ] **`streamlit` 進 `[dependency-groups] dev` 且 `uv.lock` 一起提交**（現況核對 2026-09-14 新增；`streamlit` 目前沒有安裝）。
-- [ ] **`from demo.cli import ...` 在 `uv run pytest` 下 import 得到**（`pythonpath = ["."]` 由 P56 加；本 Phase 只確認它還在，現況核對 2026-09-14 新增）。
+- [x] 六個子命令齊全，`--mode` 只接受 `formal` 與 `demo`，環境設定一律走 `load_settings()` 與 `TKB_` 長名。
+- [x] `trigger-review` 的 input 逐字只有 `{"mode": <mode>}`，execution name 來自 `execution_name(operation_id_for("feedback-review", f"{project_id}-{date}"))`，與 Phase 48 的排程與 `review_operation_id` 完全一致（D-61）。
+- [ ] `trigger-ticket` 能在 `R-007` 轉 active 後跑出正式的 B v1 且 `rules_applied == ["R-007"]`，並在畫面上與隔離預覽分開標示（D-68）。（**未勾：O5 BLOCKED**；且 D-68 字面上的 `== ["R-007"]` 在 P56 種子下不成立，見下方本計畫選擇與報告 §9）
+- [x] CLI 與 Dashboard 都沒有直接寫入 DynamoDB 業務 item，也沒有金鑰字面值；`import` 逐筆呼叫 Phase 42 的單筆匯入。
+- [x] 規則開關預覽只寫私有 `demo/previews/<run_id>/off.md` 與 `on.md`，整張表與 `site/` 不變，同 `run_id` 重跑會被擋下。
+- [x] 四個區塊名稱與 `DASHBOARD_BLOCKS` 一致，數值全部由 Phase 53／54 重算，公式沒有第二份實作。
+- [x] 重開票率同時顯示筆數、分子、分母與 proxy 說明；零分母顯示 N/A。
+- [x] 呼叫數含 embedding、Rote、Map 與重試，來源是 `bedrock_call_count` 與 `trace.to_json()`。
+- [x] 橫幅固定顯示合成資料與批次；即時與模擬時間分開；備援標為「預先執行結果」。
+- [x] 未把程式重算成功寫成 O7 已核定或雲端驗收已通過。
+- [x] **`streamlit` 進 `[dependency-groups] dev` 且 `uv.lock` 一起提交**（現況核對 2026-09-14 新增；`streamlit` 目前沒有安裝）。
+- [x] **`from demo.cli import ...` 在 `uv run pytest` 下 import 得到**（`pythonpath = ["."]` 由 P56 加；本 Phase 只確認它還在，現況核對 2026-09-14 新增）。
+
+**本計畫選擇（2026-09-14）：** 六件實作裁決，逐條寫在這裡，程式與報告一致。
+
+1. **`trigger-ticket`／`trigger-release` 送什麼。** CLI 不讀 DynamoDB，所以工單／Release 的
+   原文一律從**本機種子檔**（`--dir`，預設 `demo/seed`）讀出來，組成 00A D-60 的
+   「可信入口設定 ＋ 原始事件」形狀送進受控匯入 Lambda `training-kb-import`
+   （`kind="ticket"`／`"release"`，`items` 恰一筆）。可信入口設定由 `demo/cli.py` 的
+   `TICKET_ENTRIES`／`RELEASE_ENTRY` **宣告**（值取自
+   `tests/fixtures/o6/approved-sources.json` 已登記的手動匯入來源：`mail.local`／
+   `email_manual`、`discord.com`／`discord_manual`、`changelog.local`／`changelog_manual`），
+   **不從 payload 反推**。這三個來源目前都還沒有 O6 核定，所以真實 AWS 上這條路會先被
+   「未核定來源一律 blocked」擋住——那是 O6 的現況，不是 CLI 的錯誤。
+2. **D-68 的可觀察結果改寫。** 種子的 `R-012` 也是 active（`applies_when=read`），而
+   `create_first_version` 走的是 `rules_for_content(..., ALL_STEP_TYPES, ...)`，所以正式版本的
+   `rules_applied` 會是 `["R-007", "R-012"]`——**D-68 字面上的 `== ["R-007"]` 在這份種子下
+   不成立**。本 Phase 改驗「`R-007` 確實被注入並記進 `rules_applied`，而且 `applied_count`
+   只被正式版本加一、不被兩份預覽加」。
+3. **Dashboard 的資料來源。** 預設是**本機種子**：`demo/view_model.py:SeedRepository` 把
+   `SeedBundle` 包成唯讀的 Repository 形狀，離線就能由 `demo/seed` 現算四個區塊（P56 §7.2
+   第 4 條）；指標仍然全部由 Phase 53／54 的函式從原始 Feedback／View／Ticket 重算。要看
+   真實表就改傳一個真的 `Repository` 進 `dashboard_view(...)`，Dashboard 這一側永遠唯讀。
+4. **區塊 1 的「即時／模擬」怎麼分。** `TIME_KEYS = ("simulated_history", "live_run")`：
+   已發布（種子回放的 `published_at`）進 `simulated_history`，`published_at is None`
+   （現場流程剛建立、尚未發布）進 `live_run`，**沒有把兩者相加的欄位**（設計 §11.5）。
+5. **預覽的 `operation_id`。** 用 `f"op-demo-preview-{run_id}"`，**不**走
+   `operation_id_for`——`OperationKind` 沒有 `demo-preview`，而且預覽不建立任何 operation
+   紀錄。兩次呼叫的 `node` 固定是 `preview-off`／`preview-on`，`call_breakdown` 才分得開。
+6. **預覽檔頭。** 第一行固定 `合成資料示範｜隔離預覽｜不寫入正式教學與統計`，第二行帶
+   `run_id`、規則開關狀態、規則 ID 與 **writer 類別名**——O5 BLOCKED 時要能一眼分辨
+   「隔離預覽」與「模型未開通」。
+
+**（現況核對 2026-09-15，Phase 58 實作時發現）種子與規則選取之間有一個缺口：**
+P56 的 `demo/seed/rules.json` 直接把 `R-012` 寫成 `status: active`，但種子**沒有**產生
+`operations/rules/validated_at.json`（那份檔只有 P55 的 `apply_rule_status` 會寫）。
+所以剛用 `apply_seed` 種好的表上，任何走 `rules_for_content` 的正式寫作路徑都會當場
+`PermanentError: 缺少最近驗證時間：R-012`（P19 的規則：缺值代表資料不完整，不拿現在時間補）。
+`tests/integration/test_demo_preview.py::test_active_rule_reaches_a_formal_version_while_the_preview_does_not`
+先把這件事證出來，再用 `apply_rule_status` 補齊兩條規則的驗證時間才往下跑。
+**要在 Demo 現場跑正式 Ticket Analysis 的人必須先補這份檔**，否則第一個寫作節點就會失敗。
+交給 controller 決定要不要請 P56 在種子裡補、或由 P60 的 rehearse 步驟先跑一次 `validate_rules`。
 
 **（現況核對 2026-09-14）本批注定勾不起來的一列，以及它的解除條件：**
 
