@@ -98,7 +98,7 @@ negative_feedback_ids(v2, APPROVED) -> {"f_101","f_102"}           長度 2
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 修改 | `src/training_kb/analytics/__init__.py` | 套件入口，**已由 Phase 40 先建**（現況核對 2026-09-14：原寫「新增…並匯出本 Phase 的四個名稱」；00A §3.2 的 owner 仍是本 Phase）。**本計畫選擇：維持 docstring-only、不 re-export**，消費端一律 `from training_kb.analytics.ratings import ...`（與 `pipelines/__init__.py` 同一套 house style）。實務上本 Phase 通常**完全不必改這支檔**。 |
+| 修改 | `src/training_kb/analytics/__init__.py` | 套件入口，**已由 Phase 40 先建**（現況核對 2026-09-14：原寫「新增…並匯出本 Phase 的四個名稱」；00A §3.2 的 owner 仍是本 Phase）。**本計畫選擇：維持 docstring-only、不 re-export**，消費端一律 `from training_kb.analytics.ratings import ...`（與 `pipelines/__init__.py` 同一套 house style）。實務上本 Phase 通常**完全不必改這支檔**。**實作結果（2026-09-14）：完全未修改**，維持 Phase 40 建立的 docstring-only 版本；`tests/unit/test_rating_metrics.py` 與後續 Phase 一律走 `from training_kb.analytics.ratings import ...`。 |
 | 新增 | `src/training_kb/analytics/ratings.py` | `average_rating`、`cross_version_average`、`negative_feedback_ids`、`format_average`。 |
 | 測試 | `tests/unit/test_rating_metrics.py` | 八筆／十筆重算、空資料、待分類與去重。 |
 
@@ -169,7 +169,7 @@ average_rating                     negative_feedback_ids
 
 ### Task 1：每版平均與「尚無評分」
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -203,7 +203,7 @@ def test_average_rating_without_any_rating_is_none_not_zero():
     assert format_average(None) == "尚無評分"
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_rating_metrics.py::test_average_rating_reproduces_design_v1_and_v2 -q
@@ -211,7 +211,7 @@ uv run pytest tests/unit/test_rating_metrics.py::test_average_rating_reproduces_
 
 預期：FAIL，訊號包含 `cannot import name 'average_rating'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from collections.abc import Iterable
@@ -234,7 +234,7 @@ def format_average(value: float | None) -> str:
     return str(quantized)
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_rating_metrics.py -q
@@ -242,16 +242,18 @@ uv run pytest tests/unit/test_rating_metrics.py -q
 
 預期：兩個測試皆 PASS；`2.875` 未被提前四捨五入成 `2.9` 再回傳。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/analytics/__init__.py src/training_kb/analytics/ratings.py tests/unit/test_rating_metrics.py
 git commit -m "feat(analytics): 重算每版平均評分"
 ```
 
+> **本計畫選擇（2026-09-14）：不 re-export。**實際執行的是 `git add src/training_kb/analytics/ratings.py tests/unit/test_rating_metrics.py`——`analytics/__init__.py` 依 §4 的裁決未被修改，加進來會把別的 Phase 的檔帶進 commit（COMMON R3.3）。三個 Task 的 commit 都補上 COMMON R8 的兩行 trailer。
+
 ### Task 2：跨版等權平均
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from training_kb.analytics.ratings import cross_version_average
@@ -266,7 +268,7 @@ def test_cross_version_average_weights_each_version_equally():
     assert cross_version_average([2.875, 4.4]) != pytest.approx(67 / 18)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_rating_metrics.py::test_cross_version_average_weights_each_version_equally -q
@@ -274,7 +276,7 @@ uv run pytest tests/unit/test_rating_metrics.py::test_cross_version_average_weig
 
 預期：FAIL，訊號包含 `cannot import name 'cross_version_average'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from collections.abc import Sequence
@@ -287,7 +289,7 @@ def cross_version_average(values: Sequence[float | None]) -> float | None:
     return sum(present) / len(present)
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_rating_metrics.py -q
@@ -295,7 +297,7 @@ uv run pytest tests/unit/test_rating_metrics.py -q
 
 預期：全部 PASS，包含「不等於加權結果」那一行。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/analytics/ratings.py tests/unit/test_rating_metrics.py
@@ -306,7 +308,7 @@ git commit -m "feat(analytics): 以版本等權計算跨版平均"
 
 `fb` 與 `V1`／`V2` 是 Task 1 在同一個測試檔案定義的 helper，本 Task 直接使用，不重新定義。
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from training_kb.analytics.ratings import negative_feedback_ids
@@ -328,7 +330,7 @@ def test_negative_ids_skip_unclassified_and_high_rating():
     assert negative_feedback_ids(v2, APPROVED) == frozenset({"f_101", "f_102"})
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_rating_metrics.py::test_negative_ids_union_is_deduplicated_by_feedback_id -q
@@ -336,7 +338,7 @@ uv run pytest tests/unit/test_rating_metrics.py::test_negative_ids_union_is_dedu
 
 預期：FAIL，訊號包含 `cannot import name 'negative_feedback_ids'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from collections.abc import Iterable
@@ -356,7 +358,7 @@ def negative_feedback_ids(
     return frozenset(hits)
 ```
 
-- [ ] **Step 4：補三個邊界案例並跑完整檔案**
+- [x] **Step 4：補三個邊界案例並跑完整檔案**
 
 三個案例分別釘住：`rating=None` 但類別已核定（仍算負面，且不可因 `None <= 2` 拋 `TypeError`）、`rating=2` 但類別是「待分類」（低分條件獨立成立）、同一 ID 在輸入清單重複出現（集合仍只有一個）。
 
@@ -377,7 +379,7 @@ uv run pytest tests/unit/test_rating_metrics.py -q
 
 預期：全部 PASS，且沒有 `TypeError`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/analytics/ratings.py tests/unit/test_rating_metrics.py
@@ -430,12 +432,12 @@ Rule 原文逐字取自 `.feature` 原檔；primary／相關的歸屬依 [00B �
 
 ## 11. 完成清單
 
-- [ ] `average_rating`、`cross_version_average`、`negative_feedback_ids`、`format_average` 簽名與本文件、00A 第 6.10 節一致。
-- [ ] A v1 八筆重算出 2.875，A v2 十筆重算出 4.4，皆由測試斷言。
-- [ ] 負面回饋為 ID 集合，A v1 得 8、A v2 得 2，同筆不重複計。
-- [ ] 無有效評分回傳 `None`，顯示「尚無評分」，沒有任何路徑產生 0.0。
-- [ ] 跨版平均先每版再等權，並有測試證明不等於加權結果。
-- [ ] 顯示四捨五入策略被測試釘住，門檻比較仍使用未四捨五入的值。
-- [ ] 與 Phase 44 的平均分母一致（D-44），且已在報告記下「Phase 44 改呼叫 `average_rating`」這筆**同批內**後續工作（現況核對 2026-09-14：Phase 44 尚未實作，本 Phase 不代改）。
-- [ ] 本 Phase 未寫入任何 DynamoDB item、未呼叫模型、未改變規則狀態。
-- [ ] 沒有把自含 fixture 的綠燈說成 Demo 種子已核定或 O7 已通過。
+- [x] `average_rating`、`cross_version_average`、`negative_feedback_ids`、`format_average` 簽名與本文件、00A 第 6.10 節一致。
+- [x] A v1 八筆重算出 2.875，A v2 十筆重算出 4.4，皆由測試斷言。
+- [x] 負面回饋為 ID 集合，A v1 得 8、A v2 得 2，同筆不重複計。
+- [x] 無有效評分回傳 `None`，顯示「尚無評分」，沒有任何路徑產生 0.0。
+- [x] 跨版平均先每版再等權，並有測試證明不等於加權結果。
+- [x] 顯示四捨五入策略被測試釘住，門檻比較仍使用未四捨五入的值。
+- [x] 與 Phase 44 的平均分母一致（D-44），且已在報告記下「Phase 44 改呼叫 `average_rating`」這筆**同批內**後續工作（現況核對 2026-09-14：Phase 44 尚未實作，本 Phase 不代改）。
+- [x] 本 Phase 未寫入任何 DynamoDB item、未呼叫模型、未改變規則狀態。
+- [x] 沒有把自含 fixture 的綠燈說成 Demo 種子已核定或 O7 已通過。
