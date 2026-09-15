@@ -58,7 +58,9 @@ def active_fault(env: Mapping[str, str] | None = None) -> str | None:
     而且事後看不出是開關沒生效還是流程真的沒失敗。
     """
     values: Mapping[str, str] = os.environ if env is None else env
-    if values.get(ENV_NAME_ENV) == PRODUCTION:
+    # 寬鬆比對：`TKB_ENV=" Prod"`／`"PROD"` 也算正式環境。正式環境的保險寧可誤擋，
+    # 不可因為大小寫或前後空白就漏擋（Phase 59 review Minor）。
+    if values.get(ENV_NAME_ENV, "").strip().lower() == PRODUCTION:
         return None
     point = values.get(FAULT_ENV, "")
     if not point:

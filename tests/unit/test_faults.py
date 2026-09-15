@@ -51,6 +51,17 @@ def test_prod_never_injects() -> None:
     assert active_fault({"TKB_FAULT": "s3_after_md", "TKB_ENV": "prod"}) is None
 
 
+@pytest.mark.parametrize("value", ["prod", "PROD", " Prod ", "Prod\n"])
+def test_prod_match_is_case_and_space_insensitive(value: str) -> None:
+    """Given 大小寫或前後空白不同的 `TKB_ENV`，Then 一樣當成正式環境（Phase 59 review Minor）。
+
+    正式環境的保險寧可誤擋，不可因為 `TKB_ENV="PROD"` 這種寫法就漏擋。
+    """
+    env = {"TKB_FAULT": "s3_after_md", "TKB_ENV": value}
+    assert active_fault(env) is None
+    assert maybe_fail("s3_after_md", env) is None
+
+
 def test_unknown_switch_value_fails_loudly() -> None:
     """Given 打錯的切點名稱，Then 明確失敗，不靜靜當成「沒有注入」。"""
     with pytest.raises(PermanentError, match="typo"):

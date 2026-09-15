@@ -762,11 +762,17 @@ def resume_publish(operation_id: str, *, operations: OperationCoordinator,
 
     三條路：
 
-    | 版本狀態 | 做什麼 | 對應切點 |
+    | 版本狀態 | 做什麼 | 從哪個切點進得來 |
     |---|---|---|
-    | `published_at is None` | 照正常路徑 `commit`（`inspect` 會再檢查一次） | 1、2、3、5 |
-    | 全部已發布 | 只 `promote_site_objects` 補公開物件，再重建兩層索引 | 4 |
+    | `published_at is None` | 照正常路徑 `commit`（`inspect` 會再檢查一次） | **只有切點 3** |
+    | 全部已發布 | 只 `promote_site_objects` 補公開物件，再重建兩層索引 | 切點 4 |
     | 版本不存在 | `CoordinationError` | 資料不完整 |
+
+    **切點 1、2、5 不從這裡復原**（Phase 59 review Minor）：切點 1／2 中斷時版本的私有產物或
+    關係邊還不齊，`prepare` 會先被 `verify_version_complete` 擋下；切點 5 連版本都還沒建，
+    ledger 也還沒有 `version_id`。這三個的復原方式是**以同一個 `operation_id` 重走完整路徑**
+    （`create_version` 對同一份 plan 冪等、`allocate_version` 沿用 ledger 版號），
+    走完之後才會落到本函式的第一列。
 
     **不得**在已發布的情況再呼叫 `commit`（`inspect` 會以「版本已發布」擋下）、**不得**
     刪除既有公開物件、**不得**重新 `allocate_version`。實際補出的 key 與待補清單逐字比對，
