@@ -2,6 +2,31 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **(a) 已存在、可直接重用（不要重寫）**
+> - `src/training_kb/config.py:10` `Thresholds` 的六個欄位**全部已存在**：`cosine_match=0.85`、`recurring_tickets=5`、`recurring_category=5`、`production_feedback=10`、`demo_feedback=8`、**`weak_average=3.5`**（Phase 02 的 commit `16a3639` 就一起加了）。
+> - `src/training_kb/repository.py`：`scan_entity(entity, *, consistent=True, meta_only=True) -> list[DynamoItem]`（:539）、`get_version(version_id) -> TutorialVersion | None`（:378）、`get_tutorial(slug) -> Tutorial | None`（:375）、`list_feedback_of_version(version_id) -> list[Feedback]`（:579）、模組函式 `item_to_model(item, model) -> T`（:152）。
+> - `src/training_kb/models.py`：`TutorialStatus`（:38）、`Tutorial`（:143）、`TutorialVersion`（:173）、`Feedback`（:347）。
+> - `src/training_kb/pipelines/feedback.py`：**controller 已預建空殼**（只有 docstring，commit `5f8a430`）。
+>
+> **(b) 文件因上一批裁決／實作而修正的點**
+> 1. §4「**建立** `src/training_kb/pipelines/feedback.py`」→ 改成「**修改**」：controller 已預建空殼（COMMON.md R4），本 Phase 只用 Edit 往裡面追加自己的區段。
+> 2. §4「修改 `src/training_kb/config.py`」與 Task 1 Step 4「在 `Thresholds` 加上 `weak_average: float = 3.5`」→ **該欄位已經存在，本 Phase 不需要改 `config.py`**。00A §6.9 P44 那一列仍寫「`Thresholds.weak_average` 由本 Phase 以修改 `config.py` 方式追加」，該敘述已過時（門檻值與程式行為都不變）；本批不改 00A，由本區塊聲明。
+> 3. `item_to_model` 的實際定義用 PEP 695 泛型語法 `def item_to_model[T: StrictModel](item, model) -> T`（ruff UP047），公開簽名與 00A §6.3 相同，呼叫端寫法不變。
+> 4. `Feedback` 在 Phase 04 有兩條 D-66 模型層 validator：`carries_signal`（`rating`／`category`／`comment` 至少一項非空）與 `rating_is_strict_int`（拒 `bool`、只收 1..5）。本 Phase 造 `Feedback` fixture 時必須滿足它們，`rating=None` 的案例要另外給 `category` 或 `comment`。
+> 5. `approved_categories(repository)` 與 `PENDING_CATEGORY` 由 **Phase 43 追加在 `src/training_kb/ingress.py`**（00A §3.2 的 `ingress.py` 修改者含 P43），**目前尚未存在**。P43 屬本批另一組，動手前先確認它已合併，否則 `select_weak_targets` 的 import 直接紅燈。
+>
+> **(c) gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - O1 provisionally accepted（D-71）；**O2 PASS**（P11，`docs/plan/report/o2-20260914t182824z.md`）；**O3 FAIL**（P12，`docs/plan/report/o3-20260914t181109z.md`，F49 未放寬）；O4 未到（P54 首驗）；**O5 BLOCKED**（帳號未開 Bedrock model access，`docs/plan/report/o5-20260915T030245Z.md`）；O6 待維護者核定；O7 未到（P56 首驗）。
+> - 本 Phase **不呼叫模型、不寫入 DynamoDB／S3、不發布**，所以 O2／O3／O5 都不阻擋它。O7 未核定前，Demo 的八筆回饋仍只是待核定合成資料，`mode="demo"` 的命中結果不得說成正式門檻已滿足。
+>
+> **(d) controller 裁決 R1–R11 的適用項**
+> - **R3（同檔併行）**：`src/training_kb/pipelines/feedback.py` 在 W1 由 **P44 ∥ P45 ∥ P47** 同時追加（W2 是 P46、W3 是 P48）。只用 Edit 不用 Write；自己的程式放在 `# ---- Phase 44 ----` 區段；不重排、不重格式化、不改名別人的程式；共用檔只跑 `ruff format --check`；`git add` 只加自己的檔案路徑。
+> - **R4**：空殼已建，直接 Edit。**R5**：文件片段是示意，名稱與簽名以 00A ＋ 既有程式為準。
+> - **R6／R7／R8**：逐 Task 先紅燈再綠燈並留指令與輸出；報告寫 `docs/plan/report/phases/2026-09-14-Phase44-REP.md`；commit trailer 照 COMMON.md R8。
+> - 測試檔照 00A §3.3 **平放**在 `tests/unit/`／`tests/integration/`（D-48：同一支程式檔的測試不得同時出現在 `tests/unit/` 與 `tests/unit/pipelines/` 兩個目錄；P44–P48 五份一致平放）。
+
 **目標：** 用三個同時成立的條件挑出弱教學，並把每個命中的版本包成 `WeakTarget` 交給診斷；只看 active Tutorial 的已發布 `current_version`。
 
 **架構：** `select_weak_targets` 先列出所有 Tutorial，逐篇取 `current_version` 與該版截至本次執行的全部有效回饋，交給純函式 `is_weak` 判斷；門檻值全部來自 `Thresholds`，`ReviewMode` 只改樣本數門檻。這裡不呼叫模型、不建立版本，也不判斷證據是否處理過。
@@ -15,7 +40,7 @@
 - 下一階段是 [Phase 45：回饋診斷與命中步驟](./45-Phase45-回饋診斷與命中步驟.md)。
 - 本階段不做：不呼叫模型、不建立或發布版本、不提出 candidate 規則、不判斷證據指紋是否已處理（那是 [Phase 46](./46-Phase46-REFINE精準改寫與證據去重.md)）、不計算展示用指標（那是 Phase 53／54）。
 - `mode="demo"` 只是**明示隔離**的展示門檻，把樣本數從 10 放寬到 8；平均與同類門檻完全不變。任何情況下都不得把 demo 結果說成正式門檻已滿足。
-- 與本 Phase 有關的 O1–O7 gate 狀態：O4 的時間邊界只影響 Phase 54 的重開票窗口，本階段的 `now` 只當「截至本次執行」的截止點；O7 未核定前，Demo 的八筆回饋仍是待核定合成資料。
+- 與本 Phase 有關的 O1–O7 gate 狀態（現況核對 2026-09-14，見 COMMON.md §2）：O2 **PASS**、O3 **FAIL**、O5 **BLOCKED**、O6 待核定——三者都不阻擋本階段，因為它不呼叫模型、不寫入、不發布。O4 的時間邊界只影響 Phase 54 的重開票窗口，本階段的 `now` 只當「截至本次執行」的截止點；O7 未核定前，Demo 的八筆回饋仍是待核定合成資料。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -70,8 +95,8 @@ mode="formal" -> n = 8 < 10 -> 不命中，回 ()
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 建立 | `src/training_kb/pipelines/feedback.py` | 本 Phase 是這支檔案的 owner（00A 第 3.2 節）：`ReviewMode`、`WeakTarget`、`is_weak`、`select_weak_targets`；Phase 45–48 之後只在同一支檔案上追加。 |
-| 修改 | `src/training_kb/config.py` | 在 `Thresholds` 加上有預設值的 `weak_average: float = 3.5`（owner 仍是 Phase 02）。 |
+| 修改 | `src/training_kb/pipelines/feedback.py` | 本 Phase 是這支檔案的 owner（00A 第 3.2 節）：`ReviewMode`、`WeakTarget`、`is_weak`、`select_weak_targets`；Phase 45–48 之後只在同一支檔案上追加。（現況核對 2026-09-14：原寫「建立」，實際上 controller 已預建 docstring 空殼，只用 Edit 追加 `# ---- Phase 44 ----` 區段。） |
+| ~~修改~~ 不改 | `src/training_kb/config.py` | **不需要動**：`Thresholds.weak_average = 3.5` 已由 Phase 02 的 commit `16a3639` 加入（現況核對 2026-09-14：原寫「在 `Thresholds` 加上有預設值的 `weak_average: float = 3.5`」，實際上已存在）。本 Phase 只**讀** `Thresholds`。 |
 | 測試 | `tests/unit/test_weak_threshold.py`、`tests/integration/test_weak_targets.py` | 三條件、兩種 mode 與四組邊界；只選 active 已發布 current_version、排序、跨版不混用。 |
 
 ## 5. 固定介面
@@ -79,7 +104,7 @@ mode="formal" -> n = 8 < 10 -> 不命中，回 ()
 ### Consumes
 
 ```text
-Phase 02：Thresholds（production_feedback=10、demo_feedback=8、recurring_category=5；weak_average 由本階段追加）、PermanentError
+Phase 02：Thresholds（production_feedback=10、demo_feedback=8、recurring_category=5、weak_average=3.5，四個欄位都已存在於 config.py）、PermanentError
 Phase 03／04：TutorialStatus.ACTIVE（StrEnum 成員大寫、值小寫）、Tutorial（slug、status、current_version）、TutorialVersion（version_id、published_at）、Feedback（id、rating、category、ts）
 Phase 06：Repository.get_version(version_id) -> TutorialVersion | None
 Phase 08：Repository.scan_entity(entity, *, consistent=True, meta_only=True) -> list[DynamoItem]、list_feedback_of_version(version_id) -> list[Feedback]、item_to_model(item, model) -> T（模組函式）
@@ -186,9 +211,9 @@ def is_weak(avg: float | None, n: int, top_category_count: int, *,
             and top_category_count >= thresholds.recurring_category)
 ```
 
-- [ ] **Step 4：在 `Thresholds` 補門檻並跑完整檔案確認綠燈**
+- [ ] **Step 4：確認 `Thresholds` 門檻可用並跑完整檔案確認綠燈**
 
-在 `src/training_kb/config.py` 的 `Thresholds` 加上 `weak_average: float = 3.5`。它有預設值，Phase 02 既有測試與 `load_settings` 都不受影響；三個門檻數字（3.5、10／8、5）不可寫死在判斷式裡，一律讀 `Thresholds` 的 `weak_average`、`production_feedback`／`demo_feedback`、`recurring_category`（00A 第 5.4 節；不得自創 `weak_min_feedback_formal` 這類新欄位名）。
+（現況核對 2026-09-14：原步驟是「在 `src/training_kb/config.py` 的 `Thresholds` 加上 `weak_average: float = 3.5`」，該欄位**已經存在**於 `config.py:16`，本 Phase 不需要修改 `config.py`。）本步驟只要確認三個門檻數字（3.5、10／8、5）**不可寫死在判斷式裡**，一律讀 `Thresholds` 的 `weak_average`、`production_feedback`／`demo_feedback`、`recurring_category`（00A 第 5.4 節；不得自創 `weak_min_feedback_formal` 這類新欄位名），再跑一次 `test_config.py` 確認沒有被本 Phase 影響。
 
 ```bash
 uv run pytest tests/unit/test_weak_threshold.py tests/unit/test_config.py -q
@@ -197,7 +222,7 @@ uv run pytest tests/unit/test_weak_threshold.py tests/unit/test_config.py -q
 - [ ] **Step 5：提交**
 
 ```bash
-git add src/training_kb/config.py src/training_kb/pipelines/feedback.py tests/unit/test_weak_threshold.py
+git add src/training_kb/pipelines/feedback.py tests/unit/test_weak_threshold.py   # config.py 無變更，不加
 git commit -m "feat(feedback): 鎖定弱教學三條件與兩種門檻"
 ```
 
@@ -410,7 +435,7 @@ git commit -m "feat(feedback): 固定弱教學證據截止點與平手順序"
 
 - [ ] `ReviewMode`、`WeakTarget`、`is_weak`、`select_weak_targets` 簽名與本文件一致，`WeakTarget` 欄位與 Phase 45 的 Consumes 逐字相同。
 - [ ] 三個條件同時成立才算弱教學；`avg is None` 不命中。
-- [ ] 門檻值全部來自 `Thresholds`，`weak_average` 以有預設值的欄位加入，不破壞 Phase 02。
+- [ ] 門檻值全部來自 `Thresholds`（`weak_average` 已存在於 `config.py`，本 Phase 只讀不改），沒有第二份寫死的數字。
 - [ ] 只選 active Tutorial 的已發布 `current_version`、不混入舊版或未發布版；邊界 9／10、7／8、3.49／3.5、4／5 各有直接 assertion 且比較未四捨五入。
 - [ ] `feedback_ids` 全部屬於同一筆 `WeakTarget` 的 `category`（有直接 assertion），`待分類` 與 `None` 不進去。
 - [ ] 平手類別與輸出順序固定、重跑結果完全相同；`scan_entity` 與 `list_feedback_of_version` 讀完所有分頁，空頁不早停。
