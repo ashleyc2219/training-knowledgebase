@@ -6,6 +6,8 @@ Owner：Phase 44（弱教學門檻與目標選取）；Phase 45（診斷）、46
 controller 2026-09-14 預建空殼：讓同一波次的 Phase 只用 Edit 追加各自區段。
 """
 
+import hashlib
+import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -107,6 +109,10 @@ def _top_category(feedback: Sequence[Feedback],
     只數 `category in approved` 的回饋，所以 `待分類`（`PENDING_CATEGORY`）與 `None` 既不
     進同類計數也不進 `feedback_ids`（設計 §7.5、§12.1）。同類 ID 先用 `set` 去重再排序，
     同一批資料重跑得到逐字相同的輸出，Phase 46 的證據指紋才會穩定。
+
+    平手（兩類筆數相同）用 `min` 配 `(-筆數, 類別名)`：筆數多者優先、其次類別名稱升序。
+    **不可以**用 `max`——它在平手時回的是 dict 的插入順序，也就是 DynamoDB 這次剛好先回
+    哪一筆，重送會挑到不同類別，Phase 46 的證據指紋就不穩定。
     """
     groups: dict[str, set[str]] = {}
     for row in feedback:
@@ -117,7 +123,7 @@ def _top_category(feedback: Sequence[Feedback],
         groups.setdefault(category, set()).add(row.id)
     if not groups:
         return "", ()
-    best = max(groups, key=lambda name: len(groups[name]))
+    best = min(groups, key=lambda name: (-len(groups[name]), name))
     return best, tuple(sorted(groups[best]))
 
 
@@ -130,9 +136,17 @@ def select_weak_targets(*, repository: Repository, mode: ReviewMode, now: dateti
     舊版的回饋也不會被算進來。設計 §7.5 明講不做「上次檢視之後」的浮水印切分，所以每次
     都用該版截至 `now` 的**全部**有效回饋重算。
 
+    `now` 只是**截止點**：排除 `ts` 晚於它的回饋，`ts == now` 仍然算數。`ts is None` 的回饋
+    無法判斷落在截止點哪一邊，一律排除（**本計畫選擇 2026-09-14**；Phase 42 的匯入入口
+    一定補上 `ts`，只有種子或歷史資料直接寫 item 才會出現）。這與 Phase 54 的 O4 重開票
+    窗口 `[p, p+14 天)` 是兩件事，不得互相借用。
+
     回空 tuple 是**正常結果**（這次沒有弱教學），不是錯誤；「同一批證據不要再產生新版」
     由 Phase 46 的 `evidence_fingerprint` 與 O2 操作紀錄負責，本函式每次都照實回報命中，
     否則呼叫端分不出「這次沒有弱教學」與「這次跳過了」。
+
+    輸出依 `version_id` 升序：沒有固定順序時重送會得到不同的 target 順序，下游的證據指紋
+    與操作 id 就不再是決定性的。
     """
     limits = thresholds or Thresholds()
     # P43 併入後改成 `approved_categories(repository)`（00A §6.9）：那支會讀
@@ -146,7 +160,8 @@ def select_weak_targets(*, repository: Repository, mode: ReviewMode, now: dateti
         version = repository.get_version(tutorial.current_version)
         if version is None or version.published_at is None:
             continue
-        feedback = repository.list_feedback_of_version(version.version_id)
+        feedback = [row for row in repository.list_feedback_of_version(version.version_id)
+                    if row.ts is not None and row.ts <= now]
         rated = [row for row in feedback if row.rating is not None]
         category, ids = _top_category(feedback, approved)
         if is_weak(_average(rated), len(rated), len(ids), mode=mode, thresholds=limits):
@@ -303,6 +318,24 @@ def candidate_groups(feedback: Iterable[Feedback],
         for (version_id, category), ids in sorted(buckets.items())
         if len(ids) >= MIN_CANDIDATE_FEEDBACK
     )
+
+
+def candidate_rule_id(group: CandidateGroup) -> str:
+    """同一組證據永遠得到同一個 `rule_id`（設計 §7.5；00A §6.9 的例子是 `R-ad0afde8`）。
+
+    `R-` 加上「`version_id`、`category`、排序後 ID 清單」三元組的 UTF-8 JSON 編碼取
+    SHA-256 前 8 個十六進位字元。編碼方式是**契約的一部分**：`ensure_ascii=False`（中文
+    類別名不轉 `\\uXXXX`）、`separators=(",", ":")`（不留空白），任何一項改掉，既有 item
+    的 ID 就對不上，重送會變成新的一條規則。
+
+    決定性 ID 就是本 Phase 的去重手段：搭配 `propose_candidate` 寫入前的 `get_meta` 與
+    `put_meta(create_only=True)`，同一組證據重送落在同一筆 `RULE#<rule_id>`，不靠 O2 的
+    操作紀錄。反過來說，多一筆新的同類 Feedback 就是**不同**的證據集合，得到不同的
+    `rule_id`，可以另外提一條 candidate——這不是把新回饋排除在外。
+    """
+    payload = json.dumps([group.version_id, group.category, list(group.feedback_ids)],
+                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return f"R-{hashlib.sha256(payload).hexdigest()[:8]}"
 
 
 PROPOSE_NODE = "propose_rule"
