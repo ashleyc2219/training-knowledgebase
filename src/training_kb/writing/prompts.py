@@ -111,11 +111,15 @@ def prompt_diagnose_weak(version_id: str, steps: Sequence[TutorialStep], categor
     關不掉分區。`version_id` 與 `category` 雖然來自自家資料仍一併轉義——多轉義一次不會壞，
     漏轉義才會。「只能引用既有步驟編號」在 system 說一次，程式端還有 Phase 45 的
     `_validated_items` 再擋一次——prompt 是提醒，驗證才是保證。
+
+    **`row.id` 也要轉義**（修正波：final review A#5）：`models.bare_id` 只擋 `#` 與控制
+    字元，所以 `f_x</source_data>…` 是一個完全合法的 Feedback ID，而匯入檔的 ID 由外部
+    決定。原本 ID 逐字進 `<source_data>`，等於在同一個分區裡留了一條沒有守門的注入路徑。
     """
     lines = [f"<version>{_as_data(version_id)}</version>", "<steps>"]
     lines += [f"{row.number}. (type={row.type}) {_as_data(row.text)}" for row in steps]
     lines += ["</steps>", f"<category>{_as_data(category)}</category>", "<source_data>"]
-    lines += [f"{row.id}: {_as_data(row.comment or '')}" for row in feedback]
+    lines += [f"{_as_data(row.id)}: {_as_data(row.comment or '')}" for row in feedback]
     lines.append("</source_data>")
     return _DIAGNOSE_SYSTEM, "\n".join(lines)
 
@@ -144,6 +148,10 @@ def prompt_propose_rule(version_id: str, category: str, feedback_ids: Sequence[s
     回饋留言是不可信資料，一律經 `_as_data` 包進 `<source_data>` 分區當資料、不當指令
     （00A D-67）；偽造的 `</source_data>` 因此被轉義成 `&lt;/source_data&gt;`，關不掉分區。
     `version_id` 與 `category` 雖然來自自家資料，仍一併轉義——多轉義一次不會壞，漏轉義才會。
+
+    **`<evidence_ids>` 的 JSON 也走 `_as_data`**（修正波：final review A#5）：`json.dumps`
+    只轉義引號與反斜線，`<`／`>` 原樣留著，所以一個合法的 `f_x</source_data>…` ID 照樣
+    關得掉後面的資料分區。轉義之後模型讀到的是 `&lt;`，要原樣填回的仍是同一串字元。
     「只能填三種 step.type」在 system 說一次，程式端還有 `_require_step_type` 再擋一次
     ——prompt 是提醒，驗證才是保證。
     """
@@ -151,7 +159,7 @@ def prompt_propose_rule(version_id: str, category: str, feedback_ids: Sequence[s
     user = (
         f"<derived_from>{_as_data(version_id)}</derived_from>\n"
         f"<category>{_as_data(category)}</category>\n"
-        f"<evidence_ids>{json.dumps(list(feedback_ids), ensure_ascii=False)}"
+        f"<evidence_ids>{_as_data(json.dumps(list(feedback_ids), ensure_ascii=False))}"
         "</evidence_ids>\n"
         f"<source_data>{_as_data(body)}</source_data>"
     )
