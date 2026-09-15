@@ -214,3 +214,26 @@ def find_release_hits(feature_id: str, *, repository: Repository) -> tuple[StepH
         for step in repository.find_current_published_steps_referencing(feature_id)
     }
     return tuple(sorted(hits, key=lambda hit: (hit.slug, hit.number)))
+
+
+def needs_safety_net(release: Release, feature: Feature, hits: Sequence[StepHit]) -> bool:
+    """要不要花錢補漏：反查為零，或「alias 比對失敗的 renamed」才要（F16）。
+
+    兩個觸發條件各自獨立：反查為零時不論哪一種 `kind` 都補一次，因為「真的沒人引用」與
+    「邊還沒補齊」在這一層分不出來；有命中時只有 renamed 需要再看一眼，而且**只有 alias
+    比對失敗**才算重大改名——`old_name` 已經收在 Feature 的 name／aliases 裡，代表 Phase 49
+    已經靠名稱對上了，再補漏只是多花錢。
+
+    `kind` 用 `ReleaseKind` 成員比較（**本計畫選擇（2026-09-14）**）：`ReleaseKind` 是
+    `StrEnum`，與 `"renamed"` 字串也會相等，但 enum 比較不會被打錯的字面值騙過，mypy 也擋得住。
+    名稱比對走 Phase 49 的 `normalize_feature_name`（同一支檔，不另外複製一份規則）。
+
+    純函式：不碰 `Repository` 也不碰 `Writer`。這一步決定要不要呼叫模型，本身不該有副作用，
+    所以 alias 已命中的組合連一次 `embed` 都不會發生。
+    """
+    if not hits:
+        return True
+    if release.kind is not ReleaseKind.RENAMED:
+        return False
+    known = {normalize_feature_name(name) for name in [feature.name, *feature.aliases]}
+    return normalize_feature_name(release.old_name or "") not in known
