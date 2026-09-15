@@ -69,6 +69,11 @@ Phase 57 都不變（00A §6.7），手上只有被退役的那一篇 `Tutorial`
 _SECTIONS = ("Problem", "Prerequisites", "Steps", "Expected Outcome")
 """版本頁固定的四個 `<h2>`；標題自己是 `<h1>`，所以五段裡只有四段有 `<h2>`。"""
 
+_TUTORIALS_DIR = "tutorials"
+"""站台索引往教學索引的那一層目錄名。字面值與 `publishing.SITE_TUTORIALS_DIR` 相同，但那是
+**S3 key** 的一段、這是**瀏覽器相對路徑**的一段；`site` 不得 import `publishing`（會循環），
+所以兩邊各自宣告、由 `tests/integration/test_site_widget_roundtrip.py` 的整站掃描守住一致。"""
+
 _WIDGET_HEADING = "這篇有幫助嗎？"
 _UNSELECTED_CATEGORY = "未選擇"
 _RATINGS = (1, 2, 3, 4, 5)
@@ -189,11 +194,14 @@ def _banner(notice: str, batch: str) -> str:
     return f'<p class="banner">{"｜".join(labels)}</p>'
 
 
-def _asset_links(asset_prefix: str) -> str:
-    """樣式與腳本；兩支都在同一個 bucket 的 `site/assets/`（`ASSET_KEYS`），不引 CDN。"""
+def _asset_links(asset_prefix: str, *, script: bool = True) -> str:
+    """樣式與腳本；兩支都在同一個 bucket 的 `site/assets/`（`ASSET_KEYS`），不引 CDN。
+
+    `script=False` 是給兩個索引頁用的：那裡沒有 widget，載 `widget.js` 只會多一次請求。
+    """
     prefix = escape_text(asset_prefix.rstrip("/"))
-    return (f'<link rel="stylesheet" href="{prefix}/style.css">'
-            f'<script src="{prefix}/widget.js" defer></script>')
+    link = f'<link rel="stylesheet" href="{prefix}/style.css">'
+    return link + (f'<script src="{prefix}/widget.js" defer></script>' if script else "")
 
 
 def _widget_block(tutorial: Tutorial, version: TutorialVersion,
@@ -308,19 +316,31 @@ class SiteRenderer:
         current = tutorial.current_version
         marker = "" if current is None else _version_number(current)
         rows = "".join(
-            f"<li>{escape(version.version_id)}"
-            f"{'（目前版本）' if version.version_id == current else ''}</li>"
+            f'<li><a href="{_page_href(version.version_id, ".html")}">'
+            f"{escape(version.version_id)}"
+            f"{'（目前版本）' if version.version_id == current else ''}</a></li>"
             for version in versions if version.published_at is not None
         )
         return (f'<article class="tutorial-index" data-site-version="{escape(marker)}"'
                 f' data-slug="{escape(tutorial.slug)}">'
+                f"{_asset_links(self.asset_prefix, script=False)}"
+                f"{_banner(self.notice, self.batch)}"
                 f"<h1>{escape(tutorial.topic)}</h1><ul>{rows}</ul>"
                 f"{_retired_block(tutorial)}</article>")
 
     def render_site_index(self, tutorials: list[Tutorial]) -> str:
-        """站台索引；**只列 `current_version` 非空的 Tutorial**（還沒發布過的不上架）。"""
+        """站台索引；**只列 `current_version` 非空的 Tutorial**（還沒發布過的不上架）。
+
+        連結是 `tutorials/<slug>/index.html`：站台索引公開在 `site/index.html`，教學索引在
+        `site/tutorials/<slug>/index.html`，所以從這一頁看過去就是往下兩層的相對路徑
+        （同 D-78 的規則，不是 S3 key）。沒發布過的教學連 slug 都不輸出。
+        """
         rows = "".join(
-            f"<li>{escape(tutorial.topic)}</li>"
+            f'<li><a href="{_TUTORIALS_DIR}/{escape_text(tutorial.slug)}/index.html">'
+            f"{escape(tutorial.topic)}</a></li>"
             for tutorial in tutorials if tutorial.current_version is not None
         )
-        return f'<article class="site-index"><h1>教學站</h1><ul>{rows}</ul></article>'
+        return (f'<article class="site-index">'
+                f"{_asset_links(self.asset_prefix, script=False)}"
+                f"{_banner(self.notice, self.batch)}"
+                f"<h1>教學站</h1><ul>{rows}</ul></article>")

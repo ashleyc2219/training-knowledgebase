@@ -16,7 +16,9 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
+from training_kb.content import RETIRED_NOTICE
 from training_kb.errors import PermanentError
 from training_kb.models import (
     StepDraft,
@@ -222,3 +224,113 @@ def test_version_page_loads_only_local_assets(
     assert f'src="/{SITE_PREFIX}assets/widget.js"' in page
     assert "http://" not in page and "https://" not in page
     assert "cdn" not in page
+
+
+# --- Task 2：退役頁、後繼連結與索引頁的公開界線 ------------------------------
+
+
+def test_retired_page_keeps_text_and_disables_widget(renderer: SiteRenderer) -> None:
+    """Given 已退役且有後繼／When 渲染版本頁／Then 原文留著、widget 整段消失。"""
+    tutorial = make_tutorial(status=TutorialStatus.RETIRED, successor="share-summary")
+    content = make_content()
+    page = renderer.render_version_page(tutorial, make_version(V3), make_steps(), content)
+    assert RETIRED_NOTICE in page
+    assert 'data-retired="true"' in page
+    assert escape_text(content.steps[0].text) in page
+    assert 'href="../share-summary/index.html"' in page
+    assert "http-equiv" not in page
+    assert "tkb-download" not in page
+
+
+def test_retired_page_collects_nothing_at_all(renderer: SiteRenderer) -> None:
+    """Given 已退役／When 渲染／Then 評分、類別、留言、使用者 ID 與狀態列全部不輸出。
+
+    本計畫選擇：退役頁只保留歷史原文，連瀏覽紀錄也不再收集（設計 §8.4）。
+    """
+    page = renderer.render_version_page(
+        make_tutorial(status=TutorialStatus.RETIRED, successor=None),
+        make_version(V3), make_steps(), make_content())
+    for element in ("tkb-widget", "tkb-user", "tkb-comment", "tkb-view", "tkb-status",
+                    'data-rating="1"', NOT_SENT_TEXT):
+        assert element not in page
+    for category in CATEGORIES:
+        assert category not in page
+
+
+def test_retired_page_renders_a_self_successor_as_is(renderer: SiteRenderer) -> None:
+    """Given `successor` 等於自身／When 渲染／Then renderer 原樣輸出，不重判一次。
+
+    合法性責任在 Phase 26 的 `resolve_successor`（四項檢查含「非自身」），renderer 不碰
+    儲存層也就不重判：重判要多讀一次 DynamoDB，而且會讓兩處判斷遲早分岔
+    （`site.py::_successor_line` 的既有註解寫的就是這個理由）。
+    """
+    page = renderer.render_version_page(
+        make_tutorial(status=TutorialStatus.RETIRED, successor=SLUG),
+        make_version(V3), make_steps(), make_content())
+    assert f'<a href="../{SLUG}/index.html">' in page
+
+
+def test_a_blank_successor_cannot_even_be_constructed() -> None:
+    """Given 空白 successor／When 建 `Tutorial`／Then 模型層就擋下來，到不了 renderer。
+
+    所以「successor 為空白字串」這個邊界不需要 renderer 再判一次（`bare_id` 已經擋掉
+    空字串與前後留白），renderer 只要處理 `None`。
+    """
+    with pytest.raises(ValidationError):
+        make_tutorial(status=TutorialStatus.RETIRED, successor=" ")
+    with pytest.raises(ValidationError):
+        make_tutorial(status=TutorialStatus.RETIRED, successor="")
+
+
+def test_tutorial_index_hides_unpublished_versions(renderer: SiteRenderer) -> None:
+    """Given 一個已發布、一個未發布／When 渲染索引／Then 只有已發布的那一版有連結。
+
+    「沒有連結的 URL」不算私有（設計 §9.3、§13），所以未發布版連版號都不能出現。
+    """
+    v1 = make_version(V1, supersedes=None, published_at=NOW)
+    draft = make_version(V2, supersedes=V1, published_at=None)
+    page = renderer.render_tutorial_index(make_tutorial(current_version=V1), [v1, draft])
+    assert 'href="v1.html"' in page
+    assert "v2.html" not in page
+    assert V1 in page
+    assert V2 not in page
+
+
+def test_tutorial_index_keeps_the_order_it_was_given(renderer: SiteRenderer) -> None:
+    """Given 呼叫端已排好序／When 渲染索引／Then renderer 不重排。
+
+    本計畫選擇（2026-09-14）：Phase 57 文件的 Task 2 Step 3 寫「依版號升序排序」，但
+    `Publisher._write_tutorial_index` 已經用 `list_versions_of_tutorial`（升序）再 `[::-1]`
+    反轉成「版號大的在前」，而且 `test_publisher_single.py` 正在斷言那個順序。兩份排序邏輯
+    遲早分岔，所以 renderer 不排序、只過濾（00A R5：既有程式優先）。
+    """
+    v1 = make_version(V1, supersedes=None, published_at=NOW)
+    v3 = make_version(V3, published_at=NOW)
+    page = renderer.render_tutorial_index(make_tutorial(), [v3, v1])
+    assert page.index(V3) < page.index(V1)
+    assert 'data-site-version="v3"' in page
+    assert "（目前版本）" in page
+
+
+def test_tutorial_index_loads_the_stylesheet_but_no_widget(renderer: SiteRenderer) -> None:
+    """Given 教學索引／When 渲染／Then 只引樣式，不引 widget，也不連回站台索引。
+
+    最後一項是 Phase 26 `test_tutorial_index_omits_the_link_when_the_successor_was_rejected`
+    的既有斷言（整頁不得含 `index.html`）在守；這裡順手把「不引 widget」一起鎖住。
+    """
+    page = renderer.render_tutorial_index(
+        make_tutorial(current_version=None), [])
+    assert f'href="/{SITE_PREFIX}assets/style.css"' in page
+    assert "widget.js" not in page
+    assert "tkb-widget" not in page
+
+
+def test_site_index_links_each_tutorial_index(renderer: SiteRenderer) -> None:
+    """Given 兩篇教學（一篇沒發布過）／When 渲染站台索引／Then 只有已上架的那篇有連結。"""
+    listed = make_tutorial(current_version=V3)
+    hidden = make_tutorial(current_version=None).model_copy(
+        update={"slug": "draft-only", "topic": "草稿"})
+    page = renderer.render_site_index([listed, hidden])
+    assert f'href="tutorials/{SLUG}/index.html"' in page
+    assert "draft-only" not in page
+    assert NOTICE in page and BATCH in page
