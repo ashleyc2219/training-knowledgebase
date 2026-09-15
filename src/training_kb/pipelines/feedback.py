@@ -7,14 +7,16 @@ controller 2026-09-14 預建空殼：讓同一波次的 Phase 只用 Edit 追加
 """
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from datetime import datetime
+from typing import Any, Literal
 
 from training_kb.config import Thresholds
 from training_kb.errors import PermanentError
-from training_kb.models import Feedback
-from training_kb.repository import Repository
+from training_kb.ingress import DEFAULT_FEEDBACK_CATEGORIES
+from training_kb.models import Feedback, Tutorial, TutorialStatus
+from training_kb.repository import Repository, item_to_model
 from training_kb.writing.client import Writer
 from training_kb.writing.prompts import prompt_diagnose_weak
 from training_kb.writing.schemas import WeakDiagnosis
@@ -57,6 +59,163 @@ def is_weak(avg: float | None, n: int, top_category_count: int, *,
     minimum = thresholds.production_feedback if mode == "formal" else thresholds.demo_feedback
     return (avg < thresholds.weak_average and n >= minimum
             and top_category_count >= thresholds.recurring_category)
+
+
+@dataclass(frozen=True)
+class WeakTarget:
+    """一個命中的弱教學版本；四個欄位逐字對應 Phase 45 的 Consumes，不可改名（00A §6.9）。
+
+    `tutorial_id` 是裸 slug（`prepare-meeting`）、`version_id` 是裸版本 ID
+    （`prepare-meeting@v1`）。`feedback_ids` 裡的每一筆都屬於 `category` 這一類——它裝的是
+    「這個版本、這個類別」的全部證據，不混入別類、`待分類` 或 `category is None` 的回饋；
+    Phase 45 的診斷就是針對這一類在問「哪幾步出問題」，混類會讓它指錯步驟。
+    """
+
+    tutorial_id: str
+    version_id: str
+    category: str
+    feedback_ids: tuple[str, ...]
+
+
+def _average(rated: Sequence[Feedback]) -> float | None:
+    """有評分回饋的平均；一筆評分都沒有回 `None`（不是 0）。
+
+    分母是**有評分**的筆數（00A D-44）：`rating is None` 既不進分子也不進分母。這與
+    Phase 53 的 `analytics.ratings.average_rating` 必須是同一套算法——本 Phase 比它早，
+    不能 import，所以這裡是暫時的本地副本。**P53 完成後改成
+    `from training_kb.analytics.ratings import average_rating` 並刪掉本函式**；在那之前
+    任何一邊改算法都要同步另一邊，否則顯示的平均與判斷用的平均會分岔。
+    """
+    ratings = [row.rating for row in rated if row.rating is not None]
+    if not ratings:
+        return None
+    return sum(ratings) / len(ratings)
+
+
+def _top_category(feedback: Sequence[Feedback],
+                  approved: frozenset[str]) -> tuple[str, tuple[str, ...]]:
+    """筆數最多的核定類別與它的全部 Feedback ID；沒有任何核定類別回 `("", ())`。
+
+    只數 `category in approved` 的回饋，所以 `待分類`（`PENDING_CATEGORY`）與 `None` 既不
+    進同類計數也不進 `feedback_ids`（設計 §7.5、§12.1）。同類 ID 先用 `set` 去重再排序，
+    同一批資料重跑得到逐字相同的輸出，Phase 46 的證據指紋才會穩定。
+    """
+    groups: dict[str, set[str]] = {}
+    for row in feedback:
+        category = row.category
+        # 先擋掉 `None` 讓型別檢查看得出 key 一定是 str；語意上 None 本來就不在核定表裡。
+        if category is None or category not in approved:
+            continue
+        groups.setdefault(category, set()).add(row.id)
+    if not groups:
+        return "", ()
+    best = max(groups, key=lambda name: len(groups[name]))
+    return best, tuple(sorted(groups[best]))
+
+
+def select_weak_targets(*, repository: Repository, mode: ReviewMode, now: datetime,
+                        thresholds: Thresholds | None = None) -> tuple[WeakTarget, ...]:
+    """掃出所有弱教學版本（設計 §7.5；`REV` Rule 2、3、4，Rule 1 的 primary 在 Phase 48）。
+
+    每一篇 active Tutorial 只看它**現在**的 `current_version`，而且該版必須已發布
+    （`published_at` 非空）；retired、`current_version is None`、未發布的版本一律跳過，
+    舊版的回饋也不會被算進來。設計 §7.5 明講不做「上次檢視之後」的浮水印切分，所以每次
+    都用該版截至 `now` 的**全部**有效回饋重算。
+
+    回空 tuple 是**正常結果**（這次沒有弱教學），不是錯誤；「同一批證據不要再產生新版」
+    由 Phase 46 的 `evidence_fingerprint` 與 O2 操作紀錄負責，本函式每次都照實回報命中，
+    否則呼叫端分不出「這次沒有弱教學」與「這次跳過了」。
+    """
+    limits = thresholds or Thresholds()
+    # P43 併入後改成 `approved_categories(repository)`（00A §6.9）：那支會讀
+    # `CONFIG#feedback_categories`，讀不到時回的就是這個初始兩類的常數。
+    approved = DEFAULT_FEEDBACK_CATEGORIES
+    targets: list[WeakTarget] = []
+    for item in repository.scan_entity("TUTORIAL", consistent=True):  # meta_only 預設 True
+        tutorial = item_to_model(item, Tutorial)
+        if tutorial.status != TutorialStatus.ACTIVE or tutorial.current_version is None:
+            continue
+        version = repository.get_version(tutorial.current_version)
+        if version is None or version.published_at is None:
+            continue
+        feedback = repository.list_feedback_of_version(version.version_id)
+        rated = [row for row in feedback if row.rating is not None]
+        category, ids = _top_category(feedback, approved)
+        if is_weak(_average(rated), len(rated), len(ids), mode=mode, thresholds=limits):
+            targets.append(WeakTarget(tutorial.slug, version.version_id, category, ids))
+    return tuple(sorted(targets, key=lambda target: target.version_id))
+
+
+# ---- Phase 45（owner）：回饋診斷與命中步驟 ----
+# 交付 `DIAGNOSE_NODE`、`DiagnosisResult`、`diagnose_weak` 與 module-private 的
+# `_validated_items`（`REV` Rule 5、6；設計 §7.5、§7.6、§14.1）。把 Phase 44 選出的
+# `WeakTarget` 交給模型診斷，程式再驗證編號與原因，只留下真實存在且理由非空的步驟 `number`。
+# 只讀不寫：不寫任何 DynamoDB item 或 S3 物件、不建版、不發布、不碰 `OperationCoordinator`。
+
+DIAGNOSE_NODE = "diagnose_weak"
+"""本節點寫進 Phase 15 `CallTrace` 的名字；`generate_json` 的 `node=` 一律傳它（00A §6.9）。"""
+
+
+@dataclass(frozen=True)
+class DiagnosisResult:
+    """已驗證的診斷結果；Phase 46／48 只讀它，不直接信任模型回的原始 JSON。
+
+    `WeakDiagnosis` 是模型輸出的原始 JSON（schema 只保證形狀），`DiagnosisResult` 才是
+    通過業務驗證、可以交給後續程式的結果，兩者不可混用（設計 §7.6）。
+    """
+
+    version_id: str
+    step_indexes: tuple[int, ...]
+    """裝的是步驟 `number`（從 1 起），不是 0-based index（00A D-55）；`()` 代表 `NO_STEP`。"""
+    reasons: dict[int, str]
+    """鍵同樣是步驟 `number`（從 1 起），不是 0-based index（00A D-55）。"""
+    feedback_ids: tuple[str, ...]
+
+
+def _validated_items(reply: Mapping[str, Any],
+                     valid: frozenset[int]) -> tuple[tuple[int, ...], dict[int, str]]:
+    """把模型回的 `items` 過成「編號存在於本版」的診斷，依 `number` 升序輸出。"""
+    reasons: dict[int, str] = {}
+    for item in reply.get("items") or ():
+        number = item.get("number")
+        if number not in valid:
+            continue
+        reasons[number] = str(item.get("reason"))
+    numbers = tuple(sorted(reasons))
+    return numbers, {number: reasons[number] for number in numbers}
+
+
+def diagnose_weak(target: WeakTarget, *, repo: Repository, writer: Writer,
+                  operation_id: str) -> DiagnosisResult:
+    """診斷一個弱教學目標命中哪幾個既有步驟（`REV` Rule 5、6）。
+
+    只讀 `target` 指定的那一版步驟與那一批 Feedback ID：其他版本、其他類別的回饋不會進
+    prompt，模型看不到就無從混用。步驟依 `number` 升序、證據用 `sorted(set(feedback_ids))`，
+    所以同一份輸入重送兩次會得到逐欄相同的 `DiagnosisResult`。
+
+    `generate_json` 在整個函式裡**只出現一次**（F45：每次真實 attempt 都會被 `CallTrace`
+    計入），`schema` 直接傳 `WeakDiagnosis` 這個 dict、拿回 dict（00A D-02，沒有同名的
+    pydantic 類別可以 `model_validate`）；判斷類的 `maxTokens 512`／`temperature 0.1` 由
+    Phase 15 的 `inference_config(schema)` 依 `$id` 決定，本節點不自己調參數（設計 §14.3）。
+    不走 `generate_validated_json`：本節點的業務驗證沒有修正迴圈（D-11／00A §6.5），
+    `ContentError` 直接往外丟。
+
+    找不到有效步驟是**合法**結果（`step_indexes == ()`），Phase 46 據此記 `NO_STEP`、不配
+    版號，**不可**改成整篇重寫（設計 §14.1）。
+    """
+    steps = sorted(repo.get_steps(target.version_id), key=lambda row: row.number)
+    valid = frozenset(row.number for row in steps)
+    wanted = tuple(sorted(set(target.feedback_ids)))
+    chosen = set(wanted)
+    evidence = sorted(
+        (row for row in repo.list_feedback_of_version(target.version_id) if row.id in chosen),
+        key=lambda row: row.id,
+    )
+    system, user = prompt_diagnose_weak(target.version_id, steps, target.category, evidence)
+    reply = writer.generate_json(system, user, WeakDiagnosis,
+                                 operation_id=operation_id, node=DIAGNOSE_NODE)
+    numbers, reasons = _validated_items(reply, valid)
+    return DiagnosisResult(target.version_id, numbers, reasons, wanted)
 
 
 # ---- Phase 47 ----
