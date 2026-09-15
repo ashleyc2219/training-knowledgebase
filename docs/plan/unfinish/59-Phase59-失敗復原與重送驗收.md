@@ -33,6 +33,36 @@
 > - **R3 同檔併行**：`publishing.py`／`content.py`／`ingress.py` 是共用檔，本 Phase 在 W4（P41／P48／P52／P57 之後），理論上沒有人同時改，但仍**只用 Edit、不用 Write**，新增的東西放在 `# ---- Phase 59 ----` 區段，`git add` 只加自己的檔案路徑。
 > - **R5 名稱契約以 00A ＋ 既有程式為準**；**R10 需要維護者決定的事自己裁決並標「本計畫選擇」**。
 > - **若 P41 為了雲端失敗路徑實證已經先建了 `src/training_kb/faults.py` 的最小第一片，本 Phase 擴充它、不重建**（Task 1 Step 3 改成補齊缺的切點名稱與 `active_fault`／`maybe_fail`，紅燈訊號改成 `ImportError: cannot import name ...`）。截至 W0，P41 文件 §4 的預計檔案**沒有**列 `faults.py`。
+>
+> **（e）本計畫選擇（2026-09-14，實作當下的裁決；controller R10）**
+> 1. **`maybe_fail` 一律丟 `TransientError` 本身，`InjectedFault` 降級成相容別名**
+>    （`InjectedFault = TransientError`）。P41 §9 第 3 點已在雲端實證：Step Functions 的
+>    `ErrorEquals` 比對 Lambda 回報的**類別名字串**、不認繼承，丟子類就命不中 D-53 第一條
+>    retrier（`["TransientError"]`）。00A 第 1230 列的名稱不變，`except InjectedFault` 仍成立。
+>    對照證據：`op-ticket-t_883` 的 `LambdaFunctionFailed.error` 逐字 `TransientError` 三次。
+> 2. **`resume_publish` 補完版本頁與 diff 副本之後，接著重建教學索引與站台索引。**
+>    00A 第 1230 列說它要「把中斷的發布接著做完」；只補版本頁會讓公開站永遠沒有連到新版的
+>    路徑（§2 的不變量說注入後索引不得有 v2 連結，復原就必須把它補回去）。索引是可重建投影
+>    （`if_none_match=False`），重寫多少次結果都一樣，不影響「補出的 key 清單 == 待補清單」
+>    這條斷言。
+> 3. **`World.deliver_release` 直接驅動 `ingress.accept_release` → `allocate_version`／
+>    `create_version` → `Publisher.prepare`／`commit`，不經 `run_release_update`。** 五個切點
+>    全在這條直線上（§1 的流程圖就是這個順序），而 `run_release_update` 需要 Bedrock
+>    （O5 BLOCKED），接上去只會讓每個切點都先撞模型。模型段由 `World._run_model` 的假輸出
+>    替身表示：ledger 已有 `model_output_refs` 就完全不呼叫，「重送期間模型呼叫數為 0」
+>    因此是真的被觀察到。
+> 4. **多篇 `a3` 的注入用 monkeypatch `Publisher._promote` 的第 2 篇，不擴充 `FAULT_POINTS`。**
+>    五個切點是 00A 的固定清單，不含「批次內第 j 篇 promote 之前」；P25 在 moto 已經用同一種
+>    技法，產品程式不動。
+> 5. **`check_asl.main` 掃不到檔案回 2、掃到但不通過回 1**（都非 0）。呼叫端因此分得出「缺檔」
+>    與「檢查沒過」，符合「不得靜靜回 0」的要求。
+> 6. **真實 AWS 演練用本機程序跑 library 程式對真實資源操作**（`TKB_ENV=demo TKB_FAULT=<切點>`
+>    設在本機），不重新部署 Lambda（controller 2026-09-14 裁決）：五個切點都在本機程序內判斷。
+>    demo 資料一律 `p59-` 前綴，演練後清乾淨；`site/index.html` 是共用公開物件，開始前存下原
+>    bytes、結束時逐字寫回。
+> 7. **`tests/unit/test_faults.py` 原本斷言 `InjectedFault.__name__ == "InjectedFault"` 的那一條
+>    改寫成「注入丟的類別名逐字是 `TransientError`」**：那條測試是 P41 留下的風險備忘，本 Phase
+>    依 controller 裁決把風險修掉，測試跟著改成新契約（檔案 owner 是 P59，00A §3.3）。
 
 **目標：** 用可控的 `TKB_FAULT` 開關在儲存、發布與接入的五個切點注入失敗，證明讀者看到的永遠是整批舊狀態，而且同一個 operation 重送會沿用原版號與原模型輸出把東西補齊。
 
@@ -224,7 +254,7 @@ OperationCoordinator.accept(...) 條件寫入 OPS#<id>
 
 ### Task 1：`faults.py` 的五個切點與環境限制
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/test_faults.py
@@ -250,7 +280,7 @@ def test_active_point_raises_transient_injected_fault():
     maybe_fail("s3_after_md", env)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_faults.py -q
@@ -258,7 +288,7 @@ uv run pytest tests/unit/test_faults.py -q
 
 預期：FAIL，訊號包含 `No module named 'training_kb.faults'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/faults.py
@@ -294,7 +324,7 @@ def maybe_fail(point: str, env: Mapping[str, str] | None = None) -> None:
         raise InjectedFault(point)
 ```
 
-- [ ] **Step 4：把五個切點接進程式並跑綠燈**
+- [x] **Step 4：把五個切點接進程式並跑綠燈**
 
 `content.py` 在寫完 `v<n>.md` 之後、寫完 VERSION metadata 之後各插一次；`publishing.py` 的 `Publisher.commit` 在交易之前、以及交易之後而尚未 `promote_site_objects` 之前各插一次（多篇整批時後者就落在寫完 `pending-promote.json` 之後；單篇發布本來就不寫這份清單，見 §6）；`ingress.py` 在保存 TICKET／RELEASE 之後、`starter.start` 之前插一次。再加一個測試讀這三個檔的原始碼，斷言 `FAULT_POINTS` 的每個名稱都恰好出現一次 `maybe_fail(...)` 呼叫。執行 `uv run pytest tests/unit/test_faults.py -q`，預期整個檔案全綠。
 
@@ -310,11 +340,11 @@ def maybe_fail(point: str, env: Mapping[str, str] | None = None) -> None:
 
 型別註記不可省：`pyproject.toml` 的 mypy 是 `strict = true` 且 `files = ["src", "infra"]`。
 
-- [ ] **Step 5：提交** — `git add src/training_kb/faults.py src/training_kb/content.py src/training_kb/publishing.py src/training_kb/ingress.py tests/unit/test_faults.py` 後 `git commit -m "feat(faults): 以 TKB_FAULT 在五個切點注入失敗"`。
+- [x] **Step 5：提交** — `git add src/training_kb/faults.py src/training_kb/content.py src/training_kb/publishing.py src/training_kb/ingress.py tests/unit/test_faults.py` 後 `git commit -m "feat(faults): 以 TKB_FAULT 在五個切點注入失敗"`。
 
 ### Task 2：切點矩陣、整批不切換與同 operation 重送
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/integration/test_recovery.py
@@ -368,7 +398,7 @@ def test_same_event_resend_adds_no_samples(world):
     assert world.counters() == before
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_recovery.py -q
@@ -376,7 +406,7 @@ uv run pytest tests/integration/test_recovery.py -q
 
 預期：FAIL，訊號包含 `fixture 'world' not found`；補上 fixture 後會變成 `cannot import name 'resume_publish'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # tests/integration/test_recovery.py（接在測試上方）
@@ -440,15 +470,15 @@ def resume_publish(operation_id, *, operations, repository, publisher, now):
 
 `World` 的 `__init__` 收下 `repository`、`operations`、`publisher`、PROC `signature`，並把已發布 v1 的公開頁 bytes 存進 `v1_html`、`model_calls_during_resend` 起始為 0；`object_exists`／`tutorial`／`operation` 直接轉呼 `Repository.object_exists`、`Repository.get_tutorial`、`OperationCoordinator.load`。`deliver_release(release_id)` 是唯一的端到端驅動：走 Phase 32 的接受與啟動、在本機用 `run_sequence` 跑 release-update、再走 Phase 20→23→24 建版與發布，所以五個切點都在它的路徑上（`start_execution` 在最前面，失敗時連版本都還沒建）。`publish_batch` 走 Phase 25 的 `prepare`／`inspect`／`commit`，`resume` 呼叫 `resume_publish`。`world` fixture 用 moto 建好 `training_kb` 表與 bucket 並載入已發布的 v1。重送一律先讀 `OperationCoordinator.load`：有 `version_id` 就重用，有 `model_output_refs` 就從私有 S3 讀回，不再呼叫 `Writer`。`counters()` 的 `success_count` 只有在 [Phase 35](./35-Phase35-PROC成功失敗與退役生命週期.md) 的 `on_new_success` 拿到 `record_proc_sample(...)` 回 `True` 這份永久證據時才會加，所以同事件重送三種樣本都不變。
 
-- [ ] **Step 4：補切點 4、串行與 closed execution 案例並跑綠燈**
+- [x] **Step 4：補切點 4、串行與 closed execution 案例並跑綠燈**
 
 切點 4 允許 `current_version` 已切換，但仍必須滿足「`site/tutorials/prepare-meeting/v2.html` 不存在、教學索引沒有 v2 連結」，測試對它單獨斷言並在報告標成 O3 缺口，不得改成寬鬆通過。同篇的 Release 與 Feedback 交錯送達時以 `acquire_lease` 串行，兩者依 `next_sequence` 取得的接受順序各產生一版，版號不重疊也不跳過；測試明確寫出「lease 不等於接受順序、TTL 不保證準時解鎖」。`start_execution` 切點清掉後重送，若 Step Functions 回 `ExecutionAlreadyExists`，必須先用 `describe_execution` 讀回原執行狀態並核對 operation 紀錄：`status == "done"` 才沿用既有結果，否則依 [Phase 32](./32-Phase32-事件接受去重與流程啟動.md) 回 `CoordinationError`，不可直接當成功，也不可換名重跑。執行 `uv run pytest tests/integration/test_recovery.py -q`，預期整個檔案全綠。
 
-- [ ] **Step 5：提交** — `git add src/training_kb/publishing.py tests/integration/test_recovery.py` 後 `git commit -m "test(recovery): 切點注入與同 operation 重送"`。
+- [x] **Step 5：提交** — `git add src/training_kb/publishing.py tests/integration/test_recovery.py` 後 `git commit -m "test(recovery): 切點注入與同 operation 重送"`。
 
 ### Task 3：ASL 靜態檢查與真實 AWS 驗收證據
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/test_check_asl.py
@@ -480,7 +510,7 @@ def test_complete_document_has_no_problems():
     assert check_asl_document(doc) == []
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_check_asl.py -q
@@ -488,7 +518,7 @@ uv run pytest tests/unit/test_check_asl.py -q
 
 預期：FAIL，訊號包含 `No module named 'infra.scripts.check_asl'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # infra/scripts/check_asl.py
@@ -546,11 +576,11 @@ if __name__ == "__main__":
 
 `check_asl_document` 自己走完所有 Task（含 `Map` 的 `ItemProcessor`／`Iterator` 與 `Parallel` 的 `Branches`）收齊全部問題，再**包裝** Phase 29 的 `assert_safe_asl`：後者在第一個問題就丟 `PermanentError`，所以只把它的訊息當最後一筆追加，`StartAt`、`Choice` 的 `Default`、同層 `Fail` 這些結構規則不必重寫一次。`LAMBDA_SERVICE_ERRORS` 逐字對應裁決 D-53 的第二條 retrier；Phase 29 的 `RETRY` 依 D-53 已含兩條時本檢查等於只比對它，常數存在是為了讓「第二條不見了」有明確訊息。
 
-- [ ] **Step 4：對三份 ASL 執行並準備真 AWS 驗收**
+- [x] **Step 4：對三份 ASL 執行並準備真 AWS 驗收**
 
 三份定義由 P41（`ticket-analysis`）、P48（`feedback-review`）、P52（`release-update`）建立，路徑樣板就是 Phase 29 的 `ASL_LOCAL_PATH`（`infra/stepfunctions/{pipeline}/v{number}.json`）；**掃不到任何檔案時 `main` 要印「找不到 ASL 定義」並回非 0，不得靜靜回 0**（現況核對 2026-09-14：本 Phase 開工前這個目錄還不存在）。從 repo 根目錄執行 `uv run python -m infra.scripts.check_asl`，它會掃 `infra/stepfunctions/<pipeline>/v<n>.json` 三份定義並全部印 `[通過]`；真 AWS 案例以 `TKB_RUN_AWS_INTEGRATION=1 uv run pytest tests/integration/test_recovery.py -m aws -q` 單獨執行。真 AWS 案例標 `@pytest.mark.aws`（marker 由 Phase 01 在 `pyproject.toml` 註冊），Phase 01 的 conftest 在 `TKB_RUN_AWS_INTEGRATION` 未設時自動 skip，一般開發不必加 `-m` 參數。每跑一次就把證據寫進 `docs/plan/report/recovery-<YYYYMMDD-HHMM>.md`，固定欄位為：切點名稱、注入方式、`execution_arn`、`describe_execution` 的 `status`／`error`／`cause` 與讀取時間、注入後的 `current_version` 與 `site/` 清單、重送後的 `version_id` 與 `site/` 清單、模型呼叫數差值、結論（PASS／FAIL／O3 缺口）。沒有這份紀錄就不算完成。
 
-- [ ] **Step 4A：承接 Phase 24／25「延後至 P41／P59」的真實 AWS 驗收**（新增，controller 2026-09-14 裁決 R1）
+- [x] **Step 4A：承接 Phase 24／25「延後至 P41／P59」的真實 AWS 驗收**（新增，controller 2026-09-14 裁決 R1）
 
 這一步只做**發布切點的重跑與復原**，部署與正常流程的雲端證據歸 Phase 41，不重做。全部指令帶 `--region us-east-1`。逐項留證，做不到的標 BLOCKED 並附錯誤原文：
 
@@ -561,7 +591,7 @@ if __name__ == "__main__":
 5. **切點 5（`start_execution`）的真實 state machine 續跑** —— 用 Ticket 路徑（**Release 走不進 Rote：O6 有 4 列未核定**）。注入後確認沒有 execution；清掉開關重送，確認沿用同一個 execution name、`describe-execution` 的 `status` 與 `executionArn` 已留存。若 execution 進到需要模型的節點，**必然**因 O5 BLOCKED 走 `PermanentError → Catch → PipelineFailed`：用 `get-execution-history` 抓出那一段的 `error`／`cause` 原文貼進報告，標 **BLOCKED（O5）**，不標 FAIL、也不標 PASS。
 6. **Step Functions console 人工驗收** —— 打開一個 FAILED 與一個重送後 SUCCEEDED（或 BLOCKED 時：兩個 FAILED，並註明原因不同）的執行，ARN 對照 `recovery-<YYYYMMDD-HHMM>.md`。
 
-- [ ] **Step 5：提交** — `git add infra/scripts/check_asl.py tests/unit/test_check_asl.py` 後 `git commit -m "feat(infra): 檢查 ASL 的兩條 Retry 與 Catch"`。
+- [x] **Step 5：提交** — `git add infra/scripts/check_asl.py tests/unit/test_check_asl.py` 後 `git commit -m "feat(infra): 檢查 ASL 的兩條 Retry 與 Catch"`。
 
 ## 8. 驗收矩陣
 
@@ -611,16 +641,18 @@ if __name__ == "__main__":
 
 ## 11. 完成清單
 
-- [ ] `FAULT_POINTS` 恰為五個名稱，打錯字立刻報錯，`TKB_ENV=prod` 一律不注入。
-- [ ] 五個切點分別落在 `content.py`、`publishing.py`、`ingress.py` 的真實路徑上，且各被呼叫一次。
-- [ ] 每個切點注入後公開站仍讀到舊版，`site/tutorials/<slug>/` 沒有新版本頁、索引也沒有新連結。
+- [x] `FAULT_POINTS` 恰為五個名稱，打錯字立刻報錯，`TKB_ENV=prod` 一律不注入。
+- [x] 五個切點分別落在 `content.py`、`publishing.py`、`ingress.py` 的真實路徑上，且各被呼叫一次。
+- [x] 每個切點注入後公開站仍讀到舊版，`site/tutorials/<slug>/` 沒有新版本頁、索引也沒有新連結。
 - [ ] 多篇整批失敗時兩篇同時維持舊狀態，沒有 partial publish。
-- [ ] 同 operation 重送沿用原版號與原模型輸出，重送期間模型呼叫數為 0；切點 4 依 `pending-promote.json` 補寫，單篇發布沒有這份清單時改用 operation 紀錄的 `version_id` 與 `site_key(...)` 重算同一份。
-- [ ] 同事件重送不新增版本、回饋樣本或 PROC 成功樣本；closed execution 先核對 `status == "done"` 再判定。
-- [ ] `check_asl.py` 包裝 `assert_safe_asl`，對三份 ASL 全部 `[通過]`，刻意刪掉一個 Catch 或第二條 retrier 時會失敗。
-- [ ] Phase 12 與本 Phase 的兩套切點名稱有對照表，兩邊都沒有改名。
-- [ ] `recovery-<YYYYMMDD-HHMM>.md` 有 execution ARN 與前後狀態；未完成前不宣稱 publish 故障驗收已通過。
-- [ ] **（承接 Phase 24 §11）真實 AWS 上重跑單篇三個切點，並用公開 website endpoint（HTTP）做人工驗收**，證據在 `recovery-<YYYYMMDD-HHMM>.md`。
-- [ ] **（承接 Phase 25 §11）真實 AWS 上重跑多篇五個切點，用公開 website endpoint 的 HTTP 回應同時讀 A 與 B 兩頁存證**；出現 partial 就標 `FAIL（O3）`，不改寫成通過。
-- [ ] `resume_publish` 的 `a2` 復原在真實 AWS 上驗過：**先 `Publisher.prepare` 再 `promote_site_objects`**，補齊後 `site/` 頁面不含 `data-published="false"`。
-- [ ] 需要模型的雲端節點在報告中標 `BLOCKED（O5）` 並附 `get-execution-history` 的 `error`／`cause` 原文；Release 端到端標 `BLOCKED（O6）`。未執行的項目一律不標 green。
+
+  **未勾（FAIL／O3）：** 真實 AWS 上多篇在 `a3` 切點**重現了 partial**（A 的 v2 HTTP 200、B 的 v2 HTTP 404），依 §9 停止條件原樣記錄、不放寬 F49，證據 `docs/plan/report/recovery-20260915-0644.md` §4。moto 的整批切點 3 案例（交易前中斷）則兩篇同時維持舊狀態並已綠燈。
+- [x] 同 operation 重送沿用原版號與原模型輸出，重送期間模型呼叫數為 0；切點 4 依 `pending-promote.json` 補寫，單篇發布沒有這份清單時改用 operation 紀錄的 `version_id` 與 `site_key(...)` 重算同一份。
+- [x] 同事件重送不新增版本、回饋樣本或 PROC 成功樣本；closed execution 先核對 `status == "done"` 再判定。
+- [x] `check_asl.py` 包裝 `assert_safe_asl`，對三份 ASL 全部 `[通過]`，刻意刪掉一個 Catch 或第二條 retrier 時會失敗。
+- [x] Phase 12 與本 Phase 的兩套切點名稱有對照表，兩邊都沒有改名。
+- [x] `recovery-<YYYYMMDD-HHMM>.md` 有 execution ARN 與前後狀態；未完成前不宣稱 publish 故障驗收已通過。
+- [x] **（承接 Phase 24 §11）真實 AWS 上重跑單篇三個切點，並用公開 website endpoint（HTTP）做人工驗收**，證據在 `recovery-<YYYYMMDD-HHMM>.md`。
+- [x] **（承接 Phase 25 §11）真實 AWS 上重跑多篇五個切點，用公開 website endpoint 的 HTTP 回應同時讀 A 與 B 兩頁存證**；出現 partial 就標 `FAIL（O3）`，不改寫成通過。
+- [x] `resume_publish` 的 `a2` 復原在真實 AWS 上驗過：**先 `Publisher.prepare` 再 `promote_site_objects`**，補齊後 `site/` 頁面不含 `data-published="false"`。
+- [x] 需要模型的雲端節點在報告中標 `BLOCKED（O5）` 並附 `get-execution-history` 的 `error`／`cause` 原文；Release 端到端標 `BLOCKED（O6）`。未執行的項目一律不標 green。
