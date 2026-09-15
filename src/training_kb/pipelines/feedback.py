@@ -15,22 +15,44 @@ from datetime import datetime
 from typing import Any, Literal
 
 from training_kb.analytics.ratings import average_rating
+from training_kb.analytics.status_writer import load_validated_at
 from training_kb.config import Thresholds
-from training_kb.errors import ContentError, PermanentError
+from training_kb.content import (
+    allocate_version,
+    create_version,
+    parse_markdown,
+    validate_content,
+    verify_version_complete,
+)
+from training_kb.errors import (
+    ContentError,
+    CoordinationError,
+    PermanentError,
+    TransientError,
+)
 from training_kb.ingress import DEFAULT_FEEDBACK_CATEGORIES, operation_id_for
-from training_kb.keys import rule_pk
+from training_kb.keys import operation_ref, rule_pk
 from training_kb.models import (
     AuthoringRule,
+    Feature,
     Feedback,
     RuleStatus,
+    StepDraft,
     StepType,
     Tutorial,
+    TutorialContent,
     TutorialStatus,
 )
+from training_kb.operations import OperationCoordinator, OperationRecord
 from training_kb.repository import Repository, item_to_model
+from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
 from training_kb.writing.client import Writer
-from training_kb.writing.prompts import prompt_diagnose_weak, prompt_propose_rule
-from training_kb.writing.schemas import RuleProposal, WeakDiagnosis
+from training_kb.writing.prompts import (
+    prompt_diagnose_weak,
+    prompt_propose_rule,
+    prompt_refine_steps,
+)
+from training_kb.writing.schemas import RuleProposal, StepRewrite, WeakDiagnosis
 
 # ---- Phase 46（owner）：P51 import 同一個，不重新宣告（00A §5.4／§6.9）。 ----
 # controller 2026-09-14 預先宣告（值來自 00A §5.4），讓 W2 併行的 P51 不必等 P46。
@@ -488,3 +510,212 @@ def evidence_of(diagnosis: DiagnosisResult, *, repo: Repository) -> tuple[str, t
     if len(rows) != len(wanted) or len(categories) != 1:
         raise ContentError(f"{diagnosis.version_id} 的證據必須是同一個類別且不可缺漏")
     return categories.pop() or "", tuple(sorted(wanted))
+
+
+@dataclass(frozen=True)
+class RefinePlan:
+    """一次 REFINE 的結果：一個**未發布**的下一版與它的來歷（00A §6.9，七個欄位不可改名）。
+
+    回傳它代表 `create_version` ＋ `verify_version_complete` 都過了。**不代表已發布**：
+    `published_at` 仍是 `None`、`Tutorial.current_version` 還指著基底版，公開站讀不到它。
+    發布是 Phase 48 交給 Phase 25 `Publisher` 的事（O3 FAIL，不得宣稱可公開）。
+    """
+
+    version_id: str
+    base_version_id: str
+    reason: str
+    content: TutorialContent
+    changed_indexes: tuple[int, ...]
+    """裝的是步驟 `number`（從 1 起），不是 0-based index（00A D-55）；欄位名是既有契約。"""
+    rules_applied: tuple[str, ...]
+    evidence_fingerprint: str
+
+
+def _rules_for_hits(base: TutorialContent, targets: frozenset[int], *,
+                    repo: Repository) -> list[AuthoringRule]:
+    """只取**命中步驟型態**的 active 規則，依命中步驟出現順序、同一條只列一次（F29）。
+
+    未改動的步驟就算型態相同、原文剛好符合某條規則，也不進 `rules_applied`：沿用原文不算
+    本次套用。`select_active_rules` 每個型態最多回一條，所以上限是「命中步驟的不同型態數」，
+    不是所有 active 規則；candidate 與 retired 永不入選（`APL` Rule 2）。
+
+    最近驗證時間只能來自 `load_validated_at`（單一私有檔，D-28），缺值時 Phase 19 直接丟
+    `PermanentError`，本函式**不補預設時間**。
+    """
+    step_types = [step.type for step in base.steps if step.number in targets]
+    by_type = rules_for_content(repo.list_rules(RuleStatus.ACTIVE), step_types,
+                                load_validated_at(repo))
+    selected: dict[str, AuthoringRule] = {}  # dict 保留插入順序，同一條只列一次
+    for step_type in step_types:
+        selected.update({item.rule_id: item for item in by_type[step_type]})
+    return list(selected.values())
+
+
+def _assert_unchanged(base: TutorialContent, draft: TutorialContent,
+                      changed: frozenset[int]) -> None:
+    """未命中步驟與四個段落必須逐字相同（`REV` Rule 7；設計 §7.6）。
+
+    逐欄 `model_dump()` 比較而不是只比 `text`：`feature_id`／`type`／`number` 任何一欄被動
+    到都要擋。`strict=True` 讓「步驟數量變了」也是錯誤，而不是靜靜比對前 n 步。
+    """
+    if base.model_dump(exclude={"steps"}) != draft.model_dump(exclude={"steps"}):
+        raise ContentError("REFINE 不可改動命中步驟以外的段落")
+    for left, right in zip(base.steps, draft.steps, strict=True):
+        if left.number not in changed and left.model_dump() != right.model_dump():
+            raise ContentError(f"未命中步驟 {left.number} 的原文必須逐字相同")
+
+
+def _apply_rewrite(base: TutorialContent, reply: Mapping[str, Any],
+                   targets: frozenset[int]) -> TutorialContent:
+    """把模型回的新文字套回基底；改寫集合必須**恰好**等於命中集合（F48 的業務驗證）。
+
+    未命中的步驟整個物件原樣帶過——不是「重新產生一個看起來一樣的」，所以標點、空白都不會
+    因為重新序列化而漂移。命中步驟只換 `text`：`feature_id` 與 `type` 一律以基底為準，模型
+    想改就是錯誤（改引用等於偷換這一步在講哪個功能）。
+
+    `schema` 只保證形狀（`StepRewrite` 連 `minItems` 都沒設），漏回、多回、改引用、空文字
+    四種都要在這裡擋下來，而且全部在 `create_version` 之前——被拒的改寫不留半個產物。
+    """
+    changed = {int(item["number"]): item for item in reply["steps"]}
+    if set(changed) != set(targets):
+        raise ContentError(f"改寫集合 {sorted(changed)} 不等於診斷命中集合 {sorted(targets)}")
+    steps: list[StepDraft] = []
+    for step in base.steps:
+        item = changed.get(step.number)
+        if item is None:
+            steps.append(step)  # 未命中：整個物件原樣帶過
+            continue
+        if item["feature_id"] != step.feature_id or item["type"] != step.type:
+            raise ContentError(f"步驟 {step.number} 不可改變引用的 Feature 或型態")
+        text = str(item["text"]).strip()
+        if not text:
+            raise ContentError(f"步驟 {step.number} 的新文字是空的")
+        steps.append(step.model_copy(update={"text": text}))
+    draft = base.model_copy(update={"steps": steps})
+    _assert_unchanged(base, draft, targets)
+    return draft
+
+
+def _known_feature_ids(repo: Repository) -> frozenset[str]:
+    """既有 Feature 的裸 ID；`item_to_model` 是必要的（strict 模型不吃保留屬性，00A §3.6）。"""
+    return frozenset(item_to_model(item, Feature).feature_id
+                     for item in repo.scan_entity("FEATURE"))
+
+
+def _reuse_or_call(base: TutorialContent, diagnosis: DiagnosisResult, category: str,
+                   rules: Sequence[AuthoringRule], *, record: OperationRecord,
+                   repo: Repository, writer: Writer, operations: OperationCoordinator,
+                   operation_id: str) -> Mapping[str, Any]:
+    """取得這次的模型輸出；**儲存重試一律沿用既有的，不再呼叫模型**（設計 §14.2）。
+
+    上一次已經打過模型、只是寫到一半的話，`record.model_output_refs[-1]` 指著那份輸出。
+    重打一次會得到不一樣的文字（同樣的 prompt 也不保證同樣的回答），補齊出來的版本就與
+    `.md`／`.diff` 對不上；而且 `CallTrace` 會多算一次真實 attempt。
+
+    ref 讀不回來（物件被清掉）才重打：此時仍寫回**同一個** ref，`record_model_output`
+    對同一個 ref 不重複附加，所以 `model_output_refs` 不會愈重試愈長。
+    """
+    if record.model_output_refs:
+        stored = repo.get_object(record.model_output_refs[-1])
+        if stored is not None:
+            reused: dict[str, Any] = json.loads(stored.decode("utf-8"))
+            return reused
+    system, user = prompt_refine_steps(base, diagnosis, category, render_rules_block(rules))
+    reply = writer.generate_json(system, user, StepRewrite,
+                                 operation_id=operation_id, node=REFINE_NODE)
+    ref = operation_ref(operation_id, "refine-steps")
+    repo.put_object(ref, json.dumps(reply, ensure_ascii=False).encode("utf-8"),
+                    "application/json", if_none_match=False)
+    operations.record_model_output(operation_id, ref)
+    return reply
+
+
+def _guard(diagnosis: DiagnosisResult, category: str, feedback_ids: Sequence[str], *,
+           repo: Repository, operations: OperationCoordinator,
+           operation_id: str) -> OperationRecord | None:
+    """三道守門：指紋相符、O2 已接受、這批證據還沒產出完整版本。
+
+    回 `None` 代表 `no_new_evidence`（F23）——不是錯誤，呼叫端據此回 `None`。
+    兩種 `CoordinationError` 的訊息刻意分開寫（**本計畫選擇**）：指紋不符是呼叫端組錯了
+    `operation_id`，未接受是 O2 那一步漏了，兩者的修法不同。
+
+    「已產版」用 `verify_version_complete` 判斷，**不是** `record.status`：狀態只說流程走到
+    哪，產物齊不齊要看 S3 全文、VERSION item、STEP 與三種邊。有 `version_id` 但不完整代表
+    上次寫到一半，要沿用同版號補齊，不能當成重複證據跳過。
+    """
+    if operation_id != refine_operation_id(diagnosis.version_id, category, feedback_ids):
+        raise CoordinationError(f"{operation_id} 與本批證據的指紋不符")
+    record = operations.load(operation_id)
+    if record is None:
+        raise CoordinationError(f"{operation_id} 尚未被 O2 接受")
+    if record.version_id and verify_version_complete(record.version_id, repo):
+        return None  # no_new_evidence（F23）
+    return record
+
+
+def prepare_refine(diagnosis: DiagnosisResult, *, repo: Repository, writer: Writer,
+                   operations: OperationCoordinator,
+                   operation_id: str) -> RefinePlan | None:
+    """用 Phase 45 的診斷只改命中步驟，產出一個**未發布**的下一版（`REV` Rule 7、8）。
+
+    處理順序固定（00A §6.9，與 Phase 51 的 UPDATE 相同）：
+
+    ```text
+    step_indexes == ()  -> None（NO_STEP，F24）
+    evidence_of         -> 跨類別或有缺漏 -> ContentError
+    _guard              -> 指紋不符／未接受 -> CoordinationError；已產完整版 -> None（F23）
+    基底核對            -> 不是該篇最近已發布的版本 -> ContentError
+    acquire_lease       -> 拿不到 -> TransientError（交 ASL Retry，不自行迴圈等待）
+    選規則 -> 配版號 -> 模型（或重用）-> 程式核對 -> validate -> create_version -> verify
+    release_lease（finally）-> RefinePlan
+    ```
+
+    回 `None` **只**代表 `NO_STEP` 或 `no_new_evidence` 兩種合法業務結果；技術錯誤一律往外
+    丟，不吞：`ContentError`／`CoordinationError` 走 ASL 的 Catch，`TransientError` 走 Retry。
+
+    停止點：`verify_version_complete` 通過就回 `RefinePlan`。**不發布、不切
+    `current_version`、不寫 `site/`、不提規則、不建立新的 Tutorial 身分。**
+
+    lease 的 `now` 取 `record.updated_at`（**本計畫選擇 2026-09-14**）：深層程式不讀系統
+    時鐘（00A §3.5）。lease 不是接受順序保證，TTL 也不是準時解鎖，所以會改變版本鏈的寫入
+    各自仍帶條件。
+    """
+    if not diagnosis.step_indexes:
+        return None  # NO_STEP（F24）：記錄即可，不配版號、不建版、不整篇重寫
+    category, feedback_ids = evidence_of(diagnosis, repo=repo)
+    record = _guard(diagnosis, category, feedback_ids, repo=repo, operations=operations,
+                    operation_id=operation_id)
+    if record is None:
+        return None  # no_new_evidence（F23）：不配版號、不呼叫模型
+    base_version = repo.get_version(diagnosis.version_id)
+    if base_version is None:  # get_version 回 TutorialVersion | None
+        raise ContentError(f"{diagnosis.version_id} 不存在")
+    tutorial = repo.get_tutorial(base_version.slug)
+    if tutorial is None or tutorial.current_version != diagnosis.version_id:
+        raise ContentError(f"{diagnosis.version_id} 不是 {base_version.slug} 最近已發布的版本")
+    body = repo.get_object(base_version.s3_key)
+    if body is None:
+        raise ContentError(f"{diagnosis.version_id} 的全文不存在：{base_version.s3_key}")
+    base = parse_markdown(body.decode("utf-8"))
+    targets = frozenset(diagnosis.step_indexes)
+    scope = f"TUTORIAL#{base_version.slug}"  # `LEASE#` 前綴由 Phase 11 自己補（00A §6.4）
+    if not operations.acquire_lease(scope, operation_id, ttl_seconds=LEASE_TTL_SECONDS,
+                                    now=record.updated_at):
+        raise TransientError(f"{scope} 正在被另一個操作改寫，稍後重試")
+    try:
+        rules = _rules_for_hits(base, targets, repo=repo)
+        plan = allocate_version(base_version.slug, operation_id, operations, repository=repo,
+                                reason=refine_reason(category, feedback_ids),
+                                rules_applied=applied_rule_ids(rules))
+        reply = _reuse_or_call(base, diagnosis, category, rules, record=record, repo=repo,
+                               writer=writer, operations=operations, operation_id=operation_id)
+        draft = _apply_rewrite(base, reply, targets)
+        validate_content(draft, _known_feature_ids(repo))
+        create_version(plan, draft, repo)
+        if not verify_version_complete(plan.version_id, repo):
+            raise ContentError(f"{plan.version_id} 的內容或關係不完整")
+        return RefinePlan(plan.version_id, base_version.version_id, plan.reason, draft,
+                          tuple(sorted(targets)), plan.rules_applied,
+                          evidence_fingerprint(diagnosis.version_id, category, feedback_ids))
+    finally:
+        operations.release_lease(scope, operation_id)

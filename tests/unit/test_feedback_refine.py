@@ -16,6 +16,7 @@ moto 的綠燈只證明資料形狀與程式邏輯，**不是**永久去重（O2
 `tests/integration/test_feedback_refine_retry.py`。
 """
 
+import json
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,9 +32,10 @@ from training_kb.content import (
     markdown_key,
     put_private_artifact,
     render_markdown,
+    verify_version_complete,
 )
-from training_kb.errors import ContentError
-from training_kb.keys import feedback_pk, version_pk
+from training_kb.errors import ContentError, CoordinationError, TransientError
+from training_kb.keys import edge_sk, feature_pk, feedback_pk, step_pk, version_pk
 from training_kb.models import (
     AuthoringRule,
     Feature,
@@ -48,13 +50,17 @@ from training_kb.models import (
 )
 from training_kb.operations import AcceptOperation, OperationCoordinator
 from training_kb.pipelines.feedback import (
+    LEASE_TTL_SECONDS,
     DiagnosisResult,
+    RefinePlan,
     evidence_fingerprint,
     evidence_of,
+    prepare_refine,
     refine_operation_id,
     refine_reason,
 )
 from training_kb.repository import Repository, item_to_model
+from training_kb.writing.client import inference_config
 
 SLUG = "prepare-meeting"
 V1 = f"{SLUG}@v1"
@@ -83,7 +89,21 @@ MOTO_REGION = "us-west-2"
 
 
 class RefineRepository(Repository):
-    """真 `Repository` 行為 ＋ 兩個測試觀察鉤子；沒有覆寫任何既有行為。"""
+    """真 `Repository` 行為 ＋ 三個測試觀察鉤子；沒有覆寫任何既有行為。"""
+
+    def __init__(self, table: Any, bucket: Any) -> None:
+        super().__init__(table, bucket)
+        self.table = table
+
+    def break_one_step_edge(self, version_id: str) -> None:
+        """刪掉最後一步的 STEP 邊，重現設計 §14.1 的「上次寫到一半」。
+
+        關係邊是逐筆寫的，中間當機時前幾筆已經落地；這個鉤子造出的正是那個狀態，
+        `verify_version_complete` 會因此回 `False`。
+        """
+        last = self.get_steps(version_id)[-1]
+        self.table.delete_item(Key={"PK": step_pk(version_id, last.number),
+                                    "SK": edge_sk("REFERENCES", feature_pk(last.feature_id))})
 
     @property
     def versions(self) -> dict[str, TutorialVersion]:
@@ -97,13 +117,21 @@ class RefineRepository(Repository):
         self.update_meta(pk, {"category": category}, expected_revision=self.revision_of(pk))
 
 
+class RefineOperations(OperationCoordinator):
+    """真 `OperationCoordinator` ＋ 一個 lease 鉤子（讓別人先持有這一篇的租約）。"""
+
+    def hold(self, scope: str, owner: str) -> None:
+        taken = self.acquire_lease(scope, owner, ttl_seconds=LEASE_TTL_SECONDS, now=NOW)
+        assert taken, f"測試前置失敗：{owner} 沒能先拿到 {scope} 的租約"
+
+
 @dataclass
 class World:
     """一次 REFINE 需要的全部器材；欄位名與 Phase 文件 §7 的 `world` 一致。"""
 
     repo: RefineRepository
     writer: Any
-    operations: OperationCoordinator
+    operations: RefineOperations
     base: TutorialContent
     diagnosis: DiagnosisResult
     operation_id: str
@@ -186,7 +214,7 @@ def world(repo: RefineRepository, fake_writer: Any) -> World:
     seed_published_v1(repo)
     seed_feedback(repo, [feedback_row(row_id) for row_id in EIGHT_IDS])
     operation_id = refine_operation_id(V1, CATEGORY, EIGHT_IDS)
-    operations = OperationCoordinator(repo)
+    operations = RefineOperations(repo)
     operations.accept(AcceptOperation(operation_id=operation_id, kind="feedback",
                                       canonical_id=evidence_fingerprint(V1, CATEGORY, EIGHT_IDS),
                                       project_id=PROJECT, now=NOW))
@@ -233,3 +261,243 @@ def test_evidence_must_not_be_missing(world: World) -> None:
     diagnosis = DiagnosisResult(V1, (3,), {3: HIT_REASON}, (*EIGHT_IDS, "f_999"))
     with pytest.raises(ContentError, match="同一個類別"):
         evidence_of(diagnosis, repo=world.repo)
+
+
+# --- Task 2：只改命中步驟，只記本次注入的規則 -------------------------------
+
+REWRITE: dict[str, Any] = {"number": 3, "text": "在會議頁面右上角選擇 Meeting Summary。",
+                           "feature_id": FEATURE, "type": "click_ui"}
+
+
+def queue(world: World, *steps: dict[str, Any]) -> None:
+    """把一次 `StepRewrite` 回應排進 conftest 的 `RecordingWriter`。"""
+    world.writer.replies.append({"steps": [dict(step) for step in steps]})
+
+
+def run(world: World) -> RefinePlan | None:
+    return prepare_refine(world.diagnosis, repo=world.repo, writer=world.writer,
+                          operations=world.operations, operation_id=world.operation_id)
+
+
+def seed_rules(repository: Repository, rules: Sequence[AuthoringRule]) -> None:
+    """規則本體 ＋ 最近驗證時間（唯一權威是 `operations/rules/validated_at.json`，D-28）。"""
+    for item in rules:
+        repository.put_meta(item)
+    payload = {item.rule_id: "2026-09-10T00:00:00Z" for item in rules}
+    repository.put_object(VALIDATED_AT_KEY, json.dumps(payload).encode("utf-8"),
+                          "application/json", if_none_match=False)
+
+
+def test_only_diagnosed_steps_change_and_others_are_byte_for_byte(world: World) -> None:
+    """Given 診斷只命中第 3 步，When 改寫，Then 只有第 3 步變動，其餘步驟與四段逐字相同。
+
+    `REV` Rule 7 的 primary 斷言。
+    """
+    queue(world, REWRITE)
+    plan = run(world)
+    assert (plan.version_id, plan.base_version_id) == (V2, V1)
+    assert plan.changed_indexes == (3,)
+    assert plan.reason == "feedback:8 則 找不到按鈕"
+    assert plan.content.steps[2].text == REWRITE["text"]
+    for number in (1, 2, 4):
+        assert plan.content.steps[number - 1] == world.base.steps[number - 1]
+    assert plan.content.model_dump(exclude={"steps"}) == world.base.model_dump(exclude={"steps"})
+
+
+def test_refine_builds_an_unpublished_version_only(world: World) -> None:
+    """Given 一次成功的改寫，When 看產物，Then v2 是未發布版本，且 current_version 沒被切換。"""
+    queue(world, REWRITE)
+    plan = run(world)
+    created = world.repo.versions[V2]
+    assert created.published_at is None
+    assert created.supersedes == V1
+    tutorial = world.repo.get_tutorial(SLUG)
+    assert tutorial is not None and tutorial.current_version == V1
+    assert plan.evidence_fingerprint == evidence_fingerprint(V1, CATEGORY, EIGHT_IDS)
+
+
+def test_model_touching_an_extra_step_is_rejected(world: World) -> None:
+    """Given 模型偷改沒被命中的第 2 步，When 改寫，Then `ContentError` 且沒有版本被建立。"""
+    queue(world, REWRITE, {"number": 2, "text": "偷改的第二步。",
+                           "feature_id": FEATURE, "type": "read"})
+    with pytest.raises(ContentError, match="改寫集合"):
+        run(world)
+    assert world.repo.versions.get(V2) is None
+
+
+def test_model_missing_a_diagnosed_step_is_rejected(world: World) -> None:
+    """Given 模型一個命中步驟都沒回，When 改寫，Then `ContentError` 且沒有版本被建立。"""
+    queue(world)
+    with pytest.raises(ContentError, match="改寫集合"):
+        run(world)
+    assert world.repo.versions.get(V2) is None
+
+
+def test_model_changing_the_feature_reference_is_rejected(world: World) -> None:
+    """Given 模型把第 3 步改引用別的 Feature，When 改寫，Then `ContentError` 且不建版。"""
+    queue(world, {**REWRITE, "feature_id": "Share"})
+    with pytest.raises(ContentError, match="Feature 或型態"):
+        run(world)
+    assert world.repo.versions.get(V2) is None
+
+
+def test_model_changing_the_step_type_is_rejected(world: World) -> None:
+    """Given 模型把第 3 步的 type 從 click_ui 改成 read，When 改寫，Then `ContentError`。"""
+    queue(world, {**REWRITE, "type": "read"})
+    with pytest.raises(ContentError, match="Feature 或型態"):
+        run(world)
+    assert world.repo.versions.get(V2) is None
+
+
+def test_blank_rewritten_text_is_rejected(world: World) -> None:
+    """Given 模型回的新文字去空白後是空的，When 改寫，Then `ContentError` 且不建版。"""
+    queue(world, {**REWRITE, "text": "   \n  "})
+    with pytest.raises(ContentError, match="新文字是空的"):
+        run(world)
+    assert world.repo.versions.get(V2) is None
+
+
+def test_only_rules_injected_for_hit_steps_are_recorded(world: World) -> None:
+    """Given active 規則同時涵蓋命中與未命中步驟的型態，When 改寫，Then 只記注入的那條。
+
+    第 1、4 步是 `read`，即使 `R-012` 也是 active，也不因「原文沿用」進入 `rules_applied`
+    （F29）；candidate 的 `R-099` 永不入選（`APL` Rule 2）。
+    """
+    seed_rules(world.repo, [rule("R-007", StepType.CLICK_UI),
+                            rule("R-012", StepType.READ),
+                            rule("R-099", StepType.CLICK_UI, status="candidate")])
+    queue(world, REWRITE)
+    plan = run(world)
+    assert plan.rules_applied == ("R-007",)
+    injected = world.writer.calls[0]["user"]
+    assert "[R-007]" in injected
+    assert "R-012" not in injected
+    assert "R-099" not in injected
+
+
+def test_refine_prompt_is_the_refine_node_with_untrusted_text_as_data(world: World) -> None:
+    """Given 一次改寫，When 看送出的 prompt，Then node 是 refine_steps 且留言只當資料。"""
+    queue(world, REWRITE)
+    run(world)
+    call = world.writer.calls[0]
+    assert call["node"] == "refine_steps"
+    assert call["schema"]["$id"] == "StepRewrite"
+    assert call["user"].count("</source_data>") == 1
+    # 只放命中步驟的原文；未命中步驟不進 prompt，模型看不到就無從「順手」改它。
+    assert "開啟摘要。" in call["user"]
+    assert "選擇目標會議。" not in call["user"]
+
+
+def test_refine_uses_the_tutorial_writing_inference_config(world: World) -> None:
+    """Given 一次改寫，When 看 schema，Then 走教學寫作類參數（2048／0.1，00A §3.7）。
+
+    參數本身由 Phase 15／18 的 `inference_config(schema)` 依 `$id` 決定，本 Phase 不自己調；
+    這裡斷言的是「REFINE 傳的是 `StepRewrite`」這條證據鏈的起點。
+    """
+    queue(world, REWRITE)
+    run(world)
+    assert inference_config(world.writer.calls[0]["schema"]) == {"maxTokens": 2048,
+                                                                 "temperature": 0.1}
+
+
+# --- Task 3：lease、同 operation 重送與同證據不再產版 -----------------------
+
+
+def test_lease_conflict_raises_transient_error(world: World) -> None:
+    """Given 同一篇的 lease 已被別人持有，When 改寫，Then `TransientError`（交 ASL 重試）。
+
+    lease 只讓同一篇的併發改寫串行（設計 §8.3）；拿不到就往外丟，**不自行迴圈等待**。
+    """
+    world.operations.hold(f"TUTORIAL#{SLUG}", owner="op-other")
+    queue(world, REWRITE)
+    with pytest.raises(TransientError):
+        run(world)
+    assert world.repo.versions.get(V2) is None
+    assert world.writer.request_attempts == 0
+
+
+def test_lease_is_released_even_when_the_rewrite_fails(world: World) -> None:
+    """Given 改寫在 lease 之內失敗，When 同 operation 重送，Then 租約已釋放且不再打模型。
+
+    重送仍然是同一個 `ContentError`（不是 `TransientError`）這件事本身就證明租約還回去了
+    ——沒還的話 `acquire_lease` 會先失敗。模型輸出在呼叫後**立刻**保存（設計 §14.2），
+    所以重送沿用同一份不合格的輸出：`ContentError` 是 `PermanentError`，走 Catch 不重試，
+    要重跑必須換一批證據（換指紋＝換 operation），不是讓模型再擲一次骰子。
+    """
+    queue(world, REWRITE, {"number": 2, "text": "偷改的第二步。",
+                           "feature_id": FEATURE, "type": "read"})
+    with pytest.raises(ContentError, match="改寫集合"):
+        run(world)
+    with pytest.raises(ContentError, match="改寫集合"):
+        run(world)
+    assert world.writer.request_attempts == 1
+    assert world.repo.versions.get(V2) is None
+
+
+def test_operation_id_must_match_the_evidence(world: World) -> None:
+    """Given operation_id 不是這批證據的指紋導出的，When 改寫，Then `CoordinationError`。"""
+    with pytest.raises(CoordinationError, match="指紋不符"):
+        prepare_refine(world.diagnosis, repo=world.repo, writer=world.writer,
+                       operations=world.operations,
+                       operation_id="op-feedback-review-demo-2026-09-13")
+    assert world.repo.versions.get(V2) is None
+    assert world.writer.request_attempts == 0
+
+
+def test_operation_must_be_accepted_first(world: World) -> None:
+    """Given 指紋對但 O2 還沒接受這筆 operation，When 改寫，Then `CoordinationError`。"""
+    other = DiagnosisResult(V1, (3,), {3: HIT_REASON}, EIGHT_IDS[:5])
+    with pytest.raises(CoordinationError, match="尚未被 O2 接受"):
+        prepare_refine(other, repo=world.repo, writer=world.writer,
+                       operations=world.operations,
+                       operation_id=refine_operation_id(V1, CATEGORY, EIGHT_IDS[:5]))
+
+
+def test_no_step_and_same_evidence_return_none(world: World) -> None:
+    """Given NO_STEP 或同一批證據第二次送，When 改寫，Then 都回 None 且只產生過一個 v2。
+
+    `NO_STEP`（F24）與 `no_new_evidence`（F23）都是**合法業務結果**，不是錯誤；兩者都不配
+    版號、不呼叫模型。
+    """
+    queue(world, REWRITE)
+    empty = DiagnosisResult(V1, (), {}, world.diagnosis.feedback_ids)
+    assert prepare_refine(empty, repo=world.repo, writer=world.writer,
+                          operations=world.operations,
+                          operation_id=world.operation_id) is None
+    first = run(world)
+    assert first is not None and first.version_id == V2
+    assert run(world) is None  # 同一批證據：no_new_evidence（F23）
+    assert world.writer.request_attempts == 1
+    assert sorted(key for key in world.repo.versions if key.startswith(f"{SLUG}@")) == [V1, V2]
+
+
+def test_shuffled_and_duplicated_evidence_is_the_same_operation(world: World) -> None:
+    """Given 同八個 ID 打亂順序又帶重複，When 算 operation id，Then 與原本逐字相同。
+
+    去重的依據是指紋，不是呼叫端傳進來的順序；跨日重跑因此撞到同一筆 `OPS#` 永久紀錄。
+    """
+    shuffled = ("f_40", "f_12", "f_31", "f_12", "f_19", "f_23", "f_15", "f_27", "f_34")
+    assert refine_operation_id(V1, CATEGORY, shuffled) == world.operation_id
+
+
+def test_storage_retry_reuses_the_version_and_the_model_output(world: World) -> None:
+    """Given 上次寫到一半（VERSION 有了、關係邊沒寫完），When 同 operation 重送，
+    Then 沿用同版號與既有模型輸出，**不再呼叫模型**（設計 §14.2）。
+
+    這裡用刪掉一筆 STEP 邊來重現「不完整」：`verify_version_complete` 因此回 `False`，
+    `_guard` 就不會把它當成 `no_new_evidence`。
+    """
+    queue(world, REWRITE)
+    first = run(world)
+    assert first is not None
+    world.repo.break_one_step_edge(V2)
+    assert not verify_version_complete(V2, world.repo)
+
+    second = run(world)  # 沒有再 queue 回應：再打模型就會 PermanentError
+    assert second is not None
+    assert second.version_id == V2
+    assert world.writer.request_attempts == 1
+    record = world.operations.load(world.operation_id)
+    assert record is not None and record.version_id == V2
+    assert len(record.model_output_refs) == 1
+    assert verify_version_complete(V2, world.repo)
