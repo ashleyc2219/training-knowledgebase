@@ -6,17 +6,26 @@ Owner：Phase 49（Feature 定位與 alias）；Phase 50（步驟反查與 Safet
 controller 2026-09-14 預建空殼：讓同一波次的 Phase 只用 Edit 追加各自區段。
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from training_kb.config import Thresholds
 from training_kb.content import parse_version_id
-from training_kb.errors import PermanentError
+from training_kb.errors import ContentError, PermanentError
 from training_kb.keys import META, feature_pk
-from training_kb.models import Feature, Release, ReleaseKind
+from training_kb.models import (
+    Feature,
+    Release,
+    ReleaseKind,
+    Tutorial,
+    TutorialStatus,
+    TutorialStep,
+)
 from training_kb.repository import DynamoValue, Repository, item_to_model
 from training_kb.vectors import cosine
 from training_kb.writing.client import Writer
+from training_kb.writing.prompts import prompt_safety_net_confirm
+from training_kb.writing.schemas import StepConfirmation
 
 # ---- Phase 49：Feature 定位與 alias（設計 §7.4、§9.1、D06／D07／F15） ----
 
@@ -237,3 +246,107 @@ def needs_safety_net(release: Release, feature: Feature, hits: Sequence[StepHit]
         return False
     known = {normalize_feature_name(name) for name in [feature.name, *feature.aliases]}
     return normalize_feature_name(release.old_name or "") not in known
+
+
+SAFETY_NET_CANDIDATES = 5
+"""補漏的候選預算：相似度前五名的步驟，因此**最多五個版本、五次確認呼叫**。
+
+這是本 Phase 選定的成本上限，不是業務門檻，也不是另一個 cosine 值——`0.85` 那條線只用在
+Phase 49 的定位，補漏這一段由模型逐一確認，不再加第二個分數門檻（00A §6.9）。
+"""
+
+
+def _current_published(repository: Repository) -> Iterator[tuple[str, str]]:
+    """每篇 active 教學的 `(slug, current 已發布 version_id)`，依 `slug` 升序。
+
+    先濾掉 `SK != META` 再 `item_to_model`：`entity` 等於 PK 前綴（00A §3.6），同一個
+    `TUTORIAL#…` 起點的關係邊也帶 `entity == "TUTORIAL"`，而邊沒有模型欄位，直接餵給
+    `item_to_model` 會整筆 `ValidationError`。`scan_entity` 的 `meta_only` 預設就是 `True`，
+    這層過濾與 `Repository._meta_models` 同一套防禦。
+
+    退役教學在**這裡**被排除：補漏是「要不要多改一篇」的建議，不該把已經不維護的教學拉回來
+    改版（設計 §8.1）。反查那一側沒有這層篩選，因為 `retire_tutorial` 只改 `status` 與
+    `successor`，`current_version` 與 `published_at` 都保留，而 Phase 27 只看「是不是 current
+    而且已發布」——兩邊的差異是刻意的：明確證據照實回報，補漏證據只補到 active 的教學上。
+    """
+    rows = [item for item in repository.scan_entity("TUTORIAL") if str(item["SK"]) == META]
+    for tutorial in sorted((item_to_model(row, Tutorial) for row in rows),
+                           key=lambda item: item.slug):
+        current = tutorial.current_version
+        if tutorial.status is not TutorialStatus.ACTIVE or current is None:
+            continue
+        version = repository.get_version(current)
+        if version is not None and version.published_at is not None:
+            yield tutorial.slug, current
+
+
+def _release_names(release: Release) -> tuple[str, ...]:
+    """這次改版涉及的名稱，固定 `feature` → `old_name` → `new_name` 並去重。
+
+    `dict.fromkeys` 保順序去重，所以 `feature == new_name`（改名後才送進來的常見情況）不會讓
+    同一個字串出現兩次；順序固定，查詢向量的輸入文字才逐次相同、`CallTrace` 也讀得懂。
+    """
+    parts = (release.feature, release.old_name or "", release.new_name or "")
+    return tuple(dict.fromkeys(part.strip() for part in parts if part.strip()))
+
+
+def _score_steps(release: Release, *, repository: Repository, writer: Writer,
+                 operation_id: str) -> tuple[list[tuple[float, str, int, str]],
+                                             dict[tuple[str, str], dict[int, TutorialStep]]]:
+    """每個目前已發布步驟與改版名稱的相似度，排成 `(-score, slug, number, version_id)`。
+
+    分數取負再 `sort()`，一行就得到「分數降序 → slug 升序 → number 升序 → version_id 升序」，
+    同分時的勝者固定，重跑 byte 相同。**`embed` 次數與目前已發布步驟總數成正比**，而且每次
+    `safety_net` 都重算（設計 §10 只允許單次執行內重用，不往 ERM 加 embedding 欄位）：每一次
+    `embed` 都是一次真實 Bedrock attempt，依 F45 全部計入 `CallTrace`。
+    """
+    query = writer.embed(" / ".join(_release_names(release)),
+                         operation_id=operation_id, node="safety_net_query")
+    scored: list[tuple[float, str, int, str]] = []
+    steps_by_version: dict[tuple[str, str], dict[int, TutorialStep]] = {}
+    for slug, version_id in _current_published(repository):
+        steps = {step.number: step for step in repository.get_steps(version_id)}
+        steps_by_version[(slug, version_id)] = steps
+        for number, step in sorted(steps.items()):
+            vector = writer.embed(step.text, operation_id=operation_id, node="safety_net_step")
+            scored.append((-cosine(query, vector), slug, number, version_id))
+    scored.sort()
+    return scored, steps_by_version
+
+
+def safety_net(release: Release, *, repository: Repository, writer: Writer,
+               operation_id: str) -> tuple[StepHit, ...]:
+    """補漏路徑：步驟文字相似度取前五名候選，再依版本分組交模型逐一確認。
+
+    回的是**補漏證據**，不是明確證據：呼叫端（Phase 52 的 `task_safety_net`）自己做
+    `set(direct) | set(net)`，所以本函式**不**先跑一次 `find_release_hits`
+    （**本計畫選擇（2026-09-14）**）——補漏永遠只會新增，不可能抹掉既有命中。
+
+    每個候選版本各發一次 `generate_json`：`StepConfirmation.confirmed_step_numbers` 只有裸
+    編號，兩個版本混在同一次呼叫裡就分不清誰的第 3 步。模型回不存在的編號時
+    `number in steps` 直接丟棄、**不重問**（Phase 18 的對照表把 `StepConfirmation` 標為不走
+    correction）；`reason` 去空白後為空是模型輸出違規，依設計 §7.4 丟 `ContentError`，不當成
+    「沒有命中」降級。一個候選都沒被確認時回 `()`，由呼叫端記未命中並 KEEP（F18）。
+
+    `inferenceConfig` 不在這裡決定：`generate_json` 用 `StepConfirmation` 這份 schema 查
+    Phase 18 的 `inference_config`，判斷類固定 `maxTokens` 512、`temperature` 0.1（00A §3.7）。
+    """
+    scored, steps_by_version = _score_steps(
+        release, repository=repository, writer=writer, operation_id=operation_id
+    )
+    picked: dict[tuple[str, str], list[int]] = {}
+    for _, slug, number, version_id in scored[:SAFETY_NET_CANDIDATES]:
+        picked.setdefault((slug, version_id), []).append(number)
+    confirmed: set[StepHit] = set()
+    for (slug, version_id), numbers in sorted(picked.items()):
+        steps = steps_by_version[(slug, version_id)]
+        system, user = prompt_safety_net_confirm(
+            version_id, [steps[number] for number in sorted(numbers)], _release_names(release)
+        )
+        reply = writer.generate_json(system, user, StepConfirmation,
+                                     operation_id=operation_id, node="safety_net_confirm")
+        if not str(reply["reason"]).strip():
+            raise ContentError(f"safety_net 確認缺少理由：{version_id}")
+        confirmed |= {StepHit(slug, version_id, number)
+                      for number in reply["confirmed_step_numbers"] if number in steps}
+    return tuple(sorted(confirmed, key=lambda hit: (hit.slug, hit.number)))
