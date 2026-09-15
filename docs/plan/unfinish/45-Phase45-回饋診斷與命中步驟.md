@@ -2,6 +2,36 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **(a) 已存在、可直接重用（不要重寫）**
+> - `src/training_kb/writing/schemas.py:92` `WeakDiagnosis` **已存在且形狀正確**：`required: ["items"]`、`items[{number:int>=1, reason:非空字串}]`、`additionalProperties: False`，而且 `items` 可為空陣列（Phase 45 據此回 `NO_STEP`）。它是 `dict[str, object]`，不是 pydantic 類別。
+> - `src/training_kb/writing/prompts.py:29` `_as_data(text)`（`html.escape(text, quote=False)`）與 `<source_data>` 分區契約（D-67）已存在；同檔目前只有 `prompt_write_tutorial`（:34）與 `prompt_name_gap`（:65），本 Phase 追加 `prompt_diagnose_weak`。
+> - `src/training_kb/writing/client.py:46` `Writer` Protocol、`:51` `generate_json(system, user, schema: Mapping[str, Any], *, operation_id, node) -> dict[str, Any]`。
+> - `src/training_kb/repository.py:558` `get_steps(version_id) -> list[TutorialStep]`（依 `number` 升序）、`:579` `list_feedback_of_version(version_id) -> list[Feedback]`（依 ID 升序）。
+> - `src/training_kb/models.py:208` `TutorialStep(tutorial_version, number, type, text, feature_id)`、`:347` `Feedback`、`:38` `StepType`（在 `models.py`，不是獨立模組）。
+> - `src/training_kb/errors.py:12` `ContentError(PermanentError)`。
+> - `tests/unit/conftest.py:13` `RecordingWriter`（`replies` 佇列、`calls`、`request_attempts`）與 `fake_writer` fixture 已存在（00A §6.5、§3.2）。
+> - `src/training_kb/pipelines/feedback.py`：**controller 已預建空殼**（只有 docstring，commit `5f8a430`）。
+>
+> **(b) 文件因上一批裁決／實作而修正的點**
+> 1. §4「修改 `src/training_kb/pipelines/feedback.py`（檔案由 Phase 44 建立）」→ 檔案其實是 **controller 預建的空殼**（COMMON.md R4）；本 Phase 與 P44、P47 在 **同一波次 W1 併行**追加，只用 Edit、各自區段。
+> 2. **測試 fixture 名稱衝突**：Task 1–3 的 `fake_writer` 與 `tests/unit/conftest.py` 既有的 `fake_writer`（回 `RecordingWriter`）**同名**。在測試模組內定義同名 fixture 會**無聲覆蓋** conftest 的版本；`tests/unit/pipelines/conftest.py` 的檔頭已為同一個陷阱留下警語。本計畫選擇：**本 Phase 的區域替身另取名**（例如 `diagnosis_writer`），或直接用 `RecordingWriter(replies=[...])`。若沿用區域 fake，形狀必須與 `RecordingWriter` 相容（00A §6.5）。
+> 3. Task 3 的斷言寫 `call.node`／`call.user`（屬性存取），但 `RecordingWriter.calls` 存的是 **dict**（`call["node"]`／`call["user"]`）。用 `RecordingWriter` 時改成 dict 取值；自寫 dataclass 替身時才用屬性（現況核對 2026-09-14）。
+> 4. §5 Consumes 的 `StepType` 標「Phase 03」：實際定義在 `src/training_kb/models.py`（與 `TutorialStep`、`Feedback` 同檔），import 一律 `from training_kb.models import StepType`。
+> 5. 零寫入的承諾仍成立：本 Phase 不呼叫 `put_object`／`put_meta`，也不碰 `OperationCoordinator`。
+>
+> **(c) gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - O1 provisionally accepted（D-71）；**O2 PASS**（P11，`docs/plan/report/o2-20260914t182824z.md`）；**O3 FAIL**（P12，`docs/plan/report/o3-20260914t181109z.md`）；**O5 BLOCKED**（不是「尚未通過」：帳號 123456789012 從未送出 Bedrock model access 使用情境表單，Titan／Claude 都回 `ValidationException: Operation not allowed`，報告 `docs/plan/report/o5-20260915T030245Z.md`、`o5-20260914T170050Z.md`）；O6 待維護者核定；O4／O7 未到。
+> - **O5 BLOCKED 對本 Phase 的實際影響**：單元測試一律用假 `Writer`，`TKB_GENERATION_MODEL_ID` **不得填猜測值**；假 Writer 綠燈不得寫成 Bedrock／AWS 已通過。真實 AWS 執行時（P48 部署後）`diagnose_weak` 這個節點會走 `PermanentError → Catch → PipelineFailed`，**那是 BLOCKED 證據，不是 bug，也不是通過**。
+> - 本 Phase 不寫入、不建版、不發布，所以 O2／O3 不阻擋它。
+>
+> **(d) controller 裁決 R1–R11 的適用項**
+> - **R3（同檔併行）**：`pipelines/feedback.py` 在 W1 由 **P44 ∥ P45 ∥ P47** 同時追加；`writing/prompts.py` 在 W1 由 **P45 ∥ P47** 同時追加（P46 在 W2 再加一個）。只用 Edit 不用 Write；自己的程式放 `# ---- Phase 45 ----` 區段；不重排、不重格式化、不改別人的函式；共用檔只跑 `ruff format --check`，不通過就只修自己那段；`git add` 只加自己的檔案路徑。跑整套測試時若紅燈來自別的 Phase 進行中的測試檔，用 `--ignore=<那個檔>` 排除並在報告寫明。
+> - **R4**：空殼已建，直接 Edit。**R5**：文件片段是示意，名稱與簽名以 00A ＋ 既有程式為準。
+> - **R6／R7／R8**：逐 Task 先紅燈再綠燈並留指令與輸出；報告寫 `docs/plan/report/phases/2026-09-14-Phase45-REP.md`；commit trailer 照 COMMON.md R8。
+> - 測試檔照 00A §3.3 平放：`tests/unit/test_feedback_diagnosis.py`（全專案唯一，不撞既有檔）。
+
 **目標：** 把 Phase 44 已確認的弱教學交給模型診斷，最後只留下真實存在且可改寫的步驟編號與原因。
 
 **架構：** Feedback pipeline 整理同版回饋與原步驟，透過固定 `Writer.generate_json` 取得符合 `WeakDiagnosis` schema 的 JSON 物件，再由程式驗證編號、重複值及原因。模型只提出診斷；程式決定結果是否可進入 REFINE。
@@ -15,7 +45,7 @@
 - 下一階段是 [Phase 46：REFINE 精準改寫與證據去重](./46-Phase46-REFINE精準改寫與證據去重.md)。
 - 本階段不建立版本、不發布、不提出規則，也不修改回饋；**不寫任何 DynamoDB item 或 S3 物件**，全部是讀取加純計算。
 - `WeakTarget` 只能代表 active Tutorial 的已發布 `current_version`（Phase 44 保證）；本階段不重新判定門檻、不重新挑類別。找不到有效步驟是合法的 `NO_STEP` 結果，不可改成整篇重寫。
-- gate 狀態：**O5 尚未通過**，`TKB_GENERATION_MODEL_ID` 保持 `<實測通過的 ID>` 佔位；本階段只能用 FakeWriter 跑單元測試，不得把 FakeWriter 綠燈說成 Bedrock 或 AWS 已通過。本階段不碰 O2／O3，因為它不寫入、不建版也不發布。
+- gate 狀態（現況核對 2026-09-14，見 COMMON.md §2）：**O5 BLOCKED**（原寫「尚未通過」；帳號未送出 Bedrock model access 使用情境表單，報告 `docs/plan/report/o5-20260915T030245Z.md`），`TKB_GENERATION_MODEL_ID` 保持 `<實測通過的 ID>` 佔位、**不得填猜測值**；本階段只能用假 Writer 跑單元測試，不得把假 Writer 綠燈說成 Bedrock 或 AWS 已通過；真實 AWS 上這個節點會走 Catch，那是 BLOCKED 證據。**O2 已 PASS**（P11）、**O3 仍 FAIL**（P12），但本階段不寫入、不建版也不發布，兩者都不阻擋它。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -62,9 +92,9 @@ DiagnosisResult(version_id="prepare-meeting@v1",
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 修改 | `src/training_kb/pipelines/feedback.py` | 定義 `DiagnosisResult`、`DIAGNOSE_NODE` 與 `diagnose_weak`（檔案由 Phase 44 建立）。 |
-| 修改 | `src/training_kb/writing/prompts.py` | 依 Phase 17 的 `prompt_<node>` 命名加入 `prompt_diagnose_weak`（檔案由 Phase 17 建立）。 |
-| 測試 | `tests/unit/test_feedback_diagnosis.py` | 驗證有效、無效、重複、空診斷與 prompt 不跨版洩漏。 |
+| 修改 | `src/training_kb/pipelines/feedback.py` | 定義 `DiagnosisResult`、`DIAGNOSE_NODE` 與 `diagnose_weak`。（現況核對 2026-09-14：原寫「檔案由 Phase 44 建立」，實際上 controller 已預建 docstring 空殼；本 Phase 與 P44、P47 在同一波次 W1 併行追加，只用 Edit、各自 `# ---- Phase 45 ----` 區段。） |
+| 修改 | `src/training_kb/writing/prompts.py` | 依 Phase 17 的 `prompt_<node>` 命名加入 `prompt_diagnose_weak`（檔案由 Phase 17 建立，目前有 `_as_data`、`prompt_write_tutorial`、`prompt_name_gap` 三個名稱）。**同一波次 P47 也會追加 `prompt_propose_rule`，只用 Edit、各自區段。** |
+| 測試 | `tests/unit/test_feedback_diagnosis.py` | 驗證有效、無效、重複、空診斷與 prompt 不跨版洩漏。（檔名照 00A §3.3，全專案唯一。） |
 
 ## 5. 固定介面
 
@@ -73,7 +103,7 @@ DiagnosisResult(version_id="prepare-meeting@v1",
 ```text
 WeakTarget(tutorial_id: str, version_id: str, category: str,
            feedback_ids: tuple[str, ...])                                   # Phase 44
-StepType（StrEnum：CLICK_UI="click_ui"、INPUT="input"、READ="read"）           # Phase 03
+StepType（StrEnum：CLICK_UI="click_ui"、INPUT="input"、READ="read"）           # Phase 03，實際在 models.py
 TutorialStep(tutorial_version: str, number: int, type: StepType,
              text: str, feature_id: str)                                    # Phase 04
 Feedback(id, tutorial_version, rating, category, comment, user, ts)         # Phase 04
@@ -155,6 +185,8 @@ def test_diagnose_weak_keeps_only_existing_steps(fake_repo, fake_writer, weak_ta
 ```
 
 `fake_repo` 只需實作 `get_steps`／`list_feedback_of_version` 兩個方法；`fake_writer` 記下每次 `generate_json` 的 `(system, user, schema, node)` 並回傳 `self.reply`；`step(n)` 是回 `TutorialStep(tutorial_version="prepare-meeting@v1", number=n, type=StepType.CLICK_UI, text=f"第 {n} 步", feature_id="Prepare")` 的 helper。三者都放同一個測試檔的 fixture 區。
+
+**（現況核對 2026-09-14：`tests/unit/conftest.py` 已經有一個名叫 `fake_writer` 的 fixture，回 Phase 15 的 `RecordingWriter`。）** 在本檔定義同名 fixture 會無聲覆蓋它（`tests/unit/pipelines/conftest.py` 的檔頭已為同一個陷阱留警語）。**本計畫選擇：本檔的替身另取名 `diagnosis_writer`，或直接用 `RecordingWriter(replies=[...])`。** 沿用區域 fake 時形狀必須與 `RecordingWriter` 相容（00A §6.5）：它把每次呼叫記成 **dict**（`calls[0]["user"]`、`calls[0]["node"]`），不是屬性存取。
 
 - [ ] **Step 2：執行並確認紅燈**
 
@@ -342,14 +374,14 @@ def test_prompt_only_contains_target_version_and_evidence(
     diagnose_weak(
         weak_target, repo=fake_repo_two_versions, writer=fake_writer, operation_id="op-leak"
     )
-    call = fake_writer.calls[0]
+    call = fake_writer.calls[0]          # RecordingWriter 存 dict：改用 call["node"]／call["user"]
     assert len(fake_writer.calls) == 1
-    assert call.node == "diagnose_weak"
-    assert "prepare-meeting@v2" not in call.user
+    assert call["node"] == "diagnose_weak"
+    assert "prepare-meeting@v2" not in call["user"]
     for feedback_id in weak_target.feedback_ids:
-        assert feedback_id in call.user
-    assert "f_101" not in call.user and "缺少資訊" not in call.user
-    assert "第 4 步" in call.user
+        assert feedback_id in call["user"]
+    assert "f_101" not in call["user"] and "缺少資訊" not in call["user"]
+    assert "第 4 步" in call["user"]
 ```
 
 `fake_repo_two_versions` 同時放 v1 的四步與八筆「找不到按鈕」、v2 的十筆「缺少資訊」；`weak_target` 只指 v1 的八個 ID。
@@ -448,4 +480,5 @@ git commit -m "feat(feedback): 限制診斷 prompt 只含本版證據"
 - [ ] 只讀 target 指定的版本步驟與 target 指定的 Feedback ID，沒有寫入任何 item 或 S3 物件。
 - [ ] 合法步驟依 `number` 升序，非法步驟與空白原因不流入 REFINE；無有效步驟可觀察為 `NO_STEP`，沒有新版本。
 - [ ] `REV` Rule 5、6 有直接 assertion，並在 §10 標明 primary 在本 Phase。
-- [ ] 單元測試已實際執行並保存輸出，且未把 FakeWriter PASS 說成 Bedrock、O5 或 AWS 已通過。
+- [ ] 單元測試已實際執行並保存輸出，且未把假 Writer 的 PASS 說成 Bedrock、O5 或 AWS 已通過（O5 現況是 **BLOCKED**，不是「待驗證」）。
+- [ ] 測試替身沒有用 `fake_writer` 這個名字覆蓋 `tests/unit/conftest.py` 的同名 fixture；`pipelines/feedback.py` 與 `writing/prompts.py` 只用 Edit 追加自己的區段，沒有動 P44／P47 的程式。
