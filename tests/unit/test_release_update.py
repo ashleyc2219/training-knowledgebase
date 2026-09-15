@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from training_kb.clock import now_utc, to_iso
+from training_kb.clock import to_iso
 from training_kb.content import (
     TutorialContent,
     diff_key,
@@ -31,17 +31,15 @@ from training_kb.content import (
     parse_markdown,
     render_markdown,
 )
-from training_kb.errors import ContentError, CoordinationError, PermanentError, TransientError
+from training_kb.errors import ContentError, PermanentError, TransientError
 from training_kb.keys import META, operation_ref
 from training_kb.models import (
     AuthoringRule,
     Feature,
     Release,
-    RuleStatus,
     StepDraft,
     StepType,
     Tutorial,
-    TutorialStatus,
     TutorialVersion,
 )
 from training_kb.operations import AcceptOperation, OperationCoordinator
@@ -66,6 +64,7 @@ HITS_STEP3 = (StepHit(A, A_V2, 3),)
 
 OLD_STEP3 = "在右上角選擇 Meeting Summary，查看會前摘要。"
 NEW_STEP3 = "在會議頁面右上角選擇 Prepare，查看會前摘要。"
+OLD_STEP2_OF_B = "選擇 Meeting Summary 匯出。"
 NEW_STEP2_OF_B = "在週報頁面選擇 Prepare 匯出摘要。"
 
 
@@ -73,6 +72,12 @@ def rewrite(number: int, text: str, *, feature_id: str = FEATURE,
             step_type: str = "click_ui") -> dict[str, Any]:
     """一筆 `StepRewrite.steps` 元素；四個欄位都是 schema 的 required。"""
     return {"number": number, "text": text, "feature_id": feature_id, "type": step_type}
+
+
+def both_replies() -> dict[str, Mapping[str, Any]]:
+    """兩篇各一份回覆；key 是只出現在該篇 prompt 的步驟原文（見 `FakeWriter`）。"""
+    return {OLD_STEP3: {"steps": [rewrite(3, NEW_STEP3)]},
+            OLD_STEP2_OF_B: {"steps": [rewrite(2, NEW_STEP2_OF_B)]}}
 
 
 def rule(rule_id: str, applies_when: str, *, status: str = "active") -> AuthoringRule:
@@ -117,7 +122,7 @@ def content_b() -> TutorialContent:
         prerequisites=["已登入"],
         steps=[
             StepDraft(number=1, type=StepType.READ, text="打開週報頁面。", feature_id=FEATURE),
-            StepDraft(number=2, type=StepType.CLICK_UI, text="選擇 Meeting Summary 匯出。",
+            StepDraft(number=2, type=StepType.CLICK_UI, text=OLD_STEP2_OF_B,
                       feature_id=FEATURE),
         ],
         expected_outcome="週報摘要已匯出。",
@@ -151,12 +156,14 @@ class JsonCall:
 class FakeWriter:
     """只夠跑 `prepare_update` 的假 Writer（O5 BLOCKED，一次真實 Bedrock 都不會發生）。
 
-    `reply` 是「所有教學共用」的預設回覆；`replies_by_slug` 讓兩篇教學各給一份。
+    `reply` 是「所有教學共用」的預設回覆；`replies_by_marker` 讓兩篇教學各給一份，key 是
+    只會出現在該篇 prompt 裡的字串（`prompt_release_rewrite` 只放命中步驟原文，沒有 slug
+    也沒有 version_id，所以用步驟原文當標記）。
     `request_attempts` 與共用 `RecordingWriter` 同名同義：真的送出去幾次。
     """
 
     reply: Mapping[str, Any] | None = None
-    replies_by_slug: dict[str, Mapping[str, Any]] = field(default_factory=dict)
+    replies_by_marker: dict[str, Mapping[str, Any]] = field(default_factory=dict)
     json_calls: list[JsonCall] = field(default_factory=list)
     request_attempts: int = 0
 
@@ -167,8 +174,8 @@ class FakeWriter:
                       operation_id: str, node: str) -> dict[str, Any]:
         self.request_attempts += 1
         self.json_calls.append(JsonCall(system=system, user=user, schema=schema, node=node))
-        for slug, reply in self.replies_by_slug.items():
-            if slug in user:
+        for marker, reply in self.replies_by_marker.items():
+            if marker in user:
                 return dict(reply)
         if self.reply is None:
             raise AssertionError("FakeWriter 沒有排好回覆")
@@ -525,6 +532,74 @@ def test_assert_unchanged_rejects_a_changed_section() -> None:
     draft = base.model_copy(update={"title": "偷改的標題"})
     with pytest.raises(ContentError, match="段落"):
         assert_unchanged(base, draft, frozenset({3}))
+
+
+# --- Task 2：reason、diff 與本次注入的規則（REL Rule 13、14） ------------------
+
+
+def test_reason_and_rules_come_from_this_run(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter) -> None:
+    """Given 兩條 active 規則（R-007 管 click_ui、R-012 管 read）而命中的第 3 步是 click_ui，
+    When 跑 `prepare_update`，Then `reason` 是 `release:r_42`、`rules_applied` 只有 R-007
+    （REL Rule 14、F29）。"""
+    repo.add_rules([rule("R-007", "click_ui"), rule("R-012", "read")])
+    plans = prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                           operations=ops, operation_id=OPERATION)
+    assert plans[0].reason == "release:r_42"
+    assert plans[0].rules_applied == ("R-007",)
+
+
+def test_diff_only_covers_the_hit_step(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter) -> None:
+    """Given 只命中第 3 步，When 跑 `prepare_update`，
+    Then `tutorials/prepare-meeting/v3.diff` 只有那一步的兩行（REL Rule 13）。"""
+    prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                   operations=ops, operation_id=OPERATION)
+    diff = repo.bucket.objects[diff_key(A, 3)].decode("utf-8")
+    assert [line for line in diff.splitlines()
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))] == [
+        f"-3. (type=click_ui, feature=Prepare) {OLD_STEP3}",
+        f"+3. (type=click_ui, feature=Prepare) {NEW_STEP3}",
+    ]
+
+
+def test_new_version_is_private_and_unpublished(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter) -> None:
+    """Given 一次成功的 UPDATE，When 看寫出來的產物，
+    Then 版本是 `published_at=None`、產物只落在私有 `tutorials/` 前綴（F49、設計 §9.3）。"""
+    plans = prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                           operations=ops, operation_id=OPERATION)
+    version = repo.get_version(plans[0].version_id)
+    assert version is not None and version.published_at is None
+    assert repo.published_version_ids == []
+    assert [key for key in repo.bucket.objects if key.startswith("site/")] == []
+
+
+def test_model_output_ref_is_per_slug_and_recorded_on_the_parent(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter,
+        hits_two_tutorials: tuple[StepHit, ...]) -> None:
+    """Given 一次 Release 命中兩篇教學，When 跑 `prepare_update`，
+    Then 模型輸出各存一份 `rewrite-<slug>.json`、兩份都記在**父** operation 上（00A §6.9）。"""
+    fake_writer.replies_by_marker = both_replies()
+    fake_writer.reply = None
+    prepare_update(RELEASE_R42, hits_two_tutorials, repository=repo, writer=fake_writer,
+                   operations=ops, operation_id=OPERATION)
+    parent = ops.load(OPERATION)
+    assert parent is not None
+    assert list(parent.model_output_refs) == [operation_ref(OPERATION, f"rewrite-{A}"),
+                                              operation_ref(OPERATION, f"rewrite-{B}")]
+    assert json.loads(repo.bucket.objects[operation_ref(OPERATION, f"rewrite-{A}")]
+                      .decode("utf-8"))["steps"][0]["number"] == 3
+
+
+def test_rewrite_node_is_the_fixed_name(
+        repo: UpdateRepository, ops: RecordingCoordinator, fake_writer: FakeWriter) -> None:
+    """Given 一次改寫，When 看 `generate_json` 的 `node`，
+    Then 固定是 `release_rewrite`，而且整個流程只呼叫模型一次（F45）。"""
+    prepare_update(RELEASE_R42, HITS_STEP3, repository=repo, writer=fake_writer,
+                   operations=ops, operation_id=OPERATION)
+    assert [call.node for call in fake_writer.json_calls] == [REWRITE_NODE]
+    assert REWRITE_NODE == "release_rewrite"
 
 
 def test_removed_release_never_enters_update(
