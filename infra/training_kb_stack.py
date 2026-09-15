@@ -71,6 +71,18 @@ DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "d
 """
 
 
+# ---- Phase 54 ----（D-56、D-58：`training-kb-analytics` 的接線由 Phase 54 完成）
+
+ANALYTICS_FUNCTION = "training-kb-analytics"
+ANALYTICS_HANDLER = "training_kb.handlers.analytics.handler"
+"""非 pipeline 的分析入口：不進 Step Functions，維護者用 boto3 `invoke` 呼叫。"""
+
+ANALYTICS_TIMEOUT = Duration.seconds(60)
+"""`metrics` 要掃 VIEW 與 TICKET（`_scan_models` 讀完所有分頁），比 webhook 的 10 秒寬。"""
+
+# ---- Phase 54 結束 ----
+
+
 class TrainingKbStack(Stack):
     """流程 stack；`self.deps_layer` 供 Phase 42／48／52／54 沿用（不各自再做 layer）。"""
 
@@ -131,6 +143,22 @@ class TrainingKbStack(Stack):
         CfnOutput(self, "WebhookFunctionUrl", value=self.webhook_url.url)
         CfnOutput(self, "TicketAnalysisLogGroup", value=self.log_group.log_group_name)
         CfnOutput(self, "PipelineTaskFunctionName", value=self.task_function.function_name)
+
+        # ---- Phase 54 ----（D-58；只用既有的 `_function`／`_grant_data`，不改別人的程式）
+        #
+        # 不開 Function URL、不給 `states:StartExecution`（它不啟動任何 pipeline）、
+        # 不給 `bedrock:InvokeModel`（`metrics` 只讀 `CallTrace`，不呼叫模型）、
+        # 不給 `dynamodb:DeleteItem`（D-79 的那一條只屬於 task function）。
+        #
+        # `_grant_data` 是讀＋寫（`PutItem`／`UpdateItem`、`s3:PutObject`）。本 Phase 自己
+        # **只讀**，多出來的寫入是留給 Phase 55 的 `apply_rule_status` 與
+        # `operations/rules/validated_at.json`：D-58 明定 Phase 55 不再動 CDK，現在不給足
+        # 就會逼它回來改這支共用檔（Phase 54 §7 Task 4、§11 完成清單）。
+        self.analytics_function = self._function(
+            "AnalyticsFunction", ANALYTICS_FUNCTION, ANALYTICS_HANDLER,
+            ANALYTICS_TIMEOUT, base_env)
+        self._grant_data(self.analytics_function, table, bucket)
+        # ---- Phase 54 結束 ----
 
     # --- 私有 helper -----------------------------------------------------------
 
