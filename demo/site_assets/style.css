@@ -1,0 +1,145 @@
+/* 教學站樣式（Phase 57）。
+ *
+ * 只用系統字型與純色：不引外部字型、圖片與任何其他樣式表（設計 §13 的「不連外部資源」，
+ * 而且 S3 website endpoint 只提供 HTTP，混進加密來源會在部分瀏覽器被擋）。
+ */
+
+:root {
+  --ink: #1f2328;
+  --muted: #57606a;
+  --line: #d0d7de;
+  --paper: #ffffff;
+  --notice: #fff8c5;
+  --retired: #fff1e5;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 44rem;
+  padding: 1.5rem 1rem 4rem;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: system-ui, -apple-system, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  line-height: 1.7;
+}
+
+h1 {
+  font-size: 1.6rem;
+  margin: 0 0 0.25rem;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 1.75rem 0 0.5rem;
+  padding-bottom: 0.2rem;
+  border-bottom: 1px solid var(--line);
+}
+
+a {
+  color: #0969da;
+}
+
+p.banner {
+  margin: 0 0 1rem;
+  padding: 0.4rem 0.7rem;
+  background: var(--notice);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+p.version {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+nav.version-switch {
+  margin: 0.75rem 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+nav.version-switch span.current {
+  font-weight: 600;
+}
+
+p.diff-note {
+  margin: 0.5rem 0 1rem;
+  color: var(--muted);
+}
+
+p.retired {
+  margin-top: 2rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--retired);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+p.successor {
+  margin-top: 0.4rem;
+}
+
+article.tutorial-index ul,
+article.site-index ul {
+  padding-left: 1.2rem;
+}
+
+#tkb-widget {
+  margin-top: 2.5rem;
+  padding: 0.8rem 1rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+#tkb-widget h2 {
+  margin-top: 0.25rem;
+  border-bottom: none;
+}
+
+#tkb-widget button {
+  margin-right: 0.35rem;
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+#tkb-widget button[aria-pressed="true"] {
+  border-color: #0969da;
+  font-weight: 600;
+}
+
+#tkb-widget label {
+  display: block;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+#tkb-widget textarea,
+#tkb-widget input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+
+#tkb-widget p.not-sent {
+  margin-bottom: 0.3rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+#tkb-widget p.status {
+  margin-top: 0;
+  font-size: 0.9rem;
+}
