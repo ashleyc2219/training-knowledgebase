@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
+from training_kb.analytics.ratings import average_rating
 from training_kb.config import Thresholds
 from training_kb.errors import ContentError, PermanentError
 from training_kb.ingress import DEFAULT_FEEDBACK_CATEGORIES
@@ -37,9 +38,10 @@ LEASE_TTL_SECONDS = 120
 
 
 # ---- Phase 44（owner）：弱教學門檻與目標選取 ----
-# 交付 `ReviewMode`、`WeakTarget`、`is_weak`、`select_weak_targets` 與兩個 module-private
-# helper（`_average`、`_top_category`）。只讀不寫：不呼叫模型、不建立版本、不判斷證據是否
-# 已處理（那是 Phase 46 的 `evidence_fingerprint`）、不算展示指標（Phase 53／54）。
+# 交付 `ReviewMode`、`WeakTarget`、`is_weak`、`select_weak_targets` 與 module-private 的
+# `_top_category`；平均一律用 Phase 53 的 `average_rating`（00A D-44，單一算法，不自帶副本）。
+# 只讀不寫：不呼叫模型、不建立版本、不判斷證據是否已處理（那是 Phase 46 的
+# `evidence_fingerprint`）、不算展示指標（Phase 53／54）。
 
 ReviewMode = Literal["formal", "demo"]
 """檢視模式：`formal` 是正式門檻，`demo` 是**明示隔離**的展示門檻（設計 §19.2 F20）。
@@ -85,21 +87,6 @@ class WeakTarget:
     version_id: str
     category: str
     feedback_ids: tuple[str, ...]
-
-
-def _average(rated: Sequence[Feedback]) -> float | None:
-    """有評分回饋的平均；一筆評分都沒有回 `None`（不是 0）。
-
-    分母是**有評分**的筆數（00A D-44）：`rating is None` 既不進分子也不進分母。這與
-    Phase 53 的 `analytics.ratings.average_rating` 必須是同一套算法——本 Phase 比它早，
-    不能 import，所以這裡是暫時的本地副本。**P53 完成後改成
-    `from training_kb.analytics.ratings import average_rating` 並刪掉本函式**；在那之前
-    任何一邊改算法都要同步另一邊，否則顯示的平均與判斷用的平均會分岔。
-    """
-    ratings = [row.rating for row in rated if row.rating is not None]
-    if not ratings:
-        return None
-    return sum(ratings) / len(ratings)
 
 
 def _top_category(feedback: Sequence[Feedback],
@@ -164,7 +151,9 @@ def select_weak_targets(*, repository: Repository, mode: ReviewMode, now: dateti
                     if row.ts is not None and row.ts <= now]
         rated = [row for row in feedback if row.rating is not None]
         category, ids = _top_category(feedback, approved)
-        if is_weak(_average(rated), len(rated), len(ids), mode=mode, thresholds=limits):
+        # 分子與分母都吃同一個 `rated`：平均與 n 必須出自同一群回饋（00A D-44）。
+        if is_weak(average_rating(rated), len(rated), len(ids),
+                   mode=mode, thresholds=limits):
             targets.append(WeakTarget(tutorial.slug, version.version_id, category, ids))
     return tuple(sorted(targets, key=lambda target: target.version_id))
 

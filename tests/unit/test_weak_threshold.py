@@ -12,10 +12,11 @@ from datetime import UTC, datetime
 
 import pytest
 
+from training_kb.analytics.ratings import average_rating
 from training_kb.config import Thresholds
 from training_kb.errors import PermanentError
 from training_kb.models import Feedback
-from training_kb.pipelines.feedback import _average, _top_category, is_weak
+from training_kb.pipelines.feedback import _top_category, is_weak
 
 TH = Thresholds()
 NOW = datetime(2026, 9, 14, tzinfo=UTC)
@@ -104,13 +105,17 @@ def test_same_feedback_read_twice_does_not_inflate_the_count() -> None:
 
 
 def test_average_denominator_is_the_rated_feedback_only() -> None:
-    """Given 兩筆有評分、一筆沒評分，When 算平均，Then 分母是 2（00A D-44，與 P53 同算法）。"""
+    """Given 兩筆有評分、一筆沒評分，When 算平均，Then 分母是 2（00A D-44）。
+
+    平均的唯一實作是 Phase 53 的 `average_rating`，本 Phase 只 import 它；這兩條從
+    Phase 44 這一側釘住「門檻判斷用的分母 = 有評分的筆數」，算法被改動時這裡也會紅。
+    """
     rows = [fb("f_12", "找不到按鈕", rating=2), fb("f_15", "找不到按鈕", rating=4),
             fb("f_19", "找不到按鈕", rating=None)]
-    assert _average(rows) == 3.0
+    assert average_rating(rows) == 3.0
 
 
 def test_average_without_any_rating_is_none_not_zero() -> None:
     """Given 全部沒有評分，When 算平均，Then 回 `None`（零評分不是 0 分，設計 §12.1）。"""
-    assert _average([fb("f_12", "找不到按鈕", rating=None)]) is None
-    assert _average([]) is None
+    assert average_rating([fb("f_12", "找不到按鈕", rating=None)]) is None
+    assert average_rating([]) is None
