@@ -50,3 +50,22 @@ def cross_version_average(values: Sequence[float | None]) -> float | None:
     if not present:
         return None
     return sum(present) / len(present)
+
+
+def negative_feedback_ids(
+    feedback: Iterable[Feedback], approved: frozenset[str]
+) -> frozenset[str]:
+    """負面回饋的 **Feedback ID 集合**：`rating <= 2` 或 `category` 屬核定類別表。
+
+    回 `frozenset` 而不是計數，呼叫端就沒有機會把同一筆算兩次（設計 §12.1
+    「同筆同時命中只算一次」）。「待分類」不在核定表裡，所以不計負面；
+    條件是「屬核定類別表」而不是「category 有值」。
+    先判 `rating is not None` 再比較，否則 `None <= 2` 會拋 `TypeError`。
+    """
+    hits: set[str] = set()
+    for item in feedback:
+        low = item.rating is not None and item.rating <= 2
+        flagged = item.category is not None and item.category in approved
+        if low or flagged:
+            hits.add(item.id)
+    return frozenset(hits)
