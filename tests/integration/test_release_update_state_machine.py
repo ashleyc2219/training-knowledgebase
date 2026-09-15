@@ -106,8 +106,13 @@ def repository(settings: Settings, table: Any) -> Repository:
 
 
 @pytest.fixture(scope="module")
-def machine_arn() -> str:
-    """由 `STATE_MACHINE_NAMES` ＋ STS 帳號推導，**不寫死帳號**。"""
+def machine_arn(settings: Settings) -> str:
+    """由 `STATE_MACHINE_NAMES` ＋ STS 帳號推導，**不寫死帳號**。
+
+    刻意依賴 `settings`：它是唯一會 `pytest.skip` 的地方，缺 `TKB_CONTENT_BUCKET` 時
+    整支檔（連只看 Step Functions 的那幾條）都要一起 skip，才與模組 docstring 一致。
+    """
+    assert settings.content_bucket                      # 走過 settings 的 skip 守門
     account = boto3.client("sts", region_name=REGION).get_caller_identity()["Account"]
     return state_machine_arns(region=REGION, account_id=account)[PIPELINE]
 

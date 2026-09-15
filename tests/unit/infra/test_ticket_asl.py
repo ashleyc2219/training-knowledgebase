@@ -258,12 +258,24 @@ def test_only_the_webhook_has_a_public_function_url(template: "Template") -> Non
 
 
 def test_state_machine_logs_to_its_own_group(template: "Template") -> None:
-    """現況核對 2026-09-14（Phase 52 代改）：原本是 `resource_count_is(..., 1)`；每條
-    state machine 各有**自己**的 log group，Phase 48／52 加進來之後數量不再是 1。"""
-    template.has_resource_properties("AWS::Logs::LogGroup", Match.object_like(
-        {"LogGroupName": "/aws/vendedlogs/states/training-kb-ticket-analysis"}))
-    template.has_resource_properties("AWS::StepFunctions::StateMachine", Match.object_like(
-        {"LoggingConfiguration": Match.object_like({"Level": "ALL"})}))
+    """Given `ticket-analysis`，Then 它記到**自己那一個** log group，而且 `Level` 是 ALL。
+
+    現況核對 2026-09-14（Phase 52 代改，修正回合 1）：原本是
+    `resource_count_is("AWS::Logs::LogGroup", 1)`；Phase 48／52 各加一條 state machine 與
+    一個 log group 之後數量不再是 1。改成**用邏輯 ID 把兩邊接起來**，而不是「任一條命中
+    就算過」——後者在三台 machine 共存時會讓「ticket 記到別人的 group」也通過。
+    """
+    groups = template.find_resources("AWS::Logs::LogGroup")
+    ticket_group = next(
+        logical for logical, row in groups.items()
+        if row["Properties"]["LogGroupName"]
+        == "/aws/vendedlogs/states/training-kb-ticket-analysis")
+    machine = next(
+        row for row in template.find_resources("AWS::StepFunctions::StateMachine").values()
+        if row["Properties"]["StateMachineName"] == "training-kb-ticket-analysis")
+    logging = machine["Properties"]["LoggingConfiguration"]
+    assert logging["Level"] == "ALL"
+    assert ticket_group in json.dumps(logging["Destinations"])
 
 
 def test_webhook_secret_comes_from_the_deploy_shell(

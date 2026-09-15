@@ -31,6 +31,7 @@ from training_kb.content import (
 from training_kb.errors import (
     ContentError,
     CoordinationError,
+    ObjectAlreadyExists,
     PermanentError,
     PublishError,
     TransientError,
@@ -660,6 +661,13 @@ def prepare_update(release: Release, hits: Sequence[StepHit], *, repository: Rep
 RETIRE_RECORD_NAME = "retire"
 """退役紀錄的檔名；完整 key 是 `operation_ref(operation_id, 這個值)`（00A §6.6）。"""
 
+PUBLISH_REQUEST_NAME = "publish-request"
+"""整批發布請求的可追溯紀錄；完整 key 是 `operation_ref(operation_id, 這個值)`。
+
+與 P48 `task_prepare_batch` 同一個檔名、同一份內容（`version_ids` ＋ `staged_keys`），
+兩條 pipeline 的 `publish_request_ref` 因此指向同一種物件。**它只是紀錄，不是發布。**
+"""
+
 SUCCESSORS_NAME = "successors"
 """維護者事先放好的 `{slug: successor_slug}`；**事件本身不得指定後繼**（F54）。"""
 
@@ -683,6 +691,13 @@ def retire_for_release(release: Release, hits: Sequence[StepHit], *,
 
     同一篇被兩個步驟命中時只退役一次：先對 `hit.slug` 去重再排序，所以呼叫次數等於**篇數**
     而不是命中步驟數，而且 `retire_tutorial` 本身在無變更時是零次 `update_meta`（冪等）。
+
+    **本函式不是原子的**：第 k 篇失敗時前面 k-1 篇已經是 `retired`，例外往外拋、`task_retire`
+    不會寫 `retire.json`，整次 execution 走 Catch → `PipelineFailed`。重跑同一個
+    `operation_id` 時已退役的那幾篇是零次 `update_meta`（`retire_tutorial` 冪等），所以會
+    走到同一個失敗點再失敗一次——修掉根因（例如 revision 競爭或缺 TUTORIAL item）之前，
+    這條流程不會自己好。刻意不做補償：退役只改兩個欄位、保留全部歷史，半套狀態是可讀的，
+    而「退役到一半就回滾」需要記住哪幾篇本來就是 retired，那份狀態比重跑還危險。
     """
     if release.kind is not ReleaseKind.REMOVED:
         raise PermanentError(f"retire_for_release 只處理 removed，收到 {release.kind}")
@@ -764,8 +779,10 @@ def task_retire(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]
     `prepare`／`inspect`／`commit`、不建立任何新版本。直接用既有的私有方法是
     **本計畫選擇（2026-09-14）**：複製一份索引渲染邏輯遲早會與 `Publisher` 分岔。
 
-    `retire.json` 用條件寫入且**存在就不重寫**：同 `operation_id` 重送要拿回同一份紀錄，
-    `retired_at` 也不會被第二次執行的時鐘改掉。
+    `retire.json` 用條件寫入（`if_none_match=True`）且撞鍵就靜靜通過：同 `operation_id`
+    重送要拿回同一份紀錄，`retired_at` 也不會被第二次執行的時鐘改掉。**不用「先查再寫」**
+    ——兩個 execution 同時跑時那會留下空窗，而且輸家不該因為「別人先寫好了」就進
+    `PipelineFailed`（比照 `asl.save_asl_snapshot` 的處理方式）。
     """
     if state.get("action") != "RETIRE":
         return dict(state)
@@ -780,12 +797,14 @@ def task_retire(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]
     for slug in slugs:
         publisher._write_tutorial_index(slug)      # D-83：只重寫索引頁，不重發版本頁
     ref = operation_ref(operation_id, RETIRE_RECORD_NAME)
-    if repository.get_object(ref) is None:
-        body = [{"slug": slug, "reason": f"release:{release.id}", "retired_at": to_iso(now),
-                 "successor": successors.get(slug)} for slug in slugs]
+    body = [{"slug": slug, "reason": f"release:{release.id}", "retired_at": to_iso(now),
+             "successor": successors.get(slug)} for slug in slugs]
+    try:
         repository.put_object(
             ref, json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8"),
             "application/json", if_none_match=True)
+    except ObjectAlreadyExists:
+        pass          # 已有紀錄就是權威：重送不覆寫，並發的輸家也不該進 PipelineFailed
     return {**state, "result_ref": ref}
 
 
@@ -898,6 +917,12 @@ def task_publish_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSO
     執行走到 `Succeeded`，從外面看不出這次其實沒發布——與設計 §14.2 相反，所以丟
     `PublishError` 交給 Catch（形狀同 `ticket.task_publish_version`）。
 
+    **`publish_request_ref` 指向的物件由本函式親自寫出來**（Phase 52 修正回合 1）：先
+    `prepare`（只寫私有 staging）→ 寫 `operations/<op>/publish-request.json`（`version_ids`
+    ＋ `staged_keys`，`if_none_match=False` 因為內容完全由 `version_ids` 決定）→ 才 `commit`。
+    順序是刻意的：`commit` 失敗時這份「本來要發布什麼」的紀錄仍然留著，P59 的補償重送才有
+    輸入。內容與 P48 `task_prepare_batch` 寫的那一份同形狀。
+
     **不得因為本函式綠燈就宣稱 O3 已通過**（D-80）：整批切換的原子性由維護者的 gate 決定。
     """
     version_ids = state.get("prepared_version_ids")
@@ -908,12 +933,19 @@ def task_publish_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSO
     publisher = Publisher(repository, SiteRenderer(), deps.operations)
     request = PublishRequest(version_ids=tuple(str(one) for one in version_ids),
                              operation_id=operation_id)
-    result = publisher.commit(publisher.prepare(request, now=deps.now()), now=deps.now())
+    prepared = publisher.prepare(request, now=deps.now())
+    ref = operation_ref(operation_id, PUBLISH_REQUEST_NAME)
+    repository.put_object(
+        ref, json.dumps({"version_ids": list(prepared.version_ids),
+                         "staged_keys": list(prepared.staged_keys)},
+                        ensure_ascii=False, sort_keys=True).encode("utf-8"),
+        "application/json", if_none_match=False)
+    result = publisher.commit(prepared, now=deps.now())
     if result.failed is not None:
         raise PublishError(
             f"publish_rejected：{result.failed} 的發布交易條件不符，"
             f"沒有任何欄位被切換（{'；'.join(result.reasons)}）")
-    return {**state, "publish_request_ref": operation_ref(operation_id, "publish-request")}
+    return {**state, "publish_request_ref": ref}
 
 
 def task_update_aliases(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:

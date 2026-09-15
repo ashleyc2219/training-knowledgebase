@@ -233,9 +233,10 @@ class RetireRepository(Repository):
         self.bucket.objects[PUBLIC_SITE_PREFIX + site_key(version_id)] = \
             f"<article>{version_id}</article>".encode()
 
-    def add_feature(self, feature_id: str, *, aliases: tuple[str, ...] = ()) -> None:
-        self.put_meta(Feature(feature_id=feature_id, name=feature_id, aliases=list(aliases),
-                              first_seen=NOW))
+    def add_feature(self, feature_id: str, *, name: str | None = None,
+                    aliases: tuple[str, ...] = ()) -> None:
+        self.put_meta(Feature(feature_id=feature_id, name=name or feature_id,
+                              aliases=list(aliases), first_seen=NOW))
 
     def add_steps(self, version_id: str, feature_id: str) -> None:
         """種 STEP 邊（`REFERENCES#FEATURE#…`）；Phase 27 的反查與 `get_steps` 都靠它。"""

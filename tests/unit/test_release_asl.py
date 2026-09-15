@@ -12,10 +12,14 @@ CDK 的 Template 斷言不在本檔，在 `tests/unit/infra/test_release_machine
 import copy
 import json
 import pathlib
+from collections.abc import Iterator
 from typing import Any
 
+import boto3
 import pytest
+from moto import mock_aws
 from test_release_retire import (
+    FEATURE,
     NOW,
     OPERATION,
     PROJECT,
@@ -24,8 +28,28 @@ from test_release_retire import (
     accepted_operations,
 )
 
-from training_kb.errors import PermanentError, TransientError
-from training_kb.keys import operation_ref
+from training_kb.content import (
+    DIFF_CONTENT_TYPE,
+    MARKDOWN_CONTENT_TYPE,
+    VersionPlan,
+    create_version,
+    diff_key,
+    markdown_key,
+    put_private_artifact,
+    render_markdown,
+)
+from training_kb.errors import PermanentError, PublishError, TransientError
+from training_kb.keys import operation_ref, tutorial_pk
+from training_kb.models import (
+    Feature,
+    ReleaseKind,
+    StepDraft,
+    StepType,
+    Tutorial,
+    TutorialContent,
+    TutorialVersion,
+)
+from training_kb.operations import AcceptOperation, OperationCoordinator
 from training_kb.pipelines.asl import (
     ASL_LOCAL_PATH,
     CATCH,
@@ -45,6 +69,7 @@ from training_kb.pipelines.release import (
     task_publish_batch,
     task_update_aliases,
 )
+from training_kb.repository import Repository
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 ASL_PATH = PROJECT_ROOT / ASL_LOCAL_PATH.format(pipeline="release-update", number=1)
@@ -215,3 +240,213 @@ def test_update_only_tasks_are_no_ops_outside_their_branch(keep_state: dict,
     assert task_prepare_update(state, without_writer)["prepared_version_ids"] == []
     assert task_publish_batch(state, without_writer) == state
     assert task_update_aliases(state, without_writer) == state
+
+
+# --- Task 3 補充（修正回合 1）：UPDATE 分支的三個 Task 真的做事的那一半 ---------
+#
+# review Important 2：原本只有「不是我的分支 → 原樣回傳」的測試。這裡補上
+# `task_update_aliases` 的成功與撞名，以及 `task_publish_batch` 的成功（含
+# `publish_request_ref` 可讀）與交易條件不符。後者需要真的
+# `Repository.transact_write`（走 `table.meta.client`），所以用 moto，形狀照
+# `tests/unit/test_publisher_single.py`。
+
+
+def renamed_state(**extra: Any) -> dict:
+    """`ChooseAction` 判成 UPDATE 之後的 state（只有 ID 與 ref）。"""
+    return {"operation_id": OPERATION, "project_id": PROJECT,
+            "input_ref": operation_ref(OPERATION, "input"), "release_id": "r_42",
+            "feature_id": FEATURE, "action": "UPDATE", "hit_refs": [],
+            "prepared_version_ids": [], **extra}
+
+
+@pytest.fixture
+def alias_repo() -> RetireRepository:
+    """只有一個 Feature `Prepare`（改名前的別名還沒收進去）與 renamed 事件的 canonical 輸入。"""
+    repository = RetireRepository()
+    repository.add_feature(FEATURE)
+    repository.put_object(operation_ref(OPERATION, "input"),
+                          json.dumps(RELEASE_RENAMED.model_dump(mode="json"),
+                                     ensure_ascii=False, sort_keys=True).encode("utf-8"),
+                          "application/json", if_none_match=True)
+    return repository
+
+
+@pytest.fixture
+def alias_deps(alias_repo: RetireRepository) -> Deps:
+    return Deps(operations=accepted_operations(alias_repo, canonical_id="r_42"),
+                now=lambda: NOW, repository=alias_repo)
+
+
+def test_renamed_update_folds_the_old_name_into_aliases(
+        alias_repo: RetireRepository, alias_deps: Deps) -> None:
+    """Given `renamed` 走到 `UpdateAliases`，Then 顯示名稱換掉、舊名收進 aliases、**PK 不變**。"""
+    before = alias_repo.get_feature(FEATURE)
+    result = task_update_aliases(renamed_state(), alias_deps)
+
+    assert result["alias_update"] == {"feature_id": FEATURE, "name": "Prepare",
+                                      "aliases": ["Meeting Summary"]}
+    after = alias_repo.get_feature(FEATURE)
+    assert after is not None and before is not None
+    assert after.feature_id == before.feature_id == FEATURE      # 主鍵不動（D06）
+    assert (after.name, after.aliases) == ("Prepare", ["Meeting Summary"])
+    assert set(result) <= set(RELEASE_STATE_FIELDS)
+
+
+def test_alias_clash_fails_the_task_instead_of_degrading_to_keep(
+        alias_repo: RetireRepository, alias_deps: Deps) -> None:
+    """Given 另一個 Feature 已經叫 `Meeting Summary`，Then `PermanentError` 從 Task 傳出（D07）。
+
+    不降級成 KEEP、也不吞掉：`PermanentError` 一路往外，由 ASL 的 Catch 導向
+    `PipelineFailed`。失敗之後被改名的那個 Feature 一個欄位都沒變（全有或全無）。
+    """
+    alias_repo.add_feature("Legacy", name="Meeting Summary")
+    with pytest.raises(PermanentError, match="Legacy"):
+        task_update_aliases(renamed_state(), alias_deps)
+    unchanged = alias_repo.get_feature(FEATURE)
+    assert unchanged is not None and (unchanged.name, unchanged.aliases) == (FEATURE, [])
+
+
+def test_changed_release_does_not_touch_aliases(
+        alias_repo: RetireRepository, alias_deps: Deps) -> None:
+    """Given `kind=changed`（沒有改名），Then `UpdateAliases` 原樣回傳，Feature 不動。"""
+    changed = RELEASE_RENAMED.model_copy(
+        update={"kind": ReleaseKind.CHANGED, "old_name": None, "new_name": None})
+    alias_repo.put_object(operation_ref(OPERATION, "input"),
+                          json.dumps(changed.model_dump(mode="json"), ensure_ascii=False,
+                                     sort_keys=True).encode("utf-8"),
+                          "application/json", if_none_match=False)
+    state = renamed_state()
+    assert task_update_aliases(state, alias_deps) == state
+    feature = alias_repo.get_feature(FEATURE)
+    assert feature is not None and (feature.name, feature.aliases) == (FEATURE, [])
+
+
+# --- `task_publish_batch`（moto：要真的 `Repository.transact_write`）------------
+
+MOTO_REGION = "us-west-2"
+TABLE_NAME = "training_kb"
+BUCKET_NAME = "training-kb-content"
+SLUG = "prepare-meeting"
+V1, V2 = f"{SLUG}@v1", f"{SLUG}@v2"
+
+
+def publish_content() -> TutorialContent:
+    return TutorialContent(
+        title="準備會議", problem="會議前的準備步驟散在多個頁面，新人找不到。",
+        prerequisites=["已登入工作區"],
+        steps=[StepDraft(number=number, type=StepType.CLICK_UI,
+                         text=f"第 {number} 步。", feature_id=FEATURE)
+               for number in (1, 2)],
+        expected_outcome="會議開始前已備妥議程與摘要。")
+
+
+class RejectingRepository(Repository):
+    """真的 `Repository`，只有 `transact_write` 可以被指定成「條件不符」。
+
+    `reject_index` 是 `None` 時完全走父類別（真的送交易給 moto）；設成 0 就模擬
+    DynamoDB 擋下第一篇的切換——那是**回傳值**不是例外（Phase 07 的契約），所以這是
+    唯一能在不改產品程式的前提下走到 `PublishResult.failed` 的接縫。
+    """
+
+    reject_index: int | None = None
+
+    def __init__(self, table: Any, bucket: Any) -> None:
+        super().__init__(table, bucket)
+        self.bucket = bucket
+
+    def transact_write(self, items: Any) -> int | None:
+        if self.reject_index is not None:
+            return self.reject_index
+        return super().transact_write(items)
+
+
+@pytest.fixture
+def moto_repo() -> Iterator[RejectingRepository]:
+    with mock_aws():
+        table = boto3.resource("dynamodb", region_name=MOTO_REGION).create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "PK", "KeyType": "HASH"},
+                       {"AttributeName": "SK", "KeyType": "RANGE"}],
+            AttributeDefinitions=[{"AttributeName": "PK", "AttributeType": "S"},
+                                  {"AttributeName": "SK", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST")
+        table.wait_until_exists()
+        bucket = boto3.resource("s3", region_name=MOTO_REGION).Bucket(BUCKET_NAME)
+        bucket.create(CreateBucketConfiguration={"LocationConstraint": MOTO_REGION})
+        yield RejectingRepository(table, bucket)
+
+
+@pytest.fixture
+def publish_deps(moto_repo: RejectingRepository) -> Deps:
+    """已發布的 v1 ＋ 由 Phase 23 `create_version` 寫好的未發布 v2（`prepared_version_ids`）。"""
+    moto_repo.put_meta(Feature(feature_id=FEATURE, name=FEATURE, aliases=[], first_seen=NOW))
+    moto_repo.put_meta(Tutorial(slug=SLUG, current_version=None, topic="準備會議",
+                                feature_ids=[FEATURE], status="active",
+                                successor=None, cluster_id=None))
+    moto_repo.put_meta(TutorialVersion(version_id=V1, slug=SLUG, supersedes=None,
+                                       reason="gap:c12", rules_applied=[],
+                                       s3_key=markdown_key(SLUG, 1), published_at=NOW))
+    put_private_artifact(moto_repo, markdown_key(SLUG, 1),
+                         render_markdown(publish_content()), MARKDOWN_CONTENT_TYPE)
+    put_private_artifact(moto_repo, diff_key(SLUG, 1), "", DIFF_CONTENT_TYPE)
+    pk = tutorial_pk(SLUG)
+    moto_repo.update_meta(pk, {"current_version": V1},
+                          expected_revision=moto_repo.revision_of(pk))
+    create_version(VersionPlan(version_id=V2, slug=SLUG, number=2, supersedes=V1,
+                               reason="release:r_42", rules_applied=(),
+                               operation_id=OPERATION), publish_content(), moto_repo)
+    operations = OperationCoordinator(moto_repo)
+    operations.accept(AcceptOperation(operation_id=OPERATION, kind="release-update",
+                                      canonical_id="r_42", project_id=PROJECT, now=NOW))
+    return Deps(operations=operations, now=lambda: NOW, repository=moto_repo)
+
+
+def publish_state() -> dict:
+    return {"operation_id": OPERATION, "project_id": PROJECT,
+            "input_ref": operation_ref(OPERATION, "input"), "release_id": "r_42",
+            "feature_id": FEATURE, "action": "UPDATE", "hit_refs": [f"{V2}#1"],
+            "prepared_version_ids": [V2]}
+
+
+def test_publish_batch_writes_a_readable_publish_request(
+        moto_repo: RejectingRepository, publish_deps: Deps) -> None:
+    """Given 整批發布成功，Then `publish_request_ref` 指向**真的存在**的紀錄物件。
+
+    review Important 1：這個 ref 以前指向一個 release-update 從來沒寫過的 key。
+    內容與 P48 `task_prepare_batch` 同形狀（`version_ids` ＋ `staged_keys`）。
+    """
+    result = task_publish_batch(publish_state(), publish_deps)
+
+    ref = result["publish_request_ref"]
+    assert ref == operation_ref(OPERATION, "publish-request")
+    body = moto_repo.get_object(str(ref))
+    assert body is not None, f"{ref} 不存在"
+    assert json.loads(body.decode("utf-8")) == {
+        "version_ids": [V2],
+        "staged_keys": [f"operations/{OPERATION}/site/tutorials/{SLUG}/v2.diff.txt",
+                        f"operations/{OPERATION}/site/tutorials/{SLUG}/v2.html"]}
+    version = moto_repo.get_version(V2)
+    assert version is not None and version.published_at == NOW
+    tutorial = moto_repo.get_tutorial(SLUG)
+    assert tutorial is not None and tutorial.current_version == V2
+    assert set(result) <= set(RELEASE_STATE_FIELDS)
+
+
+def test_publish_batch_raises_when_the_transaction_is_rejected(
+        moto_repo: RejectingRepository, publish_deps: Deps) -> None:
+    """Given 交易條件不符（`PublishResult.failed` 有值），Then `PublishError` 往外丟。
+
+    回一個看起來正常的 state 會讓執行走到 `Succeeded`，從外面看不出這次其實沒發布
+    （設計 §14.2、F49）。丟出來之後 `current_version` 沒被切、`site/` 沒有新檔。
+    """
+    moto_repo.reject_index = 0
+    with pytest.raises(PublishError, match="publish_rejected"):
+        task_publish_batch(publish_state(), publish_deps)
+
+    tutorial = moto_repo.get_tutorial(SLUG)
+    assert tutorial is not None and tutorial.current_version == V1
+    version = moto_repo.get_version(V2)
+    assert version is not None and version.published_at is None
+    assert [item.key for item in moto_repo.bucket.objects.filter(Prefix="site/")] == []
+    # 失敗之後「本來要發布什麼」仍然留著，P59 的補償重送才有輸入
+    assert moto_repo.get_object(operation_ref(OPERATION, "publish-request")) is not None
