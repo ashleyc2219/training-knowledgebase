@@ -197,8 +197,14 @@ def test_the_import_role_can_describe_only_those_two_machines_executions(
 def test_the_import_role_gets_no_caller_identity(template: Template) -> None:
     """Given 匯入角色／When 檢查禁止清單／Then 沒有 `sts:GetCallerIdentity`。
 
-    ARN 推導那條是 webhook 那支 Lambda 的路徑（P41 的 `_grant_execution_lookup`）；
-    匯入這支用不到，就不給（review 修正回合 1 的 Minor 4）。
+    AWS 文件明示 `sts:GetCallerIdentity` **不需要任何權限**（也無法用 IAM policy 拒絕），
+    所以誰都不必給。
+
+    **現況核對（2026-09-15，修正波 final review C#1）：** 本測試原本的理由寫成「ARN 推導
+    那條是 webhook 那支 Lambda 的路徑（P41 的 `_grant_execution_lookup`），匯入這支用不到
+    就不給」——那個說法暗示 webhook 需要它。實際上匯入的 `ticket`／`release` 分支**也會**
+    走 `ingress._build_wiring` → `get_caller_identity`，兩支都不需要授權；webhook 那條
+    `Resource: "*"` 已經在修正波刪掉（`check_iam` 逐字判 fail）。
     """
     granted = {action for row in import_statements(template) for action in actions(row)}
     assert "sts:GetCallerIdentity" not in granted

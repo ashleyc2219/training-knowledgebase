@@ -429,8 +429,24 @@ def test_handler_rejects_unknown_task():
 
 - [x] **Step 3：建立最小實作**
 
+> **現況核對（2026-09-15，修正波）：下面這段是落地前的示意，與 `src/` 現況有四處不同，
+> 以程式為準（R5）。**
+>
+> 1. `_prepared` **不存在**。review 修正回合 1 就把它拆成 `_prepare_batch`（**只有**
+>    `PrepareBatch` 用，真的跑一次 `Publisher.prepare`）與 `_restored`（`InspectBatch`／
+>    `CommitBatch` 用，從 `publish-request.json` **重建**）——原本三個 Task 各跑一次
+>    `prepare`，`InspectBatch` 的「只讀不寫」是假的。`publish-request.json` 因此多存一個
+>    `prepared_at`，`_restored` 才重建得出逐欄相同的 `PreparedPublish`。
+> 2. `task_commit_batch` 在交易前會先 `_publish_split`（一新一舊 → `PermanentError`）；
+>    整批已發布時要先過 `_assert_finished_here`（修正波 final review A#1）才續寫結果。
+> 3. `_review_result` 把 `candidate_rule_ids`／`prepared_version_ids`／
+>    `published_version_ids` 與既有物件**取聯集**，不像示意這樣直接覆寫（review 修正
+>    回合 1 第 2 項：同一天重送會把當天的發布紀錄整個抹掉）。
+> 4. `_DEPS` 已搬進 `common.deps_for(pipeline)`（修正波 final review A#4／B#3）：
+>    分派層 `pipeline_task_handler` 要用同一份 `Deps` 才記得了 ledger。
+
 ```python
-# src/training_kb/pipelines/feedback.py（續）
+# src/training_kb/pipelines/feedback.py（續；示意，非現況）
 import os
 
 from training_kb.config import load_settings
