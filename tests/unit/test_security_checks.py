@@ -221,7 +221,12 @@ def test_check_secrets_reports_location_without_the_matched_value(repo: Path) ->
 
 
 def test_check_secrets_ignores_documentation_examples(repo: Path) -> None:
-    """Given `docs/` 裡有 `TKB_GITHUB_WEBHOOK_SECRET=s3cr3t-value`／Then 不是 finding。"""
+    """Given `docs/` 的文件範例把 webhook secret 寫成非佔位值／Then 不是 finding。
+
+    （範例字串由 `repo` fixture 以 `SECRET_KEY` 組出來，**不寫在本檔的字面值裡**：
+    寫完整的「鍵名＋賦值符號」會讓本檔變成 `check_secrets` 掃真實 repo 時的 finding，
+    2026-09-15 提交後重跑就是這樣抓到的。）
+    """
     result = check_secrets(repo)
     assert not any("docs/note.md" in item for item in result.findings)
 
