@@ -10,13 +10,16 @@ O7 未到，所以本檔只斷言「已提出（`status=candidate`）」，不�
 行為——狀態轉移是 Phase 55 的事。
 """
 
+import ast
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import training_kb
 from training_kb.errors import ContentError
 from training_kb.keys import rule_pk
 from training_kb.models import AuthoringRule, Feedback, RuleStatus, StepType
@@ -24,6 +27,7 @@ from training_kb.pipelines.feedback import (
     PROPOSE_NODE,
     CandidateGroup,
     candidate_groups,
+    candidate_rule_id,
     propose_candidate,
 )
 from training_kb.writing.prompts import prompt_propose_rule
@@ -178,3 +182,71 @@ def test_only_the_groups_own_comments_reach_the_prompt() -> None:
     _, user = writer.prompts[0]
     assert "第三步沒有指出按鈕在哪一頁與位置" in user
     assert "別組的留言不該進 prompt" not in user
+
+
+def test_rule_id_is_deterministic_and_resend_does_not_repropose() -> None:
+    """Given 同一組證據送兩次，When 提案，Then 同一個 rule_id、一筆規則、只打一次模型。"""
+    twin = CandidateGroup("prepare-meeting@v1", "找不到按鈕",
+                          ("f_1", "f_2", "f_3", "f_4", "f_5"))
+    assert candidate_rule_id(GROUP) == candidate_rule_id(twin) == "R-f6c7a0d2"
+    other = CandidateGroup("prepare-meeting@v2", "找不到按鈕", GROUP.feedback_ids)
+    assert candidate_rule_id(other) == "R-7e16d4f3" != candidate_rule_id(GROUP)
+
+    writer = FakeWriter(LEGAL_PAYLOAD)
+    repository = FakeRepository()
+    rule_id = candidate_rule_id(GROUP)
+    first = propose_candidate(GROUP, writer=writer, repo=repository,
+                              operation_id=OP, rule_id=rule_id)
+    second = propose_candidate(GROUP, writer=writer, repo=repository,
+                               operation_id=OP, rule_id=rule_id)
+    assert first == second
+    assert len(repository.saved) == 1 and writer.calls == [PROPOSE_NODE]
+
+
+def test_rule_id_matches_the_design_example() -> None:
+    """Given 設計 §11.2 的八筆證據，When 算 rule_id，Then 是 00A §6.9 的 R-ad0afde8。"""
+    eight = CandidateGroup(
+        "prepare-meeting@v1", "找不到按鈕",
+        ("f_12", "f_15", "f_19", "f_23", "f_27", "f_31", "f_34", "f_40"))
+    assert candidate_rule_id(eight) == "R-ad0afde8"
+
+
+def test_rating_does_not_change_the_candidate_threshold() -> None:
+    """Given 五筆 rating=5 與四筆 rating=1，When 分組，Then 門檻只看筆數不看評分（F26）。"""
+    happy = [fb(f"f_{n}", "share-summary@v1", "缺少資訊", rating=5) for n in range(1, 6)]
+    assert len(candidate_groups(happy, APPROVED)) == 1
+
+    writer = FakeWriter({"rule": "x", "applies_when": "read",
+                         "evidence": [], "derived_from": ""})
+    too_few = [fb(f"f_{n}", "share-summary@v1", "缺少資訊", rating=1) for n in range(1, 5)]
+    for group in candidate_groups(too_few, APPROVED):
+        propose_candidate(group, writer=writer, repo=FakeRepository(),
+                          operation_id=OP, rule_id=candidate_rule_id(group))
+    assert candidate_groups(too_few, APPROVED) == () and writer.calls == []
+
+
+def _referenced_names(path: Path) -> set[str]:
+    """一支檔在**程式碼**裡定義或引用到的名稱；註解與 docstring 不算（避免誤判）。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            names.add(node.name)
+    return names
+
+
+def test_feedback_review_is_the_only_pipeline_that_proposes_rules() -> None:
+    """Given 其他 pipeline 與 analytics，When 靜態檢查，Then 只有 feedback 提規則（REV Rule 9）。"""
+    package = Path(training_kb.__file__).parent
+    others = [package / "pipelines" / "ticket.py", package / "pipelines" / "release.py"]
+    others += sorted((package / "analytics").glob("*.py"))
+    assert len(others) >= 3
+    for path in others:
+        assert "propose_candidate" not in _referenced_names(path), path
+    assert "propose_candidate" in _referenced_names(package / "pipelines" / "feedback.py")
