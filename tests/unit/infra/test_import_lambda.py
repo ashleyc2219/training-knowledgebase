@@ -20,8 +20,10 @@ from typing import Any
 
 import pytest
 
+from training_kb.content import PUBLIC_SITE_PREFIX
 from training_kb.handlers.github_webhook import SECRET_ENV
 from training_kb.handlers.import_ import IMPORT_DEADLINE_SECONDS
+from training_kb.keys import OPERATIONS_PREFIX
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
@@ -30,7 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import aws_cdk as cdk  # noqa: E402
 from aws_cdk.assertions import Match, Template  # noqa: E402
 
-from infra.training_kb_data_stack import TARGET_INDEX  # noqa: E402
+from infra.training_kb_data_stack import PRIVATE_PREFIXES, TARGET_INDEX  # noqa: E402
 from infra.training_kb_stack import (  # noqa: E402
     CONTENT_BUCKET_CONTEXT,
     IMPORT_FUNCTION,
@@ -147,6 +149,20 @@ def test_the_import_role_reads_and_writes_the_table_and_bucket(template: Templat
     assert {"dynamodb:Query", "dynamodb:BatchGetItem", "dynamodb:ConditionCheckItem"}.isdisjoint(
         granted)
     assert f"/index/{TARGET_INDEX}" not in json.dumps(import_statements(template))
+
+
+def test_the_import_role_cannot_touch_the_public_site(template: Template) -> None:
+    """Given 匯入角色／When 看 S3 資源／Then 只有 `operations/*`，**沒有** `site/*`。
+
+    `_grant_data` 的預設前綴是最寬的那一組（含公開的 `site/`），新的呼叫端必須明寫自己
+    真正需要的最小集合（controller 2026-09-14）。匯入既不寫教學也不發布：`feedback`／
+    `view` 一個 S3 物件都不寫，`ticket`／`release` 只寫 `operations/<op>/input.json`。
+    """
+    resources = json.dumps([row.get("Resource") for row in import_statements(template)])
+    assert f"{OPERATIONS_PREFIX}*" in resources
+    assert PUBLIC_SITE_PREFIX not in resources
+    assert all(prefix not in resources for prefix in PRIVATE_PREFIXES
+               if prefix != OPERATIONS_PREFIX)
 
 
 def test_the_import_role_gets_no_model_and_no_delete(template: Template) -> None:
