@@ -38,6 +38,15 @@
 > - **R8 絕不提交**：`docs/spec/**`、`docs/plan/dev-prompts/phase0914-1.md`、`ticket-to-knowledge-design-doc.md`、`docs/plan/unfinish-claude/`、`cdk.out/`、任何 outputs／憑證檔。
 > - **R10 需要維護者決定的事自己裁決並標「本計畫選擇」**；**R11 安全**：不把任何金鑰、帳號憑證、bucket 內容寫進 repo，`check_secrets` 命中時只印檔案與行號。
 > - **不改 00／00A／00B**（W0 指令 D）：發現它們有錯寫進報告，由 controller 統一處理。
+>
+> **（e）本計畫選擇（2026-09-15，Phase 60 實作）**
+> 1. **`evidence.json` 多一個 `not_run:<原因>` 前綴。** 原文只定義「有值＝pass、`fail:<原因>`＝fail、缺值＝not_run」，但 §7 Task 4 Step 4 又要求「`AWS-MODELS` → `not_run`，證據指 `o5-20260915T030245Z.md`」——缺值就印不出 gate 報告位置。`not_run:` 前綴讓那一列**仍然是 `not_run`**（不進 pass、整體布林仍是 `False`），同時看得到該查哪一份報告。`_row_status` 是唯一判讀處，`tests/unit/test_acceptance.py::test_not_run_prefix_keeps_the_gate_pointer` 站崗。
+> 2. **`check_iam` 與四支 Lambda 核對表拆成兩支函式。** `check_iam(template)` 只做三條硬性規則（簽名照 00A），四支 Lambda 的核對表放 `check_lambda_inventory(template)`；後者**只對 `TrainingKbApp` 跑**——四支 Lambda 全在流程 stack（00A §3.2、D-58），對資料 stack 跑只會產生一筆恆定的 `not_run` 雜訊，看報告的人會以為少了什麼。
+> 3. **新增 `deploy_checklist()`（五項部署前守門）。** `TKB_ENV=prod`、`TKB_FAULT`／`TKB_FAULT_TASK` 未設、layer `is_built()`、`check_asl` 不帶參數退出碼 0、bucket policy 只 `site/*`。前三項是 P59 報告 §7「請 P60 的 `check_secrets`／部署清單列這三項」交下來的，但它們是**部署前**的事、不是金鑰掃描的事，硬塞進 `check_secrets` 會讓那支檢查的 `scope` 說不清楚。`checks teardown` 會把它跟停用清單一起印。
+> 4. **`check_output_safety` 只把惡意文字塞進「不可信」參數。** `VALIDATED_PARAMETERS`（`allowed_features`／`approved`／`rules_block`／`targets`／`version_id`／`feedback_ids`）是 prompts.py 各支 docstring 明寫的「程式產生的已驗證值」，餵乾淨值；其餘（工單原文、回饋留言、步驟文字、改版說明）一律餵 `HOSTILE_TEXT`。理由：核定類別表走 `json.dumps` 不經 `_as_data`，把惡意文字塞進去測到的是「程式自己攻擊自己」，不是注入風險。
+> 5. **`sts:GetCallerIdentity` 的 `Resource: "*"` 記成 `fail`，不放寬核對表。** 見報告第 9 節，交 controller 裁決。
+> 6. **瀏覽器兩列用 Playwright 實際截圖**，存 `docs/plan/report/screenshots/p60-web-{version,retired}.png`，證據欄同時寫截圖路徑與 **HTTP** website endpoint 網址。
+> 7. **P12 spike 殘留 `site/tutorials/spike-a/v2.html`（5 bytes、公開可讀）先記錄再刪除**（controller 2026-09-15 裁決：那是 O3 spike 的一次性物件，不屬於任何教學）。刪除前後狀態見報告第 2 節。其餘 demo 物件（`demo-site-check`、`demo-p52-*`）保留並列進索引。
 
 **目標：** 把四支靜態安全檢查、Snyk 紀錄、Demo 前預演與結束後停用清單，以及 S0–S8 與 147 條 Rule 的證據索引，接成一份可以被人逐項查證的最終驗收；沒有實際執行的項目一律不得標成 green。
 
@@ -246,7 +255,7 @@ Snyk 的界線照設計 §17.1：`snyk test` 掃依賴、`snyk code test` 掃自
 
 ### Task 1：四支靜態檢查與共用結果格式
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/test_security_checks.py
@@ -276,7 +285,7 @@ def test_run_all_treats_not_run_as_failure():
     assert run_all(results) != 0
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_security_checks.py -q
@@ -284,19 +293,19 @@ uv run pytest tests/unit/test_security_checks.py -q
 
 預期：FAIL，訊號包含 `No module named 'infra.scripts.checks'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 `CheckResult` 是 frozen dataclass；`run_all` 印出每筆結果並在出現任何 `fail` 或 `not_run` 時回非 0。`policy_factory`／`template_with_policy` 是同檔的 fixture，各自產生一份只含單一 Allow 陳述的最小 policy 與 CDK template。`check_secrets` 先跑 `git check-ignore .env`（回傳碼 0 才算被忽略，否則列為 finding），再以固定正規表達式掃 `AKIA[0-9A-Z]{16}`、`gh[pousr]_[A-Za-z0-9]{36,}`、`-----BEGIN [A-Z ]*PRIVATE KEY-----`，並確認 `TKB_GITHUB_WEBHOOK_SECRET` 在 repo 內只出現在 `.env.example` 這種只有鍵名的位置、值是佔位字；命中即 `fail` 並只印檔案與行號，不回印命中的字串本身。`check_iam` 的 `s3:ListBucket` 陳述必須帶 `Condition` 的 `s3:prefix`，且值是 `PRIVATE_PREFIXES` 的子集，否則列為 finding。
 
-- [ ] **Step 4：補 `check_output_safety` 並跑綠燈**
+- [x] **Step 4：補 `check_output_safety` 並跑綠燈**
 
 加入惡意文字案例與 prompt 分區案例：斷言渲染輸出不含未跳脫的 `<script`、`onerror=`、`javascript:`；斷言每個 `prompt_<node>` 的 user 段落內 `<source_data>` 與 `</source_data>` 各恰好出現一次，偽造的結束標記已被轉義成 `&lt;/source_data&gt;`。執行 `uv run pytest tests/unit/test_security_checks.py -q`，預期整個檔案全綠。
 
-- [ ] **Step 5：提交** — `git add infra/scripts/checks.py tests/unit/test_security_checks.py` 後 `git commit -m "feat(infra): 四支靜態安全檢查"`。
+- [x] **Step 5：提交** — `git add infra/scripts/checks.py tests/unit/test_security_checks.py` 後 `git commit -m "feat(infra): 四支靜態安全檢查"`。
 
 ### Task 2：Snyk 依賴與 secrets 分開紀錄
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -320,7 +329,7 @@ def test_report_refuses_unsupported_claim():
         render_scan_report([record], claim="secrets scan 通過")
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_security_checks.py -q
@@ -328,21 +337,21 @@ uv run pytest tests/unit/test_security_checks.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'render_scan_report'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 `render_scan_report` 輸出一張表（工具、CLI 版本、指令、掃描範圍、退出碼、退出碼意義、結果摘要），再列已涵蓋與未涵蓋範圍（未涵蓋依字母排序）；`claim` 若宣稱某個範圍而該範圍不在 `covered` 裡就丟 `ValueError`。沒安裝 Snyk 時記 `exit_code=127`、`covered=()`，並回 `CheckResult(name="snyk", status="not_run", ...)`，不改寫成通過。
 
-- [ ] **Step 4：實際執行一次並保存報告**
+- [x] **Step 4：實際執行一次並保存報告**
 
 執行 `uv run python -m infra.scripts.checks scan --out docs/plan/report/snyk-<時間>.md`。預期：報告含 CLI 版本與掃描範圍。若組織沒有 Snyk Code 或 Secrets 權限，報告的「未涵蓋範圍」必須同時列出它們，並把金鑰檢查改指向 Task 1 的 `check_secrets`。
 
 **沒有 Snyk 認證時的替代依賴掃描**（現況核對 2026-09-14，**本計畫選擇**）：本機 `snyk` 是 `1.1307.2` 但沒有 token，`snyk test` 只會回認證錯誤。此時 (1) **仍然**把那一次實際執行記成 `ScanRecord(tool="snyk", ..., exit_code=<實際值>, covered=(), not_covered=("code", "dependencies", "secrets"))` 與 `CheckResult(status="not_run")`；(2) 另外跑一次替代的依賴掃描並記成**第二筆** `ScanRecord`，`tool` 欄位寫實際工具名（例如 `pip-audit`，`uv run --with pip-audit pip-audit` 或 `uv pip audit`；**`pip-audit` 目前未安裝**），沒有網路或工具時改用 GitHub Dependabot／advisory 的查核紀錄。替代工具的紀錄**必須在報告裡明確標「非 Snyk」**，`covered` 只能寫 `dependencies`，`not_covered` 一定含 `secrets` 與 `code`；`render_scan_report` 的 `claim` 拒絕條件照舊生效。**金鑰掃描的結論只能來自 Task 1 的 `check_secrets`，不得由任何依賴掃描代替。**
 
-- [ ] **Step 5：提交** — `git add infra/scripts/checks.py tests/unit/test_security_checks.py` 後 `git commit -m "feat(infra): 分開紀錄 Snyk 依賴與金鑰掃描"`。
+- [x] **Step 5：提交** — `git add infra/scripts/checks.py tests/unit/test_security_checks.py` 後 `git commit -m "feat(infra): 分開紀錄 Snyk 依賴與金鑰掃描"`。
 
 ### Task 3：Demo 前預演與結束後停用清單
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/test_acceptance.py
@@ -362,7 +371,7 @@ def test_teardown_lists_every_resource_to_disable():
         assert any(keyword in item for item in items)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_acceptance.py -q
@@ -370,19 +379,19 @@ uv run pytest tests/unit/test_acceptance.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'rehearse_steps'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 `rehearse_steps` 回傳固定順序的字串：三次不同事件走同一 PROC 並確認 `success_count >= 3`；對 webhook 各送一次正確簽名與一次錯誤簽名的 `curl`，預期一個接受、一個拒絕且不寫入任何業務物件；對 Titan 與 Claude 各做一次小量試呼叫並記下 model／inference profile 與回應摘要；重送同一事件確認不新增版本或樣本。`teardown_checklist` 回傳結束後要逐項處理的資源：停用 EventBridge 排程、關閉或移除 Function URL 與 webhook secret（`TKB_GITHUB_WEBHOOK_SECRET`）、清掉所有環境的 `TKB_FAULT`、決定 `site/` 是否繼續公開、保留或移除表與 bucket 的決策紀錄。
 
-- [ ] **Step 4：實際跑一次預演並保存輸出**
+- [x] **Step 4：實際跑一次預演並保存輸出**
 
 執行 `uv run python -m infra.scripts.checks rehearse`。預期：四項全部印出實際結果。任何一項沒有真的執行就記 `not_run`；費用與 Free Tier 依帳號方案而定，報告不得寫「本次免費」或固定金額。
 
-- [ ] **Step 5：提交** — `git add infra/scripts/checks.py tests/unit/test_acceptance.py` 後 `git commit -m "feat(infra): Demo 預演與停用清單"`。
+- [x] **Step 5：提交** — `git add infra/scripts/checks.py tests/unit/test_acceptance.py` 後 `git commit -m "feat(infra): Demo 預演與停用清單"`。
 
 ### Task 4：V1–V4、S0–S8 與 147 條 Rule 的證據索引
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from infra.scripts.checks import ACCEPTANCE_ROWS, acceptance_report
@@ -407,7 +416,7 @@ def test_missing_evidence_blocks_completion():
     assert "文件 parser 成功不等於 runtime 通過" in text
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_acceptance.py -q
@@ -415,11 +424,11 @@ uv run pytest tests/unit/test_acceptance.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'ACCEPTANCE_ROWS'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 `ACCEPTANCE_ROWS` 由五部分組成，合計 168 列：設計 §3 的四個可見結果（`V1` 缺口產生教學、`V2` 低分教學獲得改善、`V3` 改版不改無關文字、`V4` 已驗證規則用到另一篇教學——`R-007` 轉 active 之後，由 [Phase 58](./58-Phase58-Demo控制台與規則開關預覽.md) 的 `trigger-ticket` 跑一次正常 Ticket Analysis 產生 B 的第一版且 `rules_applied == ["R-007"]`，證據是那一版的 VERSION item 與公開頁，00A D-68）、§16 的九個切片（`S0`–`S8`）、十三份 `.feature` 的 147 條 Rule（`row_id` 用 00B 的縮寫加編號，例如 `RUN#10`、`COL#2`；`收集教學回饋` 一律用 `COL`，不用 `FDB`）、AWS 六列（三條 state machine 各一次真實執行 ARN、webhook 驗簽的兩次 `curl`、`AWS-MODELS` 模型可用性報告）與瀏覽器兩列（公開站的版本頁與退役頁截圖）。每列的 `owner_phase` 抄 00B 第 2 節的 primary Phase、`verify_phases` 抄同一列的「其他相關 Phase」，本 Phase 不重新裁決歸屬。`acceptance_report` 對每列查 `evidence`：有值標 `pass`、值為 `"fail:<原因>"` 標 `fail`、缺值標 `not_run`，逐列印出 `row_id`、描述、追驗 Phase 與證據，最後固定附上一行「文件 parser 成功不等於 runtime 通過」。
 
-- [ ] **Step 3A：把 00B 第 2 節變成可執行的覆蓋檢查**（新增，現況核對 2026-09-14）
+- [x] **Step 3A：把 00B 第 2 節變成可執行的覆蓋檢查**（新增，現況核對 2026-09-14）
 
 147 條 Rule 的覆蓋證據**唯一來源是 [00B](./00B-需求覆蓋對照.md) 第 2 節**：每一列有 `Rule #`、Rule 原文、primary Phase、其他相關 Phase、**可觀察 assertion**（指到 `tests/...` 的檔案，多半連測試函式名都寫了）。本 Phase 要把「這份表存在」變成「這份表可執行」：
 
@@ -430,11 +439,11 @@ uv run pytest tests/unit/test_acceptance.py -q
 
 這一步只讀 00B 與測試樹，**不改 00B、不改任何測試檔**（W0 指令 D、R3.6）。發現 00B 與實際測試檔對不上，寫進報告第 9 節交給 controller，不自行修改 00B。
 
-- [ ] **Step 4：填入實際證據並產出報告**
+- [x] **Step 4：填入實際證據並產出報告**
 
 執行 `uv run python -m infra.scripts.checks acceptance docs/plan/report/evidence.json`。預期：列出每列狀態與統計。只要還有 `not_run`，最終結論必須是「未完成」，不得改成「大致完成」。**依 2026-09-14 的 gate 現況，下列各列一定不會是 `pass`，要如實填**：`AWS-MODELS` 與任何需要 Bedrock 的列 → `not_run`，證據指 `docs/plan/report/o5-20260915T030245Z.md`（**O5 BLOCKED**，附 `ValidationException: Operation not allowed` 原文）；發布切換相關列（`PUB` 4、5、S3 切片、Phase 59 的 recovery 報告列）→ `fail:O3 仍是 FAIL`，證據指 `docs/plan/report/o3-20260914t181109z.md`；Release 與三個手動來源的 `ING` 列 → `not_run`，證據指 `docs/plan/report/o6-mapping.md`（**O6 4 列待核定**）；`V4` 與 `VAL` 3／6 的 O7 列 → 沒有 `demo/seed/approvals/<batch_id>.json` 的維護者核定就 `not_run`；O1 記 provisional、O4 依 P54 的首驗結果填。
 
-- [ ] **Step 5：提交** — `git add infra/scripts/checks.py tests/unit/test_acceptance.py docs/plan/report/evidence.json` 後 `git commit -m "feat(infra): V1-V4、S0-S8 與 147 Rule 證據索引"`。
+- [x] **Step 5：提交** — `git add infra/scripts/checks.py tests/unit/test_acceptance.py docs/plan/report/evidence.json` 後 `git commit -m "feat(infra): V1-V4、S0-S8 與 147 Rule 證據索引"`。
 
 ## 8. 驗收矩陣
 
@@ -490,17 +499,17 @@ uv run pytest tests/unit/test_acceptance.py -q
 
 ## 11. 完成清單
 
-- [ ] 四支靜態檢查都有 `pass`／`fail`／`not_run` 三態，且 `not_run` 讓整體回非 0。
-- [ ] `git check-ignore .env` 的實際結果已記錄；命中疑似金鑰或 `TKB_GITHUB_WEBHOOK_SECRET` 真值時只印位置不印內容。
-- [ ] `check_iam` 的四支 Lambda 核對表與 CDK template 一致，沒有萬用字元 Action／Resource，`s3:ListBucket` 用 `s3:prefix` 限定 `PRIVATE_PREFIXES` 四個前綴。
-- [ ] `check_public` 確認公開的只有 `site/tutorials/...`、`site/index.html` 與 `site/assets/`，且報告把 website endpoint 寫成 HTTP。
-- [ ] `check_output_safety` 依 D-50 核對 `<source_data>` 分區與 `html.escape`，沒有引用不存在的 `SYSTEM_GUARD`。
-- [ ] Snyk dependency 與 secrets 分開記錄工具版本、指令、範圍與退出碼；未跑的範圍標為未涵蓋。
-- [ ] 預演四項（三次同程序成功、兩次驗簽 `curl`、小量模型呼叫、重送）都有實際輸出。
-- [ ] 168 列證據索引齊全（V1–V4、S0–S8、147 條 Rule、AWS 六列、瀏覽器兩列），每列都有 primary 與追驗 Phase，缺證據列為 `not_run`；`V4` 那一列指向 `R-007` 轉 active 後正常產出的 B 第一版（`rules_applied == ["R-007"]`，D-68）。
-- [ ] 結束後停用清單已逐項執行並記錄；報告保留「文件 parser 成功不等於 runtime 通過」。
-- [ ] **147 列的覆蓋檢查可執行（Task 4 Step 3A）**：縮寫與列數用 `grep -c '^\s*Rule:'` 重算過（13 檔合計 147），每列的斷言檔存在且 `pytest --collect-only` 收得到；收不到的列是 `not_run`。
-- [ ] **`check_iam` 只掃 IAM 資源的 `Effect: Allow` 陳述**，沒有被 `enforce_ssl` 產生的 bucket policy `Deny s3:*` 誤判；兩份 template（`TrainingKbDataStack`、`TrainingKbStack`）都掃過，缺的 Lambda 標 `not_run`。
-- [ ] **`check_secrets` 的掃描範圍與排除清單寫進 `CheckResult.scope`**（`git ls-files` 減 `docs/`／`.superpowers/`），`git check-ignore .env` 的實際退出碼已記錄。
-- [ ] **Snyk 沒有認證的事實已如實記錄**（CLI 版本、指令、實際退出碼與錯誤原文、`covered=()`），替代依賴掃描另記一筆並明確標「非 Snyk」；金鑰掃描的結論只引用 `check_secrets`。
-- [ ] **O5 BLOCKED、O3 FAIL、O6 4 列待核定、O7／O4 未到都已如實進索引**，各指向對應 gate 報告；沒有任何未執行的檢查被標成 green。
+- [x] 四支靜態檢查都有 `pass`／`fail`／`not_run` 三態，且 `not_run` 讓整體回非 0。
+- [x] `git check-ignore .env` 的實際結果已記錄；命中疑似金鑰或 `TKB_GITHUB_WEBHOOK_SECRET` 真值時只印位置不印內容。（2026-09-15 實跑：退出碼 0，命中 `.gitignore:10`；追蹤檔零 finding）
+- [ ] `check_iam` 的四支 Lambda 核對表與 CDK template 一致，沒有萬用字元 Action／Resource，`s3:ListBucket` 用 `s3:prefix` 限定 `PRIVATE_PREFIXES` 四個前綴。　**未勾（2026-09-15）：** 四支 Lambda 與 `s3:prefix` 都對得上，但 `TrainingKbApp` 有一條 `sts:GetCallerIdentity` 搭 `Resource: "*"`（`_grant_execution_lookup`），`check_iam` 依核對表判 **fail**。核對表只放行 CloudWatch Logs 建立群組這一個例外，本 Phase **不放寬**；處理方式見報告第 9 節，交 controller 裁決。
+- [x] `check_public` 確認公開的只有 `site/tutorials/...`、`site/index.html` 與 `site/assets/`，且報告把 website endpoint 寫成 HTTP。（2026-09-15 實跑：`aws s3api get-bucket-policy` 讀回的唯一 Allow 就是 `site/*` ＋ `s3:GetObject`；website endpoint 一律寫成 HTTP）
+- [x] `check_output_safety` 依 D-50 核對 `<source_data>` 分區與 `html.escape`，沒有引用不存在的 `SYSTEM_GUARD`。
+- [x] Snyk dependency 與 secrets 分開記錄工具版本、指令、範圍與退出碼；未跑的範圍標為未涵蓋。（2026-09-15 實跑：`snyk test` 退出碼 **3**「No supported files found」且未認證 → `not_run`；替代的 `pip-audit` 退出碼 1，標「非 Snyk」）
+- [ ] 預演四項（三次同程序成功、兩次驗簽 `curl`、小量模型呼叫、重送）都有實際輸出。　**未勾（2026-09-15）：** 三次同程序成功（真表 `PROC#d1ad3cfd19a24c4d success_count=3`）、兩次驗簽（Function URL 200 `ok:true`／`ok:false`）、重送（同一 `operation_id`、執行數不變）三項都有實際輸出；**小量模型呼叫是 `not_run`**（O5 BLOCKED，刻意不對真實 Bedrock 發請求）。
+- [x] 168 列證據索引齊全（V1–V4、S0–S8、147 條 Rule、AWS 六列、瀏覽器兩列），每列都有 primary 與追驗 Phase，缺證據列為 `not_run`；`V4` 那一列指向 `R-007` 轉 active 後正常產出的 B 第一版（`rules_applied == ["R-007"]`，D-68）。**（前半已做到：168 列齊、每列都有 primary 與追驗 Phase；後半未達成——`V4` 只能是 `not_run`，O7 三份核定紀錄仍空，`R-007` 沒有轉 active，也沒有帶 `rules_applied == ["R-007"]` 的 B 第一版。）**
+- [ ] 結束後停用清單已逐項執行並記錄；報告保留「文件 parser 成功不等於 runtime 通過」。　**未勾（2026-09-15）：** 清單已產出（`checks teardown`，六項）並附在報告；**刻意沒有執行**——停用排程／關 Function URL／下架 `site/` 會把 controller 後續複驗要用的資源拆掉，且撤換 webhook secret 是維護者的決定（§全域限制「不代替維護者做資源刪除」）。報告已保留「文件 parser 成功不等於 runtime 通過」。
+- [x] **147 列的覆蓋檢查可執行（Task 4 Step 3A）**：縮寫與列數用 `grep -c '^\s*Rule:'` 重算過（13 檔合計 147），每列的斷言檔存在且 `pytest --collect-only` 收得到；收不到的列是 `not_run`。（2026-09-15 實跑：13 檔重算 147；1688 個 nodeid 全部收得到，**0 條 gap**）
+- [x] **`check_iam` 只掃 IAM 資源的 `Effect: Allow` 陳述**，沒有被 `enforce_ssl` 產生的 bucket policy `Deny s3:*` 誤判；兩份 template（`TrainingKbDataStack`、`TrainingKbStack`）都掃過，缺的 Lambda 標 `not_run`。（四支 Lambda 在 `TrainingKbApp` 都在，`iam-lambda-inventory` 為 `pass`）
+- [x] **`check_secrets` 的掃描範圍與排除清單寫進 `CheckResult.scope`**（`git ls-files` 減 `docs/`／`.superpowers/`），`git check-ignore .env` 的實際退出碼已記錄。
+- [x] **Snyk 沒有認證的事實已如實記錄**（CLI 版本、指令、實際退出碼與錯誤原文、`covered=()`），替代依賴掃描另記一筆並明確標「非 Snyk」；金鑰掃描的結論只引用 `check_secrets`。
+- [x] **O5 BLOCKED、O3 FAIL、O6 4 列待核定、O7／O4 未到都已如實進索引**，各指向對應 gate 報告；沒有任何未執行的檢查被標成 green。
