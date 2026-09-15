@@ -23,6 +23,7 @@ import pytest
 from demo.seed_loader import (
     cluster_demo_tickets,
     load_seed,
+    render_report,
     seed_digest,
     verify_recipe,
 )
@@ -380,3 +381,72 @@ def test_the_seed_digest_ignores_reports_and_approvals(seed_dir: Path) -> None:
                     "observed": None, "tickets": []}, ensure_ascii=False), encoding="utf-8")
     _sign(seed_dir)
     assert seed_digest(seed_dir) == before
+
+
+# --- Task 4：維護者核定紀錄與 O7 報告 ----------------------------------------
+
+ASSIGNMENT = re.compile(r"""(approved_by|approved_at)(["']\]?)?\s*[:=]\s*["'][^"']""")
+"""「把非空字串塞進維護者欄位」的四種寫法：`x = "v"`、`x: "v"`、`d["x"] = "v"`、`{"x": "v"}`。
+
+型別註記（`approved_by: str | None`）、讀取（`record["approved_by"]`）與把讀到的值
+往下傳（`approved_by=signed_by`）都不會命中——右邊必須是**非空的字串字面值**才算賦值。"""
+
+
+def test_o7_is_not_ready_until_a_human_signs_every_batch(seed_dir: Path) -> None:
+    """Given 三批都沒簽名 When verify_recipe Then schema 與重算通過，O7 仍然未完成。"""
+    report = verify_recipe(load_seed(seed_dir))
+    assert report.schema_ok and report.recompute_ok
+    assert report.o7_ready is False
+    assert set(report.missing_approvals) == {"R007-B1", "R012-B1", "R012-B2"}
+    assert report.approved_batch_ids == ()
+
+
+def test_approval_file_keeps_the_four_human_fields(seed_dir: Path) -> None:
+    """Given 三份核定紀錄 When 逐份讀 Then 四個維護者欄位與合成聲明都在，而且目前是空的。"""
+    paths = sorted((seed_dir / "approvals").glob("*.json"))
+    assert [path.stem for path in paths] == ["R007-B1", "R012-B1", "R012-B2"]
+    for path in paths:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        assert set(record) >= {"approved_by", "approved_at", "seed_commit",
+                               "recipe_report_sha256", "statement"}
+        assert record["synthetic"] is True
+        assert "合成" in record["statement"]
+        assert [record[field] for field in
+                ("approved_by", "approved_at", "seed_commit", "recipe_report_sha256")] == [""] * 4
+
+
+def test_a_missing_approved_by_field_is_a_missing_approval_not_an_error(
+    seed_dir_missing_approved_by: Path,
+) -> None:
+    """Given 核定檔少了 approved_by When load_seed Then 不丟錯，只是那一批未核定。"""
+    report = verify_recipe(load_seed(seed_dir_missing_approved_by))
+    assert report.missing_approvals == ("R012-B2",)
+    assert report.approved_batch_ids == ("R007-B1", "R012-B1")
+    assert report.o7_ready is False
+
+
+def test_no_code_path_ever_assigns_the_maintainer_fields() -> None:
+    """Given demo/ 與 src/ 的全部 Python When 搜尋核定欄位 Then 只有讀取，沒有賦值。
+
+    這是 Phase 文件 §7 Task 4 Step 3 那條 `rg` 的自動化版本：核定欄位由程式填入即視為造假
+    （設計 §18 O7），所以守門要一直站著，不是做過一次就算。
+    """
+    root = SEED_SOURCE.parents[1]
+    scanned = 0
+    for path in sorted([*(root / "demo").rglob("*.py"), *(root / "src").rglob("*.py")]):
+        scanned += 1
+        hit = ASSIGNMENT.search(path.read_text(encoding="utf-8"))
+        assert hit is None, f"{path}：{hit.group(0) if hit else ''}"
+    assert scanned >= 2
+
+
+def test_the_committed_recipe_report_says_o7_is_incomplete() -> None:
+    """Given repo 裡的 recipe-report.txt When 讀最後一行 Then 是「O7 = 未完成（缺維護者核定）」。
+
+    報告**不得**出現「O7 已通過」這類結論式措辭（Phase 文件 §9）。
+    """
+    text = (SEED_SOURCE / "recipe-report.txt").read_text(encoding="utf-8")
+    assert text.startswith("[合成資料示範] batch=demo-seed-01 synthetic=true")
+    assert text.rstrip().splitlines()[-1] == "O7 = 未完成（缺維護者核定）"
+    assert "O7 已通過" not in text
+    assert text == render_report(load_seed(SEED_SOURCE), verify_recipe(load_seed(SEED_SOURCE)))
