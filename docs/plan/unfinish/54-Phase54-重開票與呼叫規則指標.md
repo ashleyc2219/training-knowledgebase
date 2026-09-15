@@ -35,6 +35,16 @@
 > - **R6／R7／R9**：逐 Task 紅燈→綠燈並留證據；報告寫 `docs/plan/report/phases/2026-09-14-Phase54-REP.md`；不派 subagent。
 > - 全套 gate：`uv run pytest tests -q -W error`、`uv run ruff check src tests infra`、`uv run ruff format --check src tests infra`、`uv run mypy`（strict，`files = ["src", "infra"]`——`analytics/*.py`、`handlers/analytics.py` 與 `infra/training_kb_stack.py` 都在範圍內，每個函式都要完整型別註記；測試檔不在範圍內）。測試檔 basename 全專案唯一（tests 沒有 `__init__.py`）：`test_reopen_metrics.py`、`test_rule_and_call_metrics.py`、`infra/test_analytics_stack.py` 三個名字目前都沒被占用。
 
+> **實作結果與本計畫選擇（2026-09-14，Phase 54 落地）：**
+>
+> 1. **`Template` 斷言確定降級為包含式。** 落地當下 Phase 42 尚未把 `training-kb-import` 加進 stack（`grep training-kb-import infra/training_kb_stack.py` 無結果），合成出來只有三支具名 Lambda。`tests/unit/infra/test_analytics_stack.py` 因此斷言「`training-kb-analytics` 存在且 handler 正確」而不是四支的字典等號（(b)2 的降級條款）；**沒有**刪任何別的 Phase 的資源或測試。
+> 2. **§11 的「補 Phase 48 的名稱集合斷言」未做。** `tests/unit/test_feedback_review_flow.py` 在本 Phase 落地時**還不存在**（Phase 48 排在 W3），controller 2026-09-14 指示不要動 Phase 48 的測試檔、由 Phase 48 自己寫四支 Lambda 名稱。(b)6 的例外授權因此用不上。
+> 3. **Phase 43 的 `approved_categories` 用「延後解析＋退回空集合」。** (b)7 只說單元測試不受影響，但本 Phase 依 controller 指示**真的部署並 invoke** 了這支 Lambda，模組層 import 一個還不存在的名稱會讓它連載入都失敗。**本計畫選擇：** `handlers/analytics.py::_approved_categories` 用 `importlib` 在 `_wiring()` 裡解析 `training_kb.ingress.approved_categories`，取不到就回 `frozenset()`；Phase 43 一落地就自動取到真的那一份，不需要任何人回來改。退回值刻意**不**抄一份 `DEFAULT_FEEDBACK_CATEGORIES`（那會製造第二個權威）。
+> 4. **IAM 給讀＋寫，範圍只有 table（含 `by_target`）與 `operations/`。** 同波次有人把 `_grant_data` 改成收 `prefixes`／`actions`／`with_index`，本 Phase 跟著給自己的 `ANALYTICS_PREFIXES = (OPERATIONS_PREFIX,)` 與 `ANALYTICS_DDB_ACTIONS`（`GetItem`／`Query`／`Scan` ＋ `PutItem`／`UpdateItem`）。**本計畫選擇：** controller dispatch 寫「只讀 table／bucket 所需最小權限」，但 D-58 與 §11 完成清單要求「權限已涵蓋 Phase 55 的寫入、Phase 55 不再動 CDK」；兩者衝突時依 R5 以 00A 為準，所以兩個寫動作與 `operations/` 前綴現在就給。沒有給的：`DeleteItem`、`bedrock:InvokeModel`、`states:StartExecution`、`BatchGetItem`、`ConditionCheckItem`、`tutorials/`／`site/` 前綴、Function URL。
+> 5. **`cdk deploy` 真的做了**（controller 指示）：`TrainingKbApp --exclusively`，`training-kb-analytics` 已在 us-east-1 上線並 `aws lambda invoke` 過 `action: "metrics"`。表裡只有一個 VERSION（`demo-site-check@v1`）、沒有 FEEDBACK 也沒有 VIEW，所以回應是 `average: null`／`rate: null`，**如實記錄**（報告 §4）。
+> 6. **gate 不含 `ruff format --check`**（COMMON.md §1 覆蓋本文件 (d) 最後一行）：既有程式沒有經過 ruff format，共用檔不得整檔重格式化。
+> 7. **`cross_version_average` 不進 `metrics_action`。** 它是 Phase 53 給 Phase 58 的跨版工具；本 Phase 的回應只有 `{"action", "results"}`，不自行彙總（多組 rate 的彙總在 O4 核定前明文禁止）。
+
 **目標：** 在 O4 建議的 `[p, p+14 天)` UTC 窗口下重算同題重開票筆數與比率、規則狀態計數、規則套用次數與真實 Bedrock 呼叫數，組成 `VersionMetrics`，並建立 `training-kb-analytics` 的 Lambda 入口。
 
 **架構：** `reopen_stats`、`rule_counts`、`applied_count`、`bedrock_call_count` 都是純函式；`version_metrics` 是唯一讀 Repository 的組裝函式，把 Phase 53 的評分指標與本 Phase 的重開票指標合成同一份結果；`handler` 只做 action 分派與外部資源接線，交 Phase 55 判定、Phase 58 顯示。
@@ -210,7 +220,7 @@ viewers = {user} 的大小                   | author 在 viewers 內？     否
 
 ### Task 1：O4 窗口與端點
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from datetime import UTC, datetime, timedelta
@@ -237,7 +247,7 @@ def test_reopen_window_rejects_naive_datetime():
 
 窗口只回一組端點，不自己判斷成員資格；右端不含由 Task 2 的 `ticket.ts == p + 14 天` 案例斷言。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_reopen_metrics.py -q
@@ -245,7 +255,7 @@ uv run pytest tests/unit/test_reopen_metrics.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'reopen_window'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def reopen_window(published_at: datetime, days: int = 14) -> tuple[datetime, datetime]:
@@ -256,7 +266,7 @@ def reopen_window(published_at: datetime, days: int = 14) -> tuple[datetime, dat
     return start, start + timedelta(days=days)
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_reopen_metrics.py -q
@@ -264,7 +274,7 @@ uv run pytest tests/unit/test_reopen_metrics.py -q
 
 預期：兩個測試 PASS；另確認全 repo 只有此函式出現 `timedelta(days=14)`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/analytics/reopen.py tests/unit/test_reopen_metrics.py
@@ -273,7 +283,7 @@ git commit -m "feat(analytics): 依 O4 建議定義重開票窗口"
 
 ### Task 2：分子分母去重與六種邊界
 
-- [ ] **Step 1：建立設計 §11.3 的重算測試**
+- [x] **Step 1：建立設計 §11.3 的重算測試**
 
 ```python
 from training_kb.analytics.reopen import ReopenStats, reopen_stats
@@ -301,7 +311,7 @@ def test_reopen_stats_reproduces_design_v1_seven_over_ten():
     assert stats == ReopenStats(count=7, reopen_users=7, viewers=10, rate=0.7)
 ```
 
-- [ ] **Step 2：確認紅燈後補六個邊界測試**
+- [x] **Step 2：確認紅燈後補六個邊界測試**
 
 ```bash
 uv run pytest tests/unit/test_reopen_metrics.py -q
@@ -318,7 +328,7 @@ uv run pytest tests/unit/test_reopen_metrics.py -q
 | 窗外時間 | `ticket.ts == p + 14 天`；另一筆 `ticket.ts == p` | 前者不計（右不含）；後者需先有更早 view 才計。 |
 | 零瀏覽者 | `views = []`、`tickets` 非空 | `viewers == 0`、`rate is None`。 |
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 `ReopenStats` 的 dataclass 定義逐字照第 5 節 Produces（`frozen=True`、四個欄位），這裡只列新增的函式。
 
@@ -341,7 +351,7 @@ def reopen_stats(views: Sequence[TutorialView], tickets: Sequence[Ticket], *,
     return ReopenStats(len({row.id for row in hits}), len(users), viewers, rate)
 ```
 
-- [ ] **Step 4：加上 v2 案例並跑完整檔案**
+- [x] **Step 4：加上 v2 案例並跑完整檔案**
 
 ```python
 P2 = datetime(2026, 8, 20, tzinfo=UTC)
@@ -363,7 +373,7 @@ uv run pytest tests/unit/test_reopen_metrics.py -q
 
 預期：全部 PASS；`rate` 沒有任何路徑回 `0.0` 代替 `None`。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/analytics/reopen.py tests/unit/test_reopen_metrics.py
@@ -372,7 +382,7 @@ git commit -m "feat(analytics): 重算同題重開票筆數與比率"
 
 ### Task 3：規則狀態計數、套用次數與呼叫數
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 `record` 的七個鍵就是 Phase 15 的 `TRACE_FIELDS`，一個不多一個不少；四筆分別是 embedding、同一個 node 的兩次 generation attempt（先暫時性失敗再成功）與 Rote 的 `tool_use`。
 
@@ -430,7 +440,7 @@ def test_bedrock_call_count_counts_every_real_attempt():
     assert bedrock_call_count(trace, operation_id="op-2") == 0
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_rule_and_call_metrics.py -q
@@ -438,7 +448,7 @@ uv run pytest tests/unit/test_rule_and_call_metrics.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'rule_counts'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def rule_counts(rules: Iterable[AuthoringRule]) -> dict[str, int]:
@@ -456,7 +466,7 @@ def bedrock_call_count(trace: CallTrace, *, operation_id: str | None = None) -> 
     return trace.count(operation_id=operation_id)
 ```
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/unit/test_rule_and_call_metrics.py -q
@@ -464,7 +474,7 @@ uv run pytest tests/unit/test_rule_and_call_metrics.py -q
 
 預期：三個測試皆 PASS；`rule_counts` 的三個鍵在空輸入時仍然存在。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/analytics/rules_metrics.py tests/unit/test_rule_and_call_metrics.py
@@ -473,7 +483,7 @@ git commit -m "feat(analytics): 計算規則狀態、套用次數與真實呼叫
 
 ### Task 4：組成 `VersionMetrics`、建立 analytics Lambda 入口並接進 CDK
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 寫在 `tests/unit/test_reopen_metrics.py`，沿用 Task 2 的 `view`／`ticket`／`P1`／`V1`。`FakeRepo` 只回設計 §11.2／§11.3 的 A v1 配方，沒有任何 AWS 相依；兩個建構參數讓「未發布」與「缺 `cluster_id`」各自成為一個案例。
 
@@ -557,7 +567,7 @@ def test_stack_wires_the_analytics_lambda():
 
 （現況核對 2026-09-14：這個**字典等號**同時要求 Phase 41 已建 `infra/training_kb_stack.py` 與 Phase 42 已加 `training-kb-import`。輪到本 Phase 時若 Phase 42 尚未落地，改成包含式斷言——`handlers["training-kb-analytics"] == "training_kb.handlers.analytics.handler"` 加上 `resource_count_is("AWS::Lambda::Url", 1)`——並在報告寫明降級原因；**不得**為了讓等號成立去刪別的 Phase 的資源或測試。）
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_reopen_metrics.py -q
@@ -565,7 +575,7 @@ uv run pytest tests/unit/test_reopen_metrics.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'version_metrics'`。
 
-- [ ] **Step 3：建立 `version_metrics` 與 `metrics_action`**
+- [x] **Step 3：建立 `version_metrics` 與 `metrics_action`**
 
 `published_at is None`（未發布）或 `Tutorial.cluster_id is None` 時直接回零分母結果，不憑空造窗口。`VersionMetrics` 的 dataclass 定義逐字照第 5 節 Produces（`frozen=True`、六個欄位）。
 
@@ -608,7 +618,7 @@ def metrics_action(event: dict, *, repository, approved: frozenset[str],
                                              project_id=project_id)) for value in version_ids]}
 ```
 
-- [ ] **Step 4：建立 Lambda 入口並跑綠燈**
+- [x] **Step 4：建立 Lambda 入口並跑綠燈**
 
 `handler` 不 try／except：`PermanentError` 要原樣往外丟，呼叫端才看得到失敗原因。
 
@@ -676,7 +686,7 @@ AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 command npx aws-cdk@2 synth --
 
 預期：全部 PASS，且 `handler({"action": "validate_rules"}, None)` 在 Phase 55 完成前一律 `PermanentError`；`cdk synth` 產出的 template 恰有四支具名 Lambda、沒有新增 state machine。`cdk` 是 Node.js 套件，指令**不加** `uv run`（00A §3.1、D-22）。CDK 環境尚未建立時先完成 Phase 01／09／41，不要把「目前跑不了」寫成已通過。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 # 現況核對 2026-09-14：不要 `git add src/training_kb/analytics/`（那會把 Phase 53 的
@@ -744,15 +754,15 @@ Rule 原文逐字取自 `.feature` 原檔；primary／相關的歸屬依 [00B �
 
 ## 11. 完成清單
 
-- [ ] `reopen_window` 是全 repo 唯一定義十四天窗口的地方，且標明 O4 待核定。
-- [ ] 窗口左右端點各有測試；`ticket.ts == p + 14 天` 不計入。
-- [ ] 分子、分母各自以 user 去重，`count` 以 Ticket ID 去重，三者分開輸出。
-- [ ] 先開票後瀏覽、重複瀏覽、多次開票、不同 cluster、窗外時間各有獨立測試。
-- [ ] 零分母回 `rate=None`，沒有任何路徑產生 0%；分母不接受 Feedback。
-- [ ] `applied_count` 由 `rules_applied` 重建去重，`bedrock_call_count` 轉呼 `CallTrace.count`。
-- [ ] `version_metrics` 對未發布或缺 `cluster_id` 的版本回零分母結果，不猜測時間。
-- [ ] `handlers/analytics.py::handler` 已建立、只認得 `action: "metrics"`，未知 action 在接線前就丟 `PermanentError`（D-56）。
-- [ ] `infra/training_kb_stack.py` 已加入 `training-kb-analytics`（handler `training_kb.handlers.analytics.handler`、無 Function URL、無 `states:StartExecution`），並有 `Template` 斷言；權限已涵蓋 Phase 55 的寫入（D-58）。
-- [ ] Phase 48 的 Lambda 名稱集合斷言（`tests/unit/test_feedback_review_flow.py`）已補上 `training-kb-analytics`，且只動那一行。
-- [ ] CDK 沿用 Phase 41 的相依 layer／bundling（COMMON R2），沒有另做一套；`cdk synth` 以 `command npx aws-cdk@2` 實際跑過。
-- [ ] 文件與測試都沒有把 7／2 當成百分比，也沒有宣稱 O4 已核定。
+- [x] `reopen_window` 是全 repo 唯一定義十四天窗口的地方，且標明 O4 待核定。
+- [x] 窗口左右端點各有測試；`ticket.ts == p + 14 天` 不計入。
+- [x] 分子、分母各自以 user 去重，`count` 以 Ticket ID 去重，三者分開輸出。
+- [x] 先開票後瀏覽、重複瀏覽、多次開票、不同 cluster、窗外時間各有獨立測試。
+- [x] 零分母回 `rate=None`，沒有任何路徑產生 0%；分母不接受 Feedback。
+- [x] `applied_count` 由 `rules_applied` 重建去重，`bedrock_call_count` 轉呼 `CallTrace.count`。
+- [x] `version_metrics` 對未發布或缺 `cluster_id` 的版本回零分母結果，不猜測時間。
+- [x] `handlers/analytics.py::handler` 已建立、只認得 `action: "metrics"`，未知 action 在接線前就丟 `PermanentError`（D-56）。
+- [x] `infra/training_kb_stack.py` 已加入 `training-kb-analytics`（handler `training_kb.handlers.analytics.handler`、無 Function URL、無 `states:StartExecution`），並有 `Template` 斷言；權限已涵蓋 Phase 55 的寫入（D-58）。
+- [ ] Phase 48 的 Lambda 名稱集合斷言（`tests/unit/test_feedback_review_flow.py`）已補上 `training-kb-analytics`，且只動那一行。**未做（BLOCKED，延後到 Phase 48）**：本 Phase 落地時該檔**還不存在**（Phase 48 排在 W3），controller 2026-09-14 指示「不要動 P48 的測試檔，P48 自己會寫四支 Lambda 名稱」。
+- [x] CDK 沿用 Phase 41 的相依 layer／bundling（COMMON R2），沒有另做一套；`cdk synth` 以 `command npx aws-cdk@2` 實際跑過。
+- [x] 文件與測試都沒有把 7／2 當成百分比，也沒有宣稱 O4 已核定。
