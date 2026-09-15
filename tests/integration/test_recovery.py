@@ -519,7 +519,7 @@ def test_batch_before_transaction_has_no_resume_input(world: World,
 
     單篇沒有這個問題：`allocate_version` 已經把版號寫進同一筆 ledger
     （見 `test_resume_before_transaction_runs_the_normal_commit`）。
-    真實 AWS 的同一組觀察在 `docs/plan/report/recovery-20260915-0644.md` §9 切點 4a。
+    真實 AWS 的同一組觀察在 `docs/plan/report/recovery-20260915-0644.md` **附錄 A.4**。
     """
     parent = "op-release-r_batch"
     version_ids = tuple(world.build_version(f"op-release-r_{slug}", slug)
@@ -682,7 +682,12 @@ def _cleanup(world: World, table: Any, bucket: Any, saved_index: bytes | None) -
     """清掉**本次 run** 的 item 與物件；刪不掉的由報告列出來交人工處理。
 
     過濾用 `world.prefix`（帶 run id）而不是共同的 `p59-`：並發的另一次演練不該被清掉。
+
+    **開頭一定要擋掉空的 `prefix`**：`World.__init__` 的預設值是 `""`，而空字串是**每一個**
+    key 的子字串——對預設 `World` 呼叫本函式會把真實 table 與 bucket 整個刪掉。
+    這道守門比它擋下的錯誤便宜太多。
     """
+    assert world.prefix, "拒絕以空的 prefix 清理：那會刪掉真實 table／bucket 的所有內容"
     for entity in ("TUTORIAL", "VERSION", "FEATURE", "STEP", "RULE", "OPS"):
         for item in world.repository.scan_entity(entity, meta_only=False):
             if world.prefix in f"{item.get('PK', '')}{item.get('SK', '')}":
@@ -760,3 +765,20 @@ def test_real_aws_create_version_cut_points(aws_world: World,
     assert version_id == f"{slug}@v2"                     # 沒有新版號（O2 PASS）
     assert world.operation(operation_id).version_id == version_id
     assert len(world.repository.get_steps(version_id)) == 4
+
+
+def test_cleanup_refuses_an_empty_prefix() -> None:
+    """Given 預設 `World`（`prefix == ""`），Then `_cleanup` 在刪任何東西之前就擋下來。
+
+    空字串是每一個 key 的子字串，所以 `world.prefix in key` 會對**全部** item 與物件成立
+    ——真跑下去等於清空真實 table 與 bucket。這條測試用會在被呼叫時直接失敗的假物件，
+    證明守門在**任何一次刪除之前**就生效（不是刪到一半才發現）。
+    """
+    class Explode:
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError(f"守門失效：不該碰到 {name}")
+
+    empty = World.__new__(World)            # 不進 __init__，只設守門要看的欄位
+    empty.prefix = ""
+    with pytest.raises(AssertionError, match="拒絕以空的 prefix 清理"):
+        _cleanup(empty, Explode(), Explode(), None)
