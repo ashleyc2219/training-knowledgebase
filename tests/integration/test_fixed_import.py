@@ -18,8 +18,10 @@ prepare-meeting   status 由 fixture 決定、current_version=@v2
 """
 
 import json
+import logging
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -27,7 +29,7 @@ import pytest
 from training_kb import ingress
 from training_kb.clock import to_iso
 from training_kb.config import DEFAULT_PROJECT_ID
-from training_kb.errors import PermanentError
+from training_kb.errors import IngressError, PermanentError, TransientError
 from training_kb.handlers import import_
 from training_kb.ingress import (
     import_feedback,
@@ -645,3 +647,177 @@ def test_the_handler_hands_its_writer_to_the_feedback_import(
     assert isinstance(results, list) and results[0]["status"] == "saved"
     assert saved_feedback(active_repo, "f_50").category == "缺少資訊"
     assert writer.request_attempts == 1
+
+
+# --- review 修正回合 1：重送的冪等收尾與 handler 的批次語意 ----------------------
+
+
+def _flaky(target: object, name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """讓某個方法**第一次**丟 `TransientError`，之後照常——模擬寫到一半斷掉。"""
+    real = getattr(target, name)
+    seen = {"calls": 0}
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        seen["calls"] += 1
+        if seen["calls"] == 1:
+            raise TransientError(f"{name} 第一次中斷")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(target, name, flaky)
+
+
+def test_feedback_whose_edge_write_failed_is_finished_on_resend(
+        active_repo: Repository, operations: OperationCoordinator,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given `put_meta` 成功、`put_edge` 斷掉／When 重送／Then 補上邊並關掉 operation。
+
+    一筆回饋是**兩筆寫入**（metadata item ＋ `REFERS_TO` 邊）。舊版在這個狀態下重送會走
+    duplicate 短路，邊永遠補不回來——而 `list_feedback_of_version` 只走 `by_target` GSI，
+    沒有邊就等於這筆回饋永遠查不到，ledger 也永遠停在 `accepted`。
+    """
+    _flaky(active_repo, "put_edge", monkeypatch)
+    with pytest.raises(TransientError):
+        import_feedback(FEEDBACK, repository=active_repo, operations=operations, now=NOW)
+    operation_id = operation_id_for("feedback", "f_12")
+    stranded = operations.load(operation_id)
+    assert active_repo.get_meta(feedback_pk("f_12"), Feedback) is not None  # item 寫進去了
+    assert active_repo.list_feedback_of_version(V1) == []                   # 但查不到
+    assert stranded is not None and stranded.status == "accepted"
+
+    again = import_feedback(FEEDBACK, repository=active_repo, operations=operations, now=NOW)
+
+    assert (again.status, again.object_id) == ("duplicate", "f_12")
+    assert [item.id for item in active_repo.list_feedback_of_version(V1)] == ["f_12"]
+    finished = operations.load(operation_id)
+    assert finished is not None and finished.status == "done"
+
+
+def test_resending_a_finished_feedback_adds_no_second_edge(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 已經完整寫好的回饋／When 再送兩次／Then 邊仍然只有一條（收尾是冪等的）。"""
+    for _ in range(3):
+        import_feedback(FEEDBACK, repository=active_repo, operations=operations, now=NOW)
+    rows = [str(row["SK"]) for row in active_repo.query_pk(feedback_pk("f_12"))]
+    assert sorted(rows) == ["META", f"REFERS_TO#{version_pk(V1)}"]
+    assert len(active_repo.list_feedback_of_version(V1)) == 1
+
+
+def test_a_resent_feedback_keeps_the_stored_version_not_the_new_payload(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 同一個 ID 改指 `@v2` 重送／When 匯入／Then 不會長出第二條邊（以表裡的現況為準）。
+
+    `put_meta(create_only=True)` 讓表裡的那一筆說了算，所以重送的收尾也要用它的
+    `tutorial_version`，不是這次 payload 解出來的。
+    """
+    import_feedback(FEEDBACK, repository=active_repo, operations=operations, now=NOW)
+    again = import_feedback({**FEEDBACK, "tutorial_version": V2}, repository=active_repo,
+                            operations=operations, now=NOW)
+    assert again.status == "duplicate"
+    assert [str(row["SK"]) for row in active_repo.query_pk(feedback_pk("f_12"))
+            if str(row["SK"]) != "META"] == [f"REFERS_TO#{version_pk(V1)}"]
+    assert active_repo.list_feedback_of_version(V2) == []
+
+
+def test_view_whose_operation_never_closed_is_finished_on_resend(
+        active_repo: Repository, operations: OperationCoordinator,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given View 的 item 寫好了但 `complete` 斷掉／When 重送／Then operation 補成 `done`。"""
+    _flaky(operations, "complete", monkeypatch)
+    with pytest.raises(TransientError):
+        import_view(VIEW, repository=active_repo, operations=operations, now=NOW)
+    pk = view_pk(V1, "u_01", datetime(2026, 8, 2, 9, 0, tzinfo=UTC))
+    operation_id = operation_id_for("view", parse_pk(pk)[1])
+    stranded = operations.load(operation_id)
+    assert stranded is not None and stranded.status == "accepted"
+
+    again = import_view(VIEW, repository=active_repo, operations=operations, now=NOW)
+
+    assert (again.status, again.object_id) == ("duplicate", pk)
+    finished = operations.load(operation_id)
+    assert finished is not None and finished.status == "done"
+    assert len(active_repo.list_views_of_version(V1)) == 1
+
+
+def test_handler_checks_every_item_shape_before_writing_anything(
+        wired_handler: Repository) -> None:
+    """Given 第二筆不是物件／When 呼叫 handler／Then 整批 `PermanentError`，第一筆也沒寫。
+
+    形狀檢查要**全部做完**才進寫入迴圈：邊檢查邊寫的話前面那幾筆已經進表了，與
+    「一筆都不寫」矛盾（review 修正回合 1 的 Important 2）。
+    """
+    before = every_key(wired_handler)
+    with pytest.raises(PermanentError, match=r"items\[1\]"):
+        import_.handler({"kind": "feedback", "items": [FEEDBACK, "壞掉的一筆"]}, None)
+    assert every_key(wired_handler) == before
+    assert wired_handler.list_feedback_of_version(V1) == []
+
+
+def test_a_ticket_item_that_fails_normalization_only_rejects_itself(
+        wired_handler: Repository, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 三筆 ticket、中間那筆正規化丟 `IngressError`／When 呼叫／Then 只有它 `rejected`。
+
+    與 `feedback`／`view` 同一種語意：資料不合法只拒那一筆，其他筆照做（F51）。
+    """
+    calls = {"n": 0}
+
+    def fake(**kwargs: Any) -> list[Acceptance]:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise IngressError("Ticket 必填欄位不完整", ("author",))
+        return [_acceptance(f"op-ticket-t_{calls['n']}")]
+
+    monkeypatch.setattr(import_, "normalize_then_accept", fake)
+    body = import_.handler({"kind": "ticket", "items": [TICKET_ITEM] * 3}, None)
+    results = body["results"]
+    assert isinstance(results, list)
+    assert [row["status"] for row in results] == ["saved", "rejected", "saved"]
+    assert results[1]["invalid_fields"] == ("author",)
+    assert results[1]["object_id"] is None
+
+
+def test_the_whole_batch_shares_one_deadline(
+        wired_handler: Repository, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 一批三筆 ticket／When 呼叫 handler／Then 三筆拿到**同一個** deadline。
+
+    舊版在 `_import_one` 內每筆重算 `monotonic() + 300`，那個期限永遠不會到；
+    期限必須在 handler 進入時算一次就往下傳（比照 `handlers/github_webhook.py`）。
+    """
+    seen: list[float] = []
+
+    def fake(**kwargs: Any) -> list[Acceptance]:
+        seen.append(float(kwargs["deadline"]))
+        return [_acceptance(f"op-ticket-t_{len(seen)}")]
+
+    monkeypatch.setattr(import_, "normalize_then_accept", fake)
+    import_.handler({"kind": "ticket", "items": [TICKET_ITEM] * 3}, None)
+    assert len(seen) == 3 and len(set(seen)) == 1
+
+
+def test_the_deadline_prefers_the_lambda_remaining_time(
+        wired_handler: Repository, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given context 報告只剩 5 秒／When 呼叫 handler／Then 期限用那 5 秒，不是 300 秒。"""
+    class _Context:
+        def get_remaining_time_in_millis(self) -> int:
+            return 5_000
+
+    seen: list[float] = []
+
+    def fake(**kwargs: Any) -> list[Acceptance]:
+        seen.append(float(kwargs["deadline"]) - monotonic())
+        return [_acceptance("op-ticket-t_1")]
+
+    monkeypatch.setattr(import_, "normalize_then_accept", fake)
+    import_.handler({"kind": "ticket", "items": [TICKET_ITEM]}, _Context())
+    assert 0 < seen[0] <= 5.0
+
+
+def test_the_handler_logs_only_counts(
+        wired_handler: Repository, caplog: pytest.LogCaptureFixture) -> None:
+    """Given 一批回饋／When 呼叫 handler／Then log 只有 kind、來源與計數，沒有 payload。"""
+    with caplog.at_level(logging.INFO, logger=import_.__name__):
+        import_.handler({"kind": "feedback", "source": "widget-download",
+                         "items": [FEEDBACK, {**FEEDBACK, "rating": True}]}, None)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("saved=1" in line and "rejected=1" in line for line in messages), messages
+    for line in messages:
+        assert "u_01" not in line and "prepare-meeting" not in line
