@@ -176,11 +176,21 @@ alias 更新是一次全有或全無的檢查：先組出目標 `aliases = (舊 
 
 掃描全表 Feature 時，`scan_entity("FEATURE")` 回的是 raw item，而 `entity` 屬性等於 PK 前綴，所以同一個 `FEATURE#…` 起點的邊與它同前綴。[Phase 08](08-Phase08-分頁查詢與一致讀取基礎.md) 的 `meta_only` **預設就是 `True`**（00A §6.3），邊不會進來；固定寫法仍是先濾掉 `SK != META` 的列再交給 Phase 08 的 `item_to_model`（與 Phase 27 的 `_meta_models` 同一套，呼叫端改傳 `meta_only=False` 時這層過濾仍然正確）。直接 `Feature.model_validate(item)` 會因為 `PK`／`SK`／`entity`／`_revision` 被 strict 模型拒絕。
 
+**本計畫選擇（2026-09-14，實作時裁決）：**
+
+1. **`fake_writer` 是區域 fixture。** `tests/unit/test_release_locate_feature.py` 內定義 `ScoredWriter` 並用同名 `fake_writer` fixture 覆寫 `tests/unit/conftest.py` 的 P15 `RecordingWriter`（該檔依 COMMON.md R3.6 只有 P55 能改）。`cosine_for` 的鍵只要是候選文字的**子字串**就算命中，所以測試可以直接用 `feature_id` 當鍵；一段文字對到兩個鍵直接 `AssertionError`。`tests/unit/test_release_alias_update.py` 自備一份只含 `scan_entity`／`revision_of`／`update_meta` 的 `FakeRepository`，兩個檔案**不共用**替身（tests 目錄沒有 `__init__.py`，跨檔 import 不可靠；P50 也各自定義自己的）。
+2. **`_lookup_keys` 用原字串去重**（照 §6 的片段）：第 1 層本來就是完全相同比對，正規化只在第 2 層做。
+3. **語意層對 0 個候選短路**：`features` 為空就直接回 `None`，省掉查詢那一次 `embed`，「表裡零個 Feature」也不算成一次 Bedrock attempt。
+4. **`update_feature_aliases` 的 aliases 用 `sorted`**，重跑寫出去的 byte 相同。
+5. **語意層兩個 `node` 名稱抽成模組常數** `LOCATE_QUERY_NODE = "locate_feature_query"`、`LOCATE_CANDIDATE_NODE = "locate_feature_candidate"`（§7 的片段寫成字面值），讓 call trace 與測試共用同一份字串。
+6. **`update_meta` 的 `aliases` 先宣告成 `list[DynamoValue]` 再傳**：mypy strict 下 `list` 不變，`list[str]` 不相容 `list[DynamoValue]`；寫法與 `repository.py:930`（`applied_to`）一致。
+7. **`normalize_feature_name` 用 `casefold()` 而不是 `lower()`**，字串**中間**的空白刻意不壓縮（`Feature.bare_id` 本來就允許中間空白，多做壓縮會讓比對比模型還寬鬆）。
+
 ## 7. TDD Tasks
 
 ### Task 1：鎖定三層定位順序與 0.85 門檻
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_alias_hit_does_not_call_the_model(fake_repo, fake_writer, renamed_release):
@@ -205,9 +215,9 @@ def test_semantic_match_needs_at_least_the_threshold(fake_repo, fake_writer, cha
 
 （現況核對 2026-09-14：這個帶 `cosine_for`／`embed_calls` 的 `fake_writer` **不是**共用 fixture。`tests/unit/conftest.py` 的 `RecordingWriter` 只有 `calls`／`replies`／`request_attempts` 與固定的 `FIXED_EMBEDDING`，而該檔依 COMMON.md R3.6 **只有 P55 可以修改**。請在 `tests/unit/test_release_locate_feature.py` 內自備一個區域 fixture（同名覆寫即可，pytest 以最近的定義為準），不要改 conftest，也不要讓 P50 的測試檔依賴它。）
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_release_locate_feature.py -q` 並確認紅燈**，訊號包含 `cannot import name 'locate_feature'`。
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_release_locate_feature.py -q` 並確認紅燈**，訊號包含 `cannot import name 'locate_feature'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from training_kb.config import Thresholds
@@ -245,7 +255,7 @@ def _normalized_match(features, keys):
     return hits[0] if hits else None
 ```
 
-- [ ] **Step 4：補語意層並跑完整檔案**
+- [x] **Step 4：補語意層並跑完整檔案**
 
 ```python
 def _semantic_match(features, keys, *, writer, operation_id):
@@ -273,7 +283,7 @@ def locate_feature(release, *, repository, writer, operation_id):
 
 `features` 已依 `feature_id` 升序排序，加上嚴格 `>` 比較，同分時固定選 `feature_id` 最小者。執行 `uv run pytest tests/unit/test_release_locate_feature.py -q`，預期 alias 命中零模型呼叫、`0.8499` 不命中、`0.85` 命中、同分固定勝者全部 PASS。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/release.py tests/unit/test_release_locate_feature.py
@@ -282,7 +292,7 @@ git commit -m "feat(release): 三層定位改版功能"
 
 ### Task 2：alias 撞名拒絕且主鍵不變
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_alias_update_keeps_primary_key_and_moves_old_name(fake_repo):
@@ -300,9 +310,9 @@ def test_alias_clash_rejects_the_whole_update(fake_repo):
     assert fake_repo.updated_pk is None
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_release_alias_update.py -q` 並確認紅燈**，訊號包含 `cannot import name 'update_feature_aliases'`。
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_release_alias_update.py -q` 並確認紅燈**，訊號包含 `cannot import name 'update_feature_aliases'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def update_feature_aliases(feature, *, old_name, new_name, repository):
@@ -330,9 +340,9 @@ def update_feature_aliases(feature, *, old_name, new_name, repository):
 
 `revision_of(pk)` 是 Phase 06 指定的唯一取值來源；它讀的是 item 上的 `_revision`，不是 `revision`，呼叫端也讀不到這個屬性，所以不能自己組 `query_pk`。`_all_features` 的掃描一定要在 `update_meta` **之前**全部跑完：先寫再檢查就會留下「name 已改、alias 撞名」的半套資料。
 
-- [ ] **Step 4：跑 `uv run pytest tests/unit/test_release_alias_update.py -q` 確認綠燈。** 另補三個案例：`new_name` 原本就在 aliases 中（必須被移除）、同一輸入呼叫兩次結果完全相同、只有大小寫不同的撞名也要被拒絕（例如既有 alias 是 `prepare`、新名稱是 `Prepare`，同一個 Feature 自己的要被移除，別的 Feature 的要丟 `PermanentError`）。
+- [x] **Step 4：跑 `uv run pytest tests/unit/test_release_alias_update.py -q` 確認綠燈。** 另補三個案例：`new_name` 原本就在 aliases 中（必須被移除）、同一輸入呼叫兩次結果完全相同、只有大小寫不同的撞名也要被拒絕（例如既有 alias 是 `prepare`、新名稱是 `Prepare`，同一個 Feature 自己的要被移除，別的 Feature 的要丟 `PermanentError`）。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/release.py tests/unit/test_release_alias_update.py
@@ -341,7 +351,7 @@ git commit -m "feat(release): 安全更新功能別名"
 
 ### Task 3：用真實 Repository 驗證一致讀取與條件更新
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -376,7 +386,7 @@ def test_stale_expected_revision_cannot_overwrite(repository):
 
 `repository` 是 Phase 06 的整合 fixture（名稱沿用 Phase 06，不要改叫 `repo`）。setup 用 `put_meta` 寫入三筆 Feature：`Prepare` 是 §2 的改版**前**狀態（`name="Meeting Summary"`、`aliases=[]`），`Share`、`Notify` 的 `name` 與 `feature_id` 相同且沒有 alias；`renamed_release` 與 Task 1 相同。第一個測試證明「改完立刻用舊名找得回同一個節點」全程走基表一致讀取，`NoWriter` 保證它不是靠語意層矇對；第二個測試證明這條寫入路徑真的走樂觀鎖，不是後到的覆蓋先到的。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/integration/test_release_feature_lookup.py -q
@@ -384,11 +394,11 @@ uv run pytest tests/integration/test_release_feature_lookup.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'locate_feature'` 或 `fixture 'repository' not found`。
 
-- [ ] **Step 3：把單元測試用的假 Repository 換成真的**
+- [x] **Step 3：把單元測試用的假 Repository 換成真的**
 
 不新增產品程式：`locate_feature`／`update_feature_aliases` 的實作已在 Task 1、Task 2 完成，本 Task 只補整合 fixture 與 setup 資料。`scan_entity` 與 `query_pk` 一律用預設的 `consistent=True`，**不得**改走最終一致的 `query_by_target`；`expected_revision` 一律由 `repository.revision_of(pk)` 取得。
 
-- [ ] **Step 4：跑完整檔案確認綠燈**
+- [x] **Step 4：跑完整檔案確認綠燈**
 
 ```bash
 uv run pytest tests/integration/test_release_feature_lookup.py -q
@@ -398,7 +408,7 @@ uv run pytest tests/integration/test_release_feature_lookup.py -q
 
 （現況核對 2026-09-14：原寫「保存 `aws dynamodb get-item --consistent-read` 的原始輸出當證據」——本檔跑在 **moto** 上，產不出真實帳號的輸出。真實 AWS 的 `FEATURE#Prepare` 逐欄比對**移交 P52 §6 證據表**（COMMON.md R1：這一批的真實 AWS 集中在 P41／P48／P52／P57／P59／P60）。**O5 現況是 BLOCKED**，所以語意定位**不新增**真實 Bedrock 整合案例——不寫 `xfail(strict=True)`（那會變成第 12 個站崗 xfail 且與 O5 的 `aws` marker 機制重複），改為在報告寫明「語意層只有假向量單元測試，O5 BLOCKED」。不得改用假向量宣稱語意路徑已驗證。）
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add tests/integration/test_release_feature_lookup.py
@@ -447,10 +457,10 @@ git commit -m "test(release): 真實表驗證定位與條件更新"
 
 ## 11. 完成清單
 
-- [ ] `normalize_feature_name`、`locate_feature`、`update_feature_aliases` 的名稱與簽名符合本文件。
-- [ ] 三層定位順序固定，前兩層命中時零次 Bedrock 呼叫。
-- [ ] `0.8499` 與 `0.85` 兩個邊界各有直接 assertion，平手依 `feature_id` 升序。
-- [ ] 改名後 Feature PK 與 `feature_id` 完全未變。
-- [ ] alias 撞名整次拒絕，且沒有任何部分寫入。
-- [ ] `REL` Rule 2、3、4 有直接 assertion，Rule 15 有資料結果。
-- [ ] 未把 FakeWriter 的 PASS 說成 Bedrock、O5 或 O6 已通過。
+- [x] `normalize_feature_name`、`locate_feature`、`update_feature_aliases` 的名稱與簽名符合本文件。
+- [x] 三層定位順序固定，前兩層命中時零次 Bedrock 呼叫。
+- [x] `0.8499` 與 `0.85` 兩個邊界各有直接 assertion，平手依 `feature_id` 升序。
+- [x] 改名後 Feature PK 與 `feature_id` 完全未變。
+- [x] alias 撞名整次拒絕，且沒有任何部分寫入。
+- [x] `REL` Rule 2、3、4 有直接 assertion，Rule 15 有資料結果。
+- [x] 未把 FakeWriter 的 PASS 說成 Bedrock、O5 或 O6 已通過。
