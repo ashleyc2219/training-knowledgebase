@@ -91,7 +91,7 @@ O7 = 未完成（缺維護者核定）
 
 維護者簽好 `demo/seed/approvals/*.json` 後，最後兩行才會變成 `approvals=PASS` 與 `O7 = 三條件齊備`。程式永遠不會自己把 `approvals` 變成 PASS。
 
-（現況核對 2026-09-14：上面是**最終樣貌**。本批（W1、P54 未落地）實際輸出的是評分類四項 OK、重開票四項 `actual=n/a` 與 `PENDING(P54)`，`recompute=PARTIAL`；最後一行仍然是 `O7 = 未完成（缺維護者核定）`。**不得**把 `PARTIAL` 印成 `PASS`。）
+（**實作核對 2026-09-15，取代上一行的 W0 註記：上面就是實際輸出**——八個數值、`schema=PASS  recompute=PASS  approvals=MISSING(...)` 與最後一行都相符（只有右欄的空白寬度略有不同）。P54 的 `reopen_stats` 已經落地，所以八項全部算得出來、`recompute=PASS`。W0 當時預期的 `actual=n/a` 與 `recompute=PARTIAL` **沒有發生**。最後一行仍然是 `O7 = 未完成（缺維護者核定）`，因為三批核定全缺；輸出存在 `demo/seed/recipe-report.txt`。）
 
 ## 3. 名詞小抄
 
@@ -116,6 +116,18 @@ O7 = 未完成（缺維護者核定）
 | 測試 | `tests/integration/test_demo_clustering.py` | O5 通過後的真實 embedding 分群證據；O5 BLOCKED 時 `@pytest.mark.aws` 自動 skip。 |
 
 **（現況核對 2026-09-14）讓 `demo` 可以被 import。** 實測：`uv run pytest` 時專案根目錄**不在** `sys.path`（`pyproject.toml` 的 `[tool.setuptools.packages.find] where = ["src"]` 只安裝 `training_kb`），所以 `import demo` 會 `ModuleNotFoundError`。既有專案對 `infra/` 的做法是在測試檔頂端手動插路徑（`tests/unit/test_data_stack.py`、`tests/unit/test_check_models.py`）。**本計畫選擇：** 在 `pyproject.toml` 的 `[tool.pytest.ini_options]` 加一行 `pythonpath = ["."]`（pytest 8 內建支援，不需要外掛），讓 `demo` 與 `infra` 一起變成可 import；理由是本 Phase 與 P58 共七支測試檔都要 import `demo`，逐檔複製 `sys.path` 樣板會讓同一段程式碼出現七次。`pyproject.toml` 是共用檔，只用 Edit、只加這一行（R3）。同時把 `demo` 加進 `mypy` 的 `files`（`files = ["src", "infra", "demo"]`）與 lint 指令（`uv run ruff check src tests infra demo`），理由是 `demo/seed_loader.py` 會被 P58 的 `cli.py` import，是實際執行路徑，不是一次性腳本；若 W1 時 mypy 對 `demo` 紅燈且不是本 Phase 造成的，改為維持 `files = ["src", "infra"]` 並在報告寫明（COMMON.md R10）。
+
+**（實作核對 2026-09-15）§4 與 §5 與實作的七處差異，都是「本計畫選擇（2026-09-14）」：**
+
+1. **`SeedBundle` 多一個 `contents: tuple[TutorialContent, ...]` 欄位。** §5 的 Produces 草圖只列了九個實體與 `batches`，但每個版本的 Title／Problem／Prerequisites／Expected Outcome 是**種子資料**，不能由程式生成——那等於把配方藏進程式碼，維護者就無法逐檔核對（§8 的人工驗收）。落點：四段文字放 `versions.json` 的 `content` 區塊、步驟放 `steps.json`，`load_seed` 合成 `TutorialContent`。00A §6.9 只訂 `verify_recipe(bundle) -> RecipeReport` 的簽名，沒有訂 `SeedBundle` 的欄位，所以這不違反契約。
+2. **`versions.json` 的每一筆是 `{"version": {...}, "content": {...}}`**，不是攤平的欄位：`TutorialVersion` 是 `extra="forbid"`，攤平就得在解析前先 pop 四個鍵，不如把兩者分開放得明白。
+3. **`batches.json` 的 `approved_by`／`approved_at` 是空字串，`load_seed` 把它們讀成 `None`。** §6.6 要求留空字串，但 `SeedBatch.approved_by` 的型別是 `str | None`，而 `evaluate_batch` 判「已核定」看的是 `is not None`——空字串會讓未核定的批次被判成已核定。所以批次的核定值**只從 `approvals/<batch_id>.json` 讀**：四個欄位都非空且 `seed_commit` 等於目前十份種子檔的 SHA-256 才填進 `SeedBatch`，否則兩個欄位都是 `None`。
+4. **`clustering_report.json` 比 §6.7 的樣板多四個欄位**：`_notice`（合成聲明，與十份種子檔一致）、`operation_id`、`model_id`（人工核對時要知道打的是哪一顆模型），以及 `upstream`——記 botocore `ClientError` 的訊息原文。產品程式（`BedrockWriter`）刻意只保留錯誤碼（message 可能回聲使用者輸入），但 §6.7 要求 BLOCKED 報告帶錯誤原文，而這支腳本的輸入是版控在 repo 裡的合成工單文字、沒有使用者資料，所以在腳本端從例外鏈補記一次。
+5. **`tests/integration/test_demo_clustering.py` 同時放 moto 與 `aws` 兩段。** 00A §3.3 只配給本 Phase 一個整合測試檔名，而 `apply_seed` 需要真的 `Repository`（`verify_version_complete` 要查基表與 S3）。上半段是 moto、不標 marker；下半段標 `@pytest.mark.aws`。
+6. **兩個真實 Titan 測試另外標 `xfail(strict=False)`。** 只標 `aws` 的話，設了 `TKB_RUN_AWS_INTEGRATION=1` 的人會看到「測試失敗」而不是「O5 BLOCKED」；`strict=False` 讓它在 O5 開通後 xpass，提醒把標記拿掉。**skip 與 xfail 都不等於 PASS。**
+7. **`apply_seed` 補寫 `FEEDBACK#<id> --REFERS_TO--> VERSION#<version_id>` 邊，並用 `now` 擋未來時間。** 前者是 `Repository.list_feedback_of_version` 的唯一索引（與 `ingress._complete_feedback` 同一條邊），少了它指標一筆都掃不到；後者把 §全域限制的「模擬 `published_at` 只用於歷史回放」變成可執行的檢查——晚於載入時間的版本一律 `ContentError`。
+
+**本計畫選擇（2026-09-14）：不把種子施作到真實 `training_kb` 表。** 理由三條：（a）本 Phase 不在 controller R1 的六個實機 Phase 名單內，§全域限制也明寫「不部署 AWS 資源」；（b）種子含一條 `status=active` 的 `R-012` 與四篇 `published_at` 非空的教學，寫進共用表會改變 P59／P60 真實執行時 `rules_for_content` 取到的規則集合，也可能讓 P57 的站台索引重建把合成教學放上公開 `site/`；（c）`TrainingKbData` 的 data role 只允許 `SK begins_with APPLIED_TO#` 的 `DeleteItem`（D-79），約 180 筆 item 無法用產品路徑清理。P58 的 dashboard 不需要真實表——它 import `demo/seed_loader.py`，`load_seed` ＋ `verify_recipe` 就拿得到全部數字；真的要真實資料時，一行 `apply_seed(load_seed(Path("demo/seed")), repository=..., now=clock.now_utc())` 即可，風險與清理成本由維護者決定。
 
 ## 5. 固定介面
 
@@ -329,7 +341,15 @@ demo/scripts/cluster_demo_tickets.py
 
 > **Task 排序與缺件處理（現況核對 2026-09-14 新增）**
 >
-> 本 Phase 排在 **W1**，而 §5 Consumes 裡 P43／P53／P54／P55 的名稱分別落在 W1／W2／W3。實作時依下列順序處理，**不得自己另寫一份平均或重開票公式**（00A §6.9：同一個指標只能有一份實作；P44 的例外是 00A D-44 明文授權的，本 Phase 沒有這個授權）：
+> **（實作核對 2026-09-15）下面整張「缺件處理」表已經不適用。** 實際排程把本 Phase 放在
+> P43／P53／P54／P55 **之後**，四份模組都已經在 `src/` 裡，所以：八個 `RecipeCheck` 全部算得出來
+> （**沒有** `xfail` 佔位）、`batches.json` 直接載成 P55 的 `SeedBatch`（**不是**暫時性的 `dict`）、
+> `negative_feedback_ids` 的 `approved` 直接
+> `from training_kb.ingress import DEFAULT_FEEDBACK_CATEGORIES`（**沒有**模組層常數 `_SEED_CATEGORIES`）。
+> 唯一仍然成立的是那句紅字：`demo/` 底下不得有第二份平均或十四天窗口——守門
+> `rg -n "days=14|timedelta" demo/` 實測**無命中**。
+>
+> 本 Phase 原排在 **W1**，而 §5 Consumes 裡 P43／P53／P54／P55 的名稱分別落在 W1／W2／W3。實作時依下列順序處理，**不得自己另寫一份平均或重開票公式**（00A §6.9：同一個指標只能有一份實作；P44 的例外是 00A D-44 明文授權的，本 Phase 沒有這個授權）：
 >
 > | 缺件 | 誰產出 | 波次 | Task 1–2 的處理 |
 > |---|---|---|---|
@@ -342,7 +362,7 @@ demo/scripts/cluster_demo_tickets.py
 
 ### Task 1：種子 schema 與載入
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 在 **`tests/unit/test_seed_recipe.py` 自己檔案裡**（現況核對 2026-09-14：原寫「`tests/unit/conftest.py` 追加」，但那支檔這一批只有 P55 可以動，COMMON.md R3.6；P23／P24／P26 都是把共用器材留在使用它的測試檔）加 `seed_dir` fixture：把 `demo/seed/` 整個 `shutil.copytree` 到 `tmp_path`，回傳那份副本；另外三個 `seed_dir_with_*` fixture 各自在副本上改一個欄位（兩個 Feature、`f_19` 的 rating 改 4、兩批共用 `version_id`），正本永遠不被測試改動。
 
@@ -365,17 +385,17 @@ def test_load_seed_rejects_step_without_exactly_one_feature(seed_dir_with_two_fe
         load_seed(seed_dir_with_two_features)
 ```
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 執行 `uv run pytest tests/unit/test_seed_recipe.py -q`，預期 FAIL。（現況核對 2026-09-14：`demo/` 目前整個不存在，所以第一次的紅燈訊號是 **`ModuleNotFoundError: No module named 'demo'`**，不是 `cannot import name 'load_seed'`；先做 §4 的「讓 `demo` 可以被 import」與空的 `demo/__init__.py`，第二次才會變成 `cannot import name 'load_seed'`。兩次都要記進報告的 RED 證據。）
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 用 Phase 03／04 的 Pydantic 模型逐檔解析，不另寫寬鬆 parser。載入順序固定為 features → tutorials → versions → steps → releases → feedback → views → tickets → rules → batches → approvals；後面的檔案可引用前面的 ID，引用不存在的 ID 直接丟 `ContentError`。
 
 `apply_seed(bundle, *, repository, now)` 寫入時，**VERSION 與 STEP item 只帶模型欄位**（D-40：item 屬性 = 模型欄位 + `RESERVED_ATTRS`，沒有第三類；`synthetic`、`batch_label` 只留在 JSON 檔與報告，不寫進 item）；每個版本除了 `put_meta` 之外還要寫 `tutorials/<slug>/v<n>.md` 全文、`.diff`（v1 為空）與 `REFERENCES`／`SUPERSEDES` 邊，寫完逐一呼叫 Phase 23 的 `verify_version_complete(version_id, repository)`，任一個回 `False` 就丟 `ContentError` 並停止，不留半套版本。回傳值是這次實際寫入的 PK 清單。
 
-- [ ] **Step 4：補四個 schema 失敗案例、跑綠燈並提交**
+- [x] **Step 4：補四個 schema 失敗案例、跑綠燈並提交**
 
 依序加入：步驟零個或兩個 Feature、Feedback 指向不存在版本、`R-012` 兩批共用 `version_id`、核定檔缺 `approved_by`。前三個丟 `ContentError`；第四個不丟錯，但要出現在 `missing_approvals`。
 
@@ -387,7 +407,7 @@ git commit -m "feat(demo): 建立可載入的合成種子資料"
 
 ### Task 2：verify_recipe 重算八個數字
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 from demo.seed_loader import load_seed, verify_recipe
@@ -411,17 +431,17 @@ def test_verify_recipe_fails_when_one_feedback_is_edited(seed_dir_with_wrong_rat
     assert [c.name for c in report.checks if not c.ok] == ["A v1 average"]
 ```
 
-- [ ] **Step 2：確認紅燈**
+- [x] **Step 2：確認紅燈**
 
 執行 `uv run pytest tests/unit/test_seed_recipe.py -q`，預期 FAIL 且訊號為 `cannot import name 'verify_recipe'`。
 
-- [ ] **Step 3：實作重算**
+- [x] **Step 3：實作重算**
 
 `verify_recipe` 只能呼叫 Phase 53 的 `average_rating`、`negative_feedback_ids` 與 Phase 54 的 `reopen_stats`，不得在種子檔或程式裡預存這八個數字當來源。`negative_feedback_ids` 的 `approved` 參數用 Phase 43 的 `DEFAULT_FEEDBACK_CATEGORIES`（`找不到按鈕`、`缺少資訊`），不另外定義一份類別表。期望值寫在 `verify_recipe` 內的常數表，實際值一律從 `bundle` 的原始資料算出來。
 
 （現況核對 2026-09-14：依 §7 開頭的缺件表，W1 時 `reopen_stats`（P54）與 `DEFAULT_FEEDBACK_CATEGORIES`（P43）都還不存在。**`approved` 先傳模組層常數 `_SEED_CATEGORIES`**，那是參數值不是第二份邏輯；**重開票四項留成 `actual=None`／`ok=False` 的 `RecipeCheck`**，`recompute_ok` 因此為 `False`、`o7_ready` 為 `False`，這是誠實的中間狀態，不是綠燈。`test_verify_recipe_recomputes_all_eight_targets` 在 W1 用 `xfail(strict=True)` 標住四項重開票，P54 落地後由本 Phase 的補做或 P54 自己把 xfail 拿掉——**不得**為了讓它綠而在 `seed_loader.py` 裡自己算窗口。）
 
-- [ ] **Step 4：加入 O7 三條件測試、跑綠燈並提交**
+- [x] **Step 4：加入 O7 三條件測試、跑綠燈並提交**
 
 斷言四種情形：schema 失敗、重算失敗、核定缺漏，三者各自讓 `o7_ready is False`；三者皆成立時 `o7_ready is True`。
 
@@ -433,7 +453,7 @@ git commit -m "feat(demo): 由原始資料重算配方目標數字"
 
 ### Task 3：二十筆工單的真實 Titan embedding 分群
 
-- [ ] **Step 1：先寫「不可全部預填」的守門測試**
+- [x] **Step 1：先寫「不可全部預填」的守門測試**
 
 ```python
 def test_seed_tickets_for_creation_have_no_precomputed_cluster(seed_dir):
@@ -447,11 +467,11 @@ def test_seed_tickets_for_creation_have_no_precomputed_cluster(seed_dir):
                for t in bundle.tickets if t.id.startswith("t_3"))
 ```
 
-- [ ] **Step 2：確認紅燈後建立腳本骨架**
+- [x] **Step 2：確認紅燈後建立腳本骨架**
 
 `cluster_demo_tickets(bundle, *, writer, repository, operation_id)` 逐筆呼叫 Phase 38 的 `ensure_embedding` 與 `assign_cluster`，回傳 `{ticket_id: cluster_id}`，並寫出 `tickets_clustered.json` 與 `clustering_report.json`。
 
-- [ ] **Step 3：建立整合測試**
+- [x] **Step 3：建立整合測試**
 
 測試檔放 `tests/integration/`、每個測試標 `@pytest.mark.aws`（marker 由 Phase 59 定義、Phase 01 的 `pyproject.toml` 註冊；`TKB_RUN_AWS_INTEGRATION` 未設時 conftest 自動 skip）：
 
@@ -463,7 +483,7 @@ TKB_RUN_AWS_INTEGRATION=1 uv run pytest tests/integration/test_demo_clustering.p
 
 （現況核對 2026-09-14：**O5 就是 BLOCKED**，所以這條指令這一批一定是 `skip`。marker `aws` 已由 **P01 的 `pyproject.toml` 註冊**、自動 skip 由 **`tests/conftest.py` 的 `pytest_collection_modifyitems`** 提供，**都已存在**——原文寫「marker 由 Phase 59 定義」是錯的（現況核對 2026-09-14：實際 owner 是 P01＋既有 `tests/conftest.py`，00A D-41）。另外**補一組不依賴 Bedrock 的單元測試**放在 `tests/unit/test_seed_recipe.py`：用 `RecordingWriter`（`embed` 回 `FIXED_EMBEDDING`）跑 `cluster_demo_tickets(...)`，斷言二十筆都被呼叫一次、回傳 dict 有二十個 key、`repository` 沒有被寫進 `cluster_id` 以外的東西。這證明「路徑接對了」，**不證明** O5 通過。）
 
-- [ ] **Step 4：核對分群結果是觀察值並提交**
+- [x] **Step 4：核對分群結果是觀察值並提交**
 
 把報告中的實際群數與每群成員抄進 `demo/seed/clustering_report.json` 的 `observed` 區塊。若二十筆沒有落在同一群，照實記錄並在 Demo 畫面說明，不回頭改寫工單文字硬湊單一群。
 
@@ -476,7 +496,7 @@ git commit -m "feat(demo): 以真實 Titan embedding 分群展示工單"
 
 ### Task 4：維護者核定紀錄與 O7 報告
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_o7_is_not_ready_until_a_human_signs_every_batch(seed_dir):
@@ -493,11 +513,11 @@ def test_approval_file_keeps_the_four_human_fields(seed_dir):
         assert record["synthetic"] is True
 ```
 
-- [ ] **Step 2：確認紅燈並實作核定檢查**
+- [x] **Step 2：確認紅燈並實作核定檢查**
 
 `load_seed` 讀 `approvals/`，把四個維護者欄位為空字串的批次列入 `missing_approvals`；`seed_commit` 與目前種子檔案雜湊不符時，同樣列為缺核定並在報告寫明原因（種子改過、需重新核定）。
 
-- [ ] **Step 3：加入 grep 守門**
+- [x] **Step 3：加入 grep 守門**
 
 ```bash
 uv run pytest tests/unit/test_seed_recipe.py -q
@@ -506,7 +526,7 @@ rg -n "approved_by|approved_at" demo/ src/ --glob '!demo/seed/approvals/*'
 
 預期：測試 PASS；`rg` 只應命中讀取與驗證的程式碼，不得出現任何賦值。
 
-- [ ] **Step 4：產出 O7 報告並提交**
+- [x] **Step 4：產出 O7 報告並提交**
 
 執行 `uv run python -m demo.seed_loader verify demo/seed`，把輸出存成 `demo/seed/recipe-report.txt`。報告最後一行只能是「O7 = 未完成（缺維護者核定）」或「O7 = 三條件齊備」，不得出現「O7 已通過」等結論式措辭。
 
@@ -563,19 +583,27 @@ git commit -m "feat(demo): 加入維護者核定紀錄與 O7 報告"
 
 ## 11. 完成清單
 
-- [ ] `demo/seed/*.json` 依 §6 展開完整，每個檔案帶 `synthetic: true`。
-- [ ] `load_seed` 用 Phase 03／04 模型驗證；步驟零或多 Feature、引用不存在 ID 都丟 `ContentError`。
-- [ ] `verify_recipe` 由原始資料重算並斷言 2.875、4.4、8、2、7、2、0.7、0.2 共八項。
-- [ ] 二十筆建立教學用工單的 `cluster_id`／`embedding` 在種子中為 `null`，由真實 Titan 呼叫填入且有守門測試；九筆重開票工單維持 `cluster_id = c12` 的固定同題對應。
-- [ ] `R-007` 一批、`R-012` 兩批不重疊的核定批次都有完整前後對照與原始資料；核定欄位只由維護者填寫，程式碼沒有任何賦值路徑，`rg` 檢查已執行。
-- [ ] `o7_ready` 只在 schema、重算、核定三者皆成立時為真；報告不出現「O7 已通過」。
+- [x] `demo/seed/*.json` 依 §6 展開完整，每個檔案帶 `synthetic: true`。
+- [x] `load_seed` 用 Phase 03／04 模型驗證；步驟零或多 Feature、引用不存在 ID 都丟 `ContentError`。
+- [x] `verify_recipe` 由原始資料重算並斷言 2.875、4.4、8、2、7、2、0.7、0.2 共八項。
+- [ ] 二十筆建立教學用工單的 `cluster_id`／`embedding` 在種子中為 `null`，由真實 Titan 呼叫填入且有守門測試；九筆重開票工單維持 `cluster_id = c12` 的固定同題對應。（**未完成**：種子中的 `null`、九筆 `c12`／十七筆 `c58` 與守門測試都已完成，但「由真實 Titan 呼叫填入」因 **O5 BLOCKED** 取不到觀察值——2026-09-15 實跑 `demo/scripts/cluster_demo_tickets.py` 得 `ValidationException: Operation not allowed`，證據在 `demo/seed/clustering_report.json`。）
+- [x] `R-007` 一批、`R-012` 兩批不重疊的核定批次都有完整前後對照與原始資料；核定欄位只由維護者填寫，程式碼沒有任何賦值路徑，`rg` 檢查已執行。
+- [x] `o7_ready` 只在 schema、重算、核定三者皆成立時為真；報告不出現「O7 已通過」。
 
-**（現況核對 2026-09-14）本批注定勾不起來的三列，以及它們的解除條件：**
+**（實作核對 2026-09-15，取代上面 W0 寫的「注定勾不起來的三列」）**
 
-| 完成清單的列 | 為什麼本批勾不起來 | 解除條件 |
+W0 那份表是在 P43／P53／P54／P55 都還沒落地時寫的。實際排程改成本 Phase 最後做，
+`analytics/ratings.py`（P53）、`analytics/reopen.py`（P54）、`analytics/validation.py`（P55）、
+`ingress.DEFAULT_FEEDBACK_CATEGORIES`（P43）**都已經在 `src/` 裡**，所以：
+
+| 完成清單的列 | 實際結果 | 解除條件 |
 |---|---|---|
-| `verify_recipe` 重算並斷言八項 | `reopen_stats`（P54）在 W2 才落地 | P54 完成後補四項，`recompute_ok` 才可能為 `True` |
-| 二十筆由真實 Titan 呼叫填入 `cluster_id` | **O5 BLOCKED**（`ValidationException: Operation not allowed`） | 維護者送出 Bedrock model access 表單並核准（REP §8 第 1 項） |
-| `o7_ready` 為真 | 三條件都缺（重算未完整、維護者未簽） | 前兩列解除 ＋ 維護者在 `approvals/*.json` 簽名 |
+| `verify_recipe` 重算並斷言八項 | **已完成**：八項全部由原始資料算出（`recipe-report.txt` 的 `recompute=PASS`）。`reopen_stats` 直接 import P54 的那一份，`demo/` 下沒有第二份十四天窗口（`rg -n "days=14" demo/` 無命中） | — |
+| 二十筆由真實 Titan 呼叫填入 `cluster_id` | **未完成**：O5 BLOCKED。2026-09-15 06:46Z 實跑 `demo/scripts/cluster_demo_tickets.py` 打到 `us-east-1` 的 Bedrock，得 `An error occurred (ValidationException) when calling the InvokeModel operation: Operation not allowed`，逐字記在 `demo/seed/clustering_report.json` 的 `upstream`；`observed` 是 `null`、**沒有**產生 `tickets_clustered.json` | 維護者送出 Bedrock model access 表單並核准，再重跑腳本（REP §8 第 1 項） |
+| `o7_ready` 為真 | **未完成**：schema 與重算都通過，三批核定全缺 | 維護者在 `demo/seed/approvals/<batch_id>.json` 填四個欄位並簽名 |
 
-其餘各列（種子展開、`ContentError` 驗證、守門測試、核定欄位無賦值路徑＋`rg` 檢查、報告措辭）本批可以且必須勾完。
+**本計畫選擇（2026-09-14）：** 因為三個缺件都已落地，`batches.json` **直接**載成 P55 的
+`SeedBatch`（不是 W0 brief 說的暫時性 `dict`），八個 `RecipeCheck` 也**沒有** xfail 佔位——
+留佔位會讓報告看起來比實際狀況差。
+
+其餘各列（種子展開、`ContentError` 驗證、守門測試、核定欄位無賦值路徑＋`rg` 檢查、報告措辭）已全部勾完。
