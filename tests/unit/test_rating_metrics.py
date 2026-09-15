@@ -7,7 +7,11 @@
 
 import pytest
 
-from training_kb.analytics.ratings import average_rating, format_average
+from training_kb.analytics.ratings import (
+    average_rating,
+    cross_version_average,
+    format_average,
+)
 from training_kb.models import Feedback
 
 V1 = "prepare-meeting@v1"
@@ -51,3 +55,13 @@ def test_average_rating_without_any_rating_is_none_not_zero():
     assert average_rating([]) is None
     assert average_rating([fb("f_1", None, "待分類"), fb("f_2", None, "待分類")]) is None
     assert format_average(None) == "尚無評分"
+
+
+def test_cross_version_average_weights_each_version_equally():
+    """Given 每版已算好的平均，When 跨版彙總，Then 每版等權，不是依筆數加權。"""
+    assert cross_version_average([2.875, 4.4]) == pytest.approx(3.6375)
+    assert cross_version_average([2.875, None, 4.4]) == pytest.approx(3.6375)
+    assert cross_version_average([None, None]) is None
+    assert cross_version_average([]) is None
+    # 按筆數加權會得到 (23 + 44) / 18 約 3.7222；等權公式不得等於它
+    assert cross_version_average([2.875, 4.4]) != pytest.approx(67 / 18)

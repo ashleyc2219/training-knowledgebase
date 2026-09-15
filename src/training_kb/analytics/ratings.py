@@ -8,7 +8,7 @@
 （例如 Phase 44 的 `is_weak`）一律吃這個值；只有 `format_average` 產生顯示字串。
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from decimal import ROUND_HALF_UP, Decimal
 
 from training_kb.models import Feedback
@@ -38,3 +38,15 @@ def format_average(value: float | None) -> str:
         return NO_RATING_DISPLAY
     quantized = Decimal(str(value)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
     return str(quantized)
+
+
+def cross_version_average(values: Sequence[float | None]) -> float | None:
+    """跨版平均：每一版**權重相同**，不是把所有回饋混成一池加權（設計 §12.1）。
+
+    輸入是每版已算好的平均；`None` 代表那一版沒有可比較的評分，直接略過，
+    全部都是 `None`（或空序列）時回 `None`。
+    """
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    return sum(present) / len(present)
