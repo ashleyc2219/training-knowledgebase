@@ -470,7 +470,7 @@ def test_the_ticket_branch_delegates_to_normalize_then_accept(
 
 
 def test_the_ticket_branch_needs_its_own_source_fields(wired_handler: Repository) -> None:
-    """Given ticket 匯入缺 `adapter`／When 呼叫 handler／Then 整筆 `PermanentError`（D-60）。
+    """Given ticket 匯入缺 `adapter`／When 呼叫 handler／Then 整批 `PermanentError`（D-60）。
 
     `domain`／`adapter`／`event_type` 由匯出檔自己帶，**不從 payload 反推**。
     """
@@ -821,3 +821,43 @@ def test_the_handler_logs_only_counts(
     assert any("saved=1" in line and "rejected=1" in line for line in messages), messages
     for line in messages:
         assert "u_01" not in line and "prepare-meeting" not in line
+
+
+# --- review 修正回合 2：ticket／release 的形狀檢查也要在寫入前整批做完 ----------
+
+
+@pytest.mark.parametrize(("broken", "match"), [
+    ({key: value for key, value in TICKET_ITEM.items() if key != "domain"}, r"items\[1\]"),
+    ({**TICKET_ITEM, "adapter": "  "}, r"items\[1\]"),
+    ({**TICKET_ITEM, "payload": "不是物件"}, r"items\[1\]"),
+])
+def test_a_ticket_batch_with_a_bad_shape_starts_nothing_at_all(
+        wired_handler: Repository, monkeypatch: pytest.MonkeyPatch,
+        broken: dict[str, Any], match: str) -> None:
+    """Given 第二筆的**形狀**壞掉／When 呼叫 handler／Then 整批 `PermanentError`、零啟動。
+
+    形狀錯代表匯出檔本身壞了（缺可信入口設定、`payload` 不是物件），不是「這一筆資料
+    不合法」。舊版把這兩個檢查留在寫入迴圈裡，壞在第 n 筆時前 n-1 筆**已經
+    `StartExecution`** 了（review 修正回合 2）。
+    """
+    started: list[dict[str, Any]] = []
+
+    def fake(**kwargs: Any) -> list[Acceptance]:
+        started.append(kwargs)
+        return [_acceptance("op-ticket-t_1")]
+
+    monkeypatch.setattr(import_, "normalize_then_accept", fake)
+    with pytest.raises(PermanentError, match=match):
+        import_.handler({"kind": "ticket", "items": [TICKET_ITEM, broken]}, None)
+    assert started == []
+
+
+def test_a_feedback_batch_is_unaffected_by_the_ticket_shape_rules(
+        wired_handler: Repository) -> None:
+    """Given feedback batch 沒有 `domain`／`payload`／When 呼叫 handler／Then 照樣寫得進去。
+
+    `ticket`／`release` 才要可信入口設定；預檢不得把那套規則套到固定匯入的兩種 kind 上。
+    """
+    body = import_.handler({"kind": "feedback", "items": [FEEDBACK]}, None)
+    results = body["results"]
+    assert isinstance(results, list) and results[0]["status"] == "saved"
