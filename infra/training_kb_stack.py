@@ -33,6 +33,7 @@ from training_kb.content import PUBLIC_SITE_PREFIX
 from training_kb.errors import PermanentError
 from training_kb.faults import ENV_NAME_ENV, PRODUCTION
 from training_kb.handlers.github_webhook import SECRET_ENV
+from training_kb.handlers.import_ import IMPORT_DEADLINE_SECONDS
 from training_kb.keys import OPERATIONS_PREFIX
 from training_kb.pipeline_starter import STATE_MACHINE_NAMES
 from training_kb.pipelines.asl import ASL_LOCAL_PATH
@@ -133,6 +134,46 @@ ANALYTICS_DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan",
 # ---- Phase 54 結束 ----
 
 
+# ---- Phase 42 ----（D-56、D-58：`training-kb-import` 的接線由 Phase 42 完成）
+
+IMPORT_FUNCTION = "training-kb-import"
+IMPORT_HANDLER = "training_kb.handlers.import_.handler"
+"""固定匯入入口：維護者用 boto3 `invoke` 餵匯入檔，**不開 Function URL**。
+
+沒有公開入口就沒有驗簽需求，所以它也**不需要** `TKB_GITHUB_WEBHOOK_SECRET`；
+全 stack 唯一 `AuthType: NONE` 的公開網址仍然只有 Phase 30 的 webhook。
+"""
+
+IMPORT_TIMEOUT = Duration.seconds(int(IMPORT_DEADLINE_SECONDS))
+"""與 `handlers/import_.py` 的 `IMPORT_DEADLINE_SECONDS` 同一個數字導出，不各打一份。"""
+
+IMPORT_PREFIXES: tuple[str, ...] = (OPERATIONS_PREFIX,)
+"""匯入 Lambda：**只有** `operations/`。
+
+`feedback`／`view` 一個 S3 物件都不寫；這個前綴是給 `ticket`／`release` 分支的
+`ingress._put_canonical_input_once`（`operations/<op>/input.json`）。不給
+`tutorials/`／`site/`：它既不寫教學也不發布。
+"""
+
+IMPORT_DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+                      "dynamodb:Scan"]
+"""四個動作，逐一對得上程式：
+
+| 動作 | 來源 |
+|---|---|
+| `GetItem` | `get_version`／`get_tutorial`／`get_meta`（去重的存在判斷）、`get_meta_item` |
+| `PutItem` | `put_meta`（帶條件）、`put_edge`、`operations.put_meta_item`（去重與取號） |
+| `UpdateItem` | `operations.update_meta`／`complete`（`_revision` 的 compare-and-swap） |
+| `Scan` | `ticket`／`release` 分支的 `rote.list_procs` → `scan_entity("PROC")` |
+
+**沒有** `Query`／`BatchGetItem`／`ConditionCheckItem`（這條路徑不查 GSI 也不做交易），
+所以索引 ARN 也不給；**沒有** `DeleteItem`（D-79 的那一條只屬於 task function）；
+**沒有** `bedrock:InvokeModel`（本 Phase 零模型呼叫，Phase 43 加留言分類時才補）。
+"""
+
+# ---- Phase 42 結束 ----
+
+
 class TrainingKbStack(Stack):
     """流程 stack；`self.deps_layer` 供 Phase 42／48／52／54 沿用（不各自再做 layer）。"""
 
@@ -219,6 +260,21 @@ class TrainingKbStack(Stack):
                          prefixes=ANALYTICS_PREFIXES, actions=ANALYTICS_DDB_ACTIONS,
                          with_index=True)   # GSI：list_feedback_of_version 走 query_by_target
         # ---- Phase 54 結束 ----
+
+        # ---- Phase 42 ----（D-58；只用既有的 `_function`／`_grant_data`，不改別人的程式）
+        #
+        # 不開 Function URL（維護者用 boto3 invoke）、不給 `bedrock:InvokeModel`
+        # （本 Phase 零模型呼叫）、不給 `dynamodb:DeleteItem`、不給 GSI。
+        # `states:StartExecution` 只授權當下真的存在的 `training-kb-ticket-analysis`：
+        # `release` 分支要的 `training-kb-release-update` 由 Phase 52 建 state machine 時
+        # 一併補 `grant_start_execution(self.import_function)`（本計畫選擇，報告有記）。
+        self.import_function = self._function(
+            "ImportFunction", IMPORT_FUNCTION, IMPORT_HANDLER, IMPORT_TIMEOUT, base_env)
+        self._grant_data(self.import_function, table, bucket, prefixes=IMPORT_PREFIXES,
+                         actions=IMPORT_DDB_ACTIONS, with_index=False)
+        self.ticket_analysis.grant_start_execution(self.import_function)
+        CfnOutput(self, "ImportFunctionName", value=self.import_function.function_name)
+        # ---- Phase 42 結束 ----
 
     # --- 私有 helper -----------------------------------------------------------
 

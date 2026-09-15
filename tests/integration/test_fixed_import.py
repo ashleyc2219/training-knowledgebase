@@ -17,6 +17,7 @@ prepare-meeting   status 由 fixture 決定、current_version=@v2
 真表行為的證據在 Phase 11（O2 PASS）與 `@pytest.mark.aws` 的實機測試。
 """
 
+import json
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -26,6 +27,8 @@ import pytest
 from training_kb import ingress
 from training_kb.clock import to_iso
 from training_kb.config import DEFAULT_PROJECT_ID
+from training_kb.errors import PermanentError
+from training_kb.handlers import import_
 from training_kb.ingress import (
     import_feedback,
     import_view,
@@ -34,7 +37,13 @@ from training_kb.ingress import (
 )
 from training_kb.keys import feedback_pk, parse_pk, version_pk, view_pk
 from training_kb.models import Tutorial, TutorialStatus, TutorialVersion
-from training_kb.operations import AcceptOperation, OperationCoordinator
+from training_kb.operations import (
+    Acceptance,
+    AcceptOperation,
+    OperationCoordinator,
+    OperationRecord,
+)
+from training_kb.pipelines.common import Deps
 from training_kb.repository import Repository
 
 SLUG = "prepare-meeting"
@@ -48,6 +57,24 @@ FEEDBACK: dict[str, Any] = {"id": "f_12", "tutorial_version": V1, "rating": 2, "
 VIEW: dict[str, Any] = {"tutorial_version": V1, "user": "u_01", "ts": "2026-08-02T09:00:00Z"}
 
 _ENTITIES = ("TUTORIAL", "VERSION", "FEEDBACK", "VIEW", "PROC", "OPS", "SEQ")
+
+TICKET_ITEM: dict[str, Any] = {
+    "domain": "github.com", "adapter": "github_issue", "event_type": "issues",
+    "headers": {"X-GitHub-Event": "issues"},
+    "payload": {"issue": {"number": 881, "body": "找不到摘要按鈕"}},
+}
+"""`ticket`／`release` 分支的每一筆自己帶六個來源欄位（00A D-60），不從 payload 反推。"""
+
+
+def _acceptance(operation_id: str) -> Acceptance:
+    """`normalize_then_accept` 的假回傳；本檔只看 handler 怎麼收斂它，不重測 P32。"""
+    record = OperationRecord(operation_id=operation_id, kind="release",
+                             canonical_id=operation_id.removeprefix("op-release-"),
+                             project_id=DEFAULT_PROJECT_ID, status="started", input_ref=None,
+                             execution_arn=None, version_id=None, model_output_refs=(),
+                             proc_sample_signature=None, error=None, retryable=None,
+                             accept_seq=1, accepted_at=NOW, updated_at=NOW)
+    return Acceptance(status="accepted", operation_id=operation_id, record=record)
 
 
 def _version(version_id: str, *, number: int, published: bool) -> TutorialVersion:
@@ -355,3 +382,101 @@ def test_saving_views_leaves_no_proc_and_no_new_version(
     import_view({**VIEW, "user": "u_02"}, repository=active_repo, operations=operations, now=NOW)
     assert active_repo.scan_entity("PROC") == []
     assert {str(row["PK"]) for row in active_repo.scan_entity("VERSION")} == versions_before
+
+
+# --- Task 4：`training-kb-import` 的 Lambda 入口 --------------------------------
+
+
+@pytest.fixture
+def wired_handler(active_repo: Repository, operations: OperationCoordinator,
+                  monkeypatch: pytest.MonkeyPatch) -> Repository:
+    """把 `import_._DEPS` 換成指向 moto 表的相依；`monkeypatch` 結束時自動還原。"""
+    monkeypatch.setattr(import_, "_DEPS", Deps(operations=operations, now=lambda: NOW,
+                                               repository=active_repo))
+    return active_repo
+
+
+def test_handler_imports_every_item_and_starts_no_pipeline(wired_handler: Repository) -> None:
+    """Given 三筆回饋（兩筆合法、一筆 `rating=True`）／When 呼叫 handler／Then 逐筆回結果。
+
+    一筆壞資料不影響其他筆，這正是設計 §7.1「指出欄位、允許修正」（F51）的形狀；
+    整條路徑零 `PROC#` 變動（`ING` Rule 31），零 `StartExecution` 由 autouse fixture 守。
+    """
+    items = [FEEDBACK, {**FEEDBACK, "id": "f_13"}, {**FEEDBACK, "rating": True}]
+    body = import_.handler({"kind": "feedback", "source": "widget-download", "items": items},
+                           None)
+    results = body["results"]
+    assert isinstance(results, list)
+    assert [row["status"] for row in results] == ["saved", "saved", "rejected"]
+    assert results[2]["invalid_fields"] == ("rating",)
+    assert results[2]["object_id"] is None
+    assert (body["kind"], body["source"]) == ("feedback", "widget-download")
+    assert wired_handler.scan_entity("PROC") == []
+    assert [item.id for item in wired_handler.list_feedback_of_version(V1)] == ["f_12", "f_13"]
+
+
+def test_handler_deduplicates_repeated_view_items(wired_handler: Repository) -> None:
+    """Given 同一筆瀏覽紀錄在一個 batch 裡出現兩次／When 呼叫 handler／Then 第二筆 duplicate。"""
+    body = import_.handler({"kind": "view", "source": "widget-download",
+                            "items": [VIEW, VIEW]}, None)
+    results = body["results"]
+    assert isinstance(results, list)
+    assert [row["status"] for row in results] == ["saved", "duplicate"]
+    assert len(wired_handler.list_views_of_version(V1)) == 1
+
+
+def test_handler_result_rows_are_json_serialisable(wired_handler: Repository) -> None:
+    """Given handler 的回應／When `json.dumps`／Then `invalid_fields` 序列化成 array。"""
+    body = import_.handler({"kind": "feedback", "items": [{**FEEDBACK, "rating": "4"}]}, None)
+    assert json.loads(json.dumps(body))["results"][0]["invalid_fields"] == ["rating"]
+
+
+@pytest.mark.parametrize("event", [{"kind": "tutorial", "items": []}, {"kind": "feedback"},
+                                   {"kind": "feedback", "items": {}}, {"items": []}])
+def test_handler_refuses_unknown_kind_or_missing_items(event: dict[str, Any]) -> None:
+    """Given `kind` 不在四種內或 `items` 不是陣列／When 呼叫／Then `PermanentError`，零寫入。"""
+    with pytest.raises(PermanentError):
+        import_.handler(event, None)
+
+
+def test_import_kinds_is_the_four_fixed_values() -> None:
+    """Given `IMPORT_KINDS`／When 讀它／Then 就是 00A §6.8 的四個值。"""
+    assert import_.IMPORT_KINDS == ("feedback", "view", "ticket", "release")
+
+
+def test_the_ticket_branch_delegates_to_normalize_then_accept(
+        wired_handler: Repository, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 一筆 ticket 匯入／When 呼叫 handler／Then 原樣交給 P32／P37 的六個 keyword 參數。
+
+    `normalize_then_accept` 回的是 **`list[Acceptance]`**（D-73）：一個 PR 可展開成 n 筆
+    子 Release，所以 `object_id` 取第一筆、訊息列出全部 operation ID，不丟掉其餘幾筆。
+    """
+    seen: list[dict[str, Any]] = []
+
+    def fake(**kwargs: Any) -> list[Acceptance]:
+        seen.append(kwargs)
+        return [_acceptance("op-release-r_1"), _acceptance("op-release-r_2")]
+
+    monkeypatch.setattr(import_, "normalize_then_accept", fake)
+    body = import_.handler({"kind": "ticket", "items": [TICKET_ITEM]}, None)
+    results = body["results"]
+    assert isinstance(results, list)
+    assert results[0]["status"] == "saved"
+    assert "op-release-r_1, op-release-r_2" in results[0]["message"]
+    assert set(seen[0]) == {"domain", "adapter", "event_type", "headers", "payload", "deadline"}
+    assert seen[0]["headers"] == {"x-github-event": "issues"}   # header 一律小寫
+
+
+def test_the_ticket_branch_needs_its_own_source_fields(wired_handler: Repository) -> None:
+    """Given ticket 匯入缺 `adapter`／When 呼叫 handler／Then 整筆 `PermanentError`（D-60）。
+
+    `domain`／`adapter`／`event_type` 由匯出檔自己帶，**不從 payload 反推**。
+    """
+    broken = {key: value for key, value in TICKET_ITEM.items() if key != "adapter"}
+    with pytest.raises(PermanentError, match="adapter"):
+        import_.handler({"kind": "ticket", "items": [broken]}, None)
+
+
+def test_a_batch_of_zero_items_is_accepted(wired_handler: Repository) -> None:
+    """Given 空的 `items`／When 呼叫 handler／Then 回空結果，不是錯誤（維護者匯出空檔）。"""
+    assert import_.handler({"kind": "feedback", "items": []}, None)["results"] == []

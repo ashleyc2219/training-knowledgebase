@@ -9,13 +9,10 @@
                   沒有未發布標記、沒有私有欄位、每個站內 href 都指得到實際存在的 key
 ```
 
-**TODO（Phase 42，W2）：** 真正的 roundtrip——把 `items[0]` 餵進
-`training_kb.ingress.import_feedback(...)` 並斷言 `status == "saved"`、同一個 `id` 第二次回
-`duplicate`、`rating="4"` 被拒並指出 `rating` 欄位、以及 `import_view` 的對應案例——要等
-`import_feedback`／`import_view`／`ImportResult` 落地（它們是 P42 的產出，P57 在 W1 時
-`src/training_kb/ingress.py` 裡還沒有這三個名稱）。Phase 42 是 `import_feedback` 的 owner，
-請把那幾個案例補進**本檔**，不要另開一支。本波先用**已存在**的 `models.Feedback` 驗
-`rating` 的 strict int，所以 `"4"` 這件事現在就有人守。
+**已補（Phase 42，W2）：** 檔尾第三段是真正的 roundtrip——把 `items[0]` 餵進
+`training_kb.ingress.import_feedback(...)`／`import_view(...)`，斷言 `status == "saved"`、
+同一個 `id` 第二次回 `duplicate`、`rating="4"` 被拒並指出 `rating` 欄位。前半仍然保留用
+`models.Feedback` 驗 strict int 的那一條：它守的是下載檔本身，與匯入端各守一層。
 
 **本檔全綠不代表 O3 通過**：moto 只證明資料形狀，不是實 bucket 的行為，也不證明任何發布
 切點的原子性（O3 由 Phase 12 判定 FAIL）。
@@ -43,6 +40,7 @@ from training_kb.content import (
     put_private_artifact,
     render_markdown,
 )
+from training_kb.ingress import import_feedback, import_view
 from training_kb.keys import tutorial_pk
 from training_kb.models import (
     Feature,
@@ -55,6 +53,7 @@ from training_kb.models import (
     TutorialStep,
     TutorialVersion,
 )
+from training_kb.operations import OperationCoordinator
 from training_kb.publishing import (
     SITE_PAGE_CONTENT_TYPE,
     UNPUBLISHED_MARKER,
@@ -323,3 +322,69 @@ def test_the_published_page_carries_the_widget_and_the_not_sent_status(
     assert "尚未送出" in page
     assert "已送出" not in page.replace("尚未送出", "")
     assert SITE_PAGE_CONTENT_TYPE  # 公開頁一律 text/html; charset=utf-8（P24 決定）
+
+
+# --- Phase 42（W2）補上的 roundtrip：下載檔 -> import_feedback／import_view ------
+#
+# controller 核准的 R3.6 例外：`import_feedback` 的 owner 是 Phase 42，檔頭的 TODO 指名
+# 把這幾個案例補進**本檔**而不是另開一支。前半驗的是「下載檔長得對」，這一段驗的是
+# 「維護者真的匯得進去」——兩者接不起來的話，widget 產出的檔就只是好看的 JSON。
+
+
+def view_envelope() -> dict[str, Any]:
+    """`widget.js` 的瀏覽紀錄封套；三個欄位與 `VIEW_FIELDS` 對得上。"""
+    return {"kind": "view", "source": "site_widget", "generated_at": "2026-09-14T00:30:45Z",
+            "note": f"{NOTICE}｜此檔尚未送出，需由維護者匯入",
+            "items": [{"tutorial_version": V2, "user": USER, "ts": "2026-09-13T12:34:56Z"}]}
+
+
+@pytest.fixture
+def imported(published_site: Repository) -> tuple[Repository, OperationCoordinator]:
+    """已發布的站 ＋ 建在同一個 moto 表上的操作紀錄。"""
+    return published_site, OperationCoordinator(published_site)
+
+
+def test_the_downloaded_feedback_file_imports_into_the_graph(
+        imported: tuple[Repository, OperationCoordinator]) -> None:
+    """Given widget 下載的回饋檔／When `import_feedback`／Then `saved` 並掛在 `@v2` 上。"""
+    repository, operations = imported
+    item = feedback_envelope()["items"][0]
+    result = import_feedback(item, repository=repository, operations=operations, now=NOW)
+    assert (result.status, result.object_id) == ("saved", item["id"])
+    assert [row.id for row in repository.list_feedback_of_version(V2)] == [item["id"]]
+
+
+def test_the_same_downloaded_feedback_imported_twice_is_a_duplicate(
+        imported: tuple[Repository, OperationCoordinator]) -> None:
+    """Given 維護者不小心匯入同一個檔兩次／When 再匯一次／Then `duplicate`，樣本數不變。"""
+    repository, operations = imported
+    item = feedback_envelope()["items"][0]
+    first = import_feedback(item, repository=repository, operations=operations, now=NOW)
+    again = import_feedback(item, repository=repository, operations=operations, now=NOW)
+    assert (first.status, again.status) == ("saved", "duplicate")
+    assert len(repository.list_feedback_of_version(V2)) == 1
+
+
+def test_a_string_rating_in_the_download_is_rejected_at_import(
+        imported: tuple[Repository, OperationCoordinator]) -> None:
+    """Given 下載檔的 `rating` 被改成 `"4"`／When 匯入／Then `rejected` 且指名 `rating`。
+
+    前半的 `test_downloaded_rating_is_a_json_number_not_a_string` 守的是模型層；
+    這裡守的是匯入端真的回得出「哪個欄位不合法」（`COL` Rule 3、F51）。
+    """
+    repository, operations = imported
+    item = {**feedback_envelope()["items"][0], "rating": "4"}
+    result = import_feedback(item, repository=repository, operations=operations, now=NOW)
+    assert (result.status, result.invalid_fields) == ("rejected", ("rating",))
+    assert repository.list_feedback_of_version(V2) == []
+
+
+def test_the_downloaded_view_file_imports_and_deduplicates(
+        imported: tuple[Repository, OperationCoordinator]) -> None:
+    """Given widget 下載的瀏覽紀錄檔／When 匯入兩次／Then `saved` 之後 `duplicate`。"""
+    repository, operations = imported
+    item = view_envelope()["items"][0]
+    first = import_view(item, repository=repository, operations=operations, now=NOW)
+    again = import_view(item, repository=repository, operations=operations, now=NOW)
+    assert (first.status, again.status) == ("saved", "duplicate")
+    assert [row.user for row in repository.list_views_of_version(V2)] == [USER]
