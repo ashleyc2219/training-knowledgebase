@@ -13,8 +13,8 @@ from training_kb.config import Thresholds
 from training_kb.content import parse_version_id
 from training_kb.errors import PermanentError
 from training_kb.keys import META, feature_pk
-from training_kb.models import Feature, Release
-from training_kb.repository import Repository, item_to_model
+from training_kb.models import Feature, Release, ReleaseKind
+from training_kb.repository import DynamoValue, Repository, item_to_model
 from training_kb.vectors import cosine
 from training_kb.writing.client import Writer
 
@@ -170,9 +170,10 @@ def update_feature_aliases(feature: Feature, *, old_name: str, new_name: str,
         if clash:
             raise PermanentError(f"alias 與 {other.feature_id} 衝突：{clash}")
     pk = feature_pk(feature.feature_id)
+    written: list[DynamoValue] = list(aliases)
     repository.update_meta(
         pk,
-        {"name": display, "aliases": aliases},
+        {"name": display, "aliases": written},
         expected_revision=repository.revision_of(pk),
     )
     return feature.model_copy(update={"name": display, "aliases": aliases})
