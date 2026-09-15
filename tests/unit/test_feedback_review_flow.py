@@ -23,6 +23,8 @@ moto 上的整批交易，綠燈只證明「要嘛一起發布、要嘛一篇都
 """
 
 import json
+import pathlib
+import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,7 +37,7 @@ from moto import mock_aws
 from training_kb.clock import to_iso
 from training_kb.config import Settings, load_settings
 from training_kb.content import VersionPlan, create_version
-from training_kb.errors import PermanentError
+from training_kb.errors import PermanentError, TransientError
 from training_kb.keys import feedback_pk, rule_pk, tutorial_pk, version_pk
 from training_kb.models import (
     AuthoringRule,
@@ -49,6 +51,15 @@ from training_kb.models import (
     TutorialStatus,
 )
 from training_kb.operations import Acceptance, AcceptOperation, OperationCoordinator
+from training_kb.pipelines.asl import (
+    ASL_LOCAL_PATH,
+    ASL_SNAPSHOT_KEY,
+    CATCH,
+    RETRY,
+    assert_safe_asl,
+    canonical_json,
+    task_state,
+)
 from training_kb.pipelines.common import Deps, task_name
 from training_kb.pipelines.feedback import (
     FEEDBACK_REVIEW_PIPELINE,
@@ -514,3 +525,139 @@ def test_handler_runs_exactly_one_task(review_deps: ReviewWorld,
     assert state["target_version_ids"] == ["b@v1", "c@v1", "d@v1"]
     assert "candidate_rule_ids" not in state        # EvaluateTargets 沒有被一起跑掉
     assert review_deps.writer.calls == []
+
+
+# --- Task 3：ASL、每日排程與 CDK template ------------------------------------
+
+# infra/ 是部署用的 CDK 程式，不在 src/ 的安裝套件裡（同 tests/unit/infra/test_ticket_asl.py）。
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import aws_cdk as cdk  # noqa: E402
+from aws_cdk.assertions import Match, Template  # noqa: E402
+
+from infra import training_kb_stack as stack_module  # noqa: E402
+from infra.scripts.build_lambda_layer import MARKERS  # noqa: E402
+from infra.training_kb_stack import CONTENT_BUCKET_CONTEXT, TrainingKbStack  # noqa: E402
+
+ASL_PATH = PROJECT_ROOT / ASL_LOCAL_PATH.format(pipeline="feedback-review", number=1)
+ARN = "${PipelineTaskFunctionArn}"
+NEXT = {"ListTargets": "EvaluateTargets", "EvaluateTargets": "PrepareBatch",
+        "PrepareBatch": "InspectBatch", "InspectBatch": "CommitBatch",
+        "CommitBatch": "Succeeded"}
+BUCKET = "training-kb-content-example"
+ACCOUNT, REGION = "111122223333", "us-east-1"
+REVIEW_MACHINE = "training-kb-feedback-review"
+DAILY_SCHEDULE = "training-kb-feedback-review-daily"
+
+
+@pytest.fixture
+def asl() -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(ASL_PATH.read_text(encoding="utf-8"))
+    return loaded
+
+
+@pytest.fixture
+def fake_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
+    """把 layer 路徑指到 `tmp_path` 下一份**看起來裝好了**的目錄（同 P41 的 `fake_layer`）。
+
+    **不在工作樹裡 `mkdir`**：真的在 `build/lambda-layer/python` 造一個空目錄，會讓
+    「清過 build/ 之後跑一次 pytest」就足以讓部署守門通過（P41 review 必修 2）。
+    """
+    for marker in MARKERS:
+        (tmp_path / "python" / marker).mkdir(parents=True)
+    monkeypatch.setattr(stack_module, "LAYER_PATH", tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def template(monkeypatch: pytest.MonkeyPatch, fake_layer: pathlib.Path) -> "Template":
+    monkeypatch.setenv(stack_module.SECRET_ENV, "unit-test-secret")
+    app = cdk.App(context={CONTENT_BUCKET_CONTEXT: BUCKET})
+    stack = TrainingKbStack(app, "TrainingKbApp",
+                            env=cdk.Environment(account=ACCOUNT, region=REGION))
+    return Template.from_stack(stack)
+
+
+def test_every_task_state_equals_phase29_template_plus_parameters(asl: dict[str, Any]) -> None:
+    """Given 五個 Task state，Then 除了 `Parameters` 逐欄等於 Phase 29 的 `task_state`。"""
+    assert len(RETRY) == 2 and RETRY[0]["ErrorEquals"] == ["TransientError"]        # D-53
+    assert RETRY[1]["ErrorEquals"][0] == "Lambda.ServiceException"
+    for name, next_state in NEXT.items():
+        state, expected = asl["States"][name], task_state(ARN, next_state)
+        expected["Parameters"] = {"pipeline": "feedback-review",
+                                  "task": state["Parameters"]["task"], "state.$": "$"}
+        assert state == expected, name     # Retry／Catch／TimeoutSeconds 全部來自 Phase 29
+
+
+def test_asl_matches_python_tasks_and_has_no_map(asl: dict[str, Any]) -> None:
+    """Given ASL 與 Python 兩邊，Then Task 名稱、封套、終點與靜態檢查都對得上，且沒有 Map。"""
+    assert [asl["States"][name]["Parameters"]["task"] for name in NEXT] == [
+        task_name(task) for task in FEEDBACK_REVIEW_TASKS]
+    assert all("Payload" not in asl["States"][name]["Parameters"] for name in NEXT)
+    assert '"Map"' not in json.dumps(asl, ensure_ascii=False)      # F49：不得逐篇發布
+    assert '"Choice"' not in json.dumps(asl, ensure_ascii=False)   # 00A §7：一條直線
+    assert_safe_asl(asl)
+    assert asl["StartAt"] == "ListTargets"
+    assert CATCH[0]["Next"] == "PipelineFailed"
+    assert asl["States"]["PipelineFailed"]["Type"] == "Fail"
+    assert asl["States"]["Succeeded"]["Type"] == "Succeed"
+    assert TransientError.__name__ == "TransientError"   # ASL 用類別名比對，不帶模組路徑
+
+
+def test_local_asl_file_is_the_canonical_bytes(asl: dict[str, Any]) -> None:
+    """Given 部署與 S3 快照要逐 byte 相同，Then 本地檔就是 `canonical_json` 的輸出。"""
+    assert ASL_PATH.read_bytes() == canonical_json(asl)
+    assert ASL_SNAPSHOT_KEY.format(pipeline="feedback-review", number=1) \
+        == "stepfunctions/feedback-review/v1.json"
+
+
+def test_stack_has_review_machine_and_exactly_one_daily_schedule(template: "Template") -> None:
+    """Given 合成結果，Then 有 `feedback-review` Standard workflow 與**唯一**一條每日排程。
+
+    `REV` Rule 1（每日執行）的 primary assertion 就是這一條：`cron(30 0 * * ? *)`、`UTC`、
+    固定 input `{"mode": "formal"}`，雲端再用 `aws scheduler get-schedule` 核對同樣三個值。
+    """
+    template.has_resource_properties("AWS::StepFunctions::StateMachine", {
+        "StateMachineName": REVIEW_MACHINE, "StateMachineType": "STANDARD",
+        "DefinitionSubstitutions": Match.object_like(
+            {"PipelineTaskFunctionArn": Match.any_value()})})
+    template.resource_count_is("AWS::Scheduler::Schedule", 1)
+    template.has_resource_properties("AWS::Scheduler::Schedule", {
+        "Name": DAILY_SCHEDULE,
+        "ScheduleExpression": "cron(30 0 * * ? *)", "ScheduleExpressionTimezone": "UTC",
+        "FlexibleTimeWindow": {"Mode": "OFF"},
+        "Target": Match.object_like({"Input": '{"mode": "formal"}'})})
+    names = {function["Properties"]["FunctionName"]
+             for function in template.find_resources("AWS::Lambda::Function").values()}
+    # 用包含關係：`training-kb-import`（P42）與之後的 Phase 都在同一支 stack 加東西，
+    # 等號會讓別人一落地就把這個檔轉紅（00A D-23、D-58）。**本 Phase 不新增任何 Lambda。**
+    assert {"training-kb-pipeline-task", "training-kb-webhook",
+            "training-kb-analytics"} <= names
+    assert REVIEW_MACHINE not in names        # state machine 與 Lambda 不同名（D-23）
+
+
+def test_scheduler_role_can_only_start_this_one_state_machine(template: "Template") -> None:
+    """Given Scheduler 自己的 role，Then 只拿得到這一條 state machine 的 `StartExecution`。"""
+    roles = {logical: row for logical, row in
+             template.find_resources("AWS::IAM::Role").items()
+             if any(statement["Principal"].get("Service") == "scheduler.amazonaws.com"
+                    for statement in
+                    row["Properties"]["AssumeRolePolicyDocument"]["Statement"])}
+    assert len(roles) == 1
+    scheduler_role = next(iter(roles))
+    granted = [statement
+               for policy in template.find_resources("AWS::IAM::Policy").values()
+               if any(ref.get("Ref") == scheduler_role
+                      for ref in policy["Properties"]["Roles"])
+               for statement in policy["Properties"]["PolicyDocument"]["Statement"]]
+    assert [statement["Action"] for statement in granted] == ["states:StartExecution"]
+    assert all("Ref" in statement["Resource"] for statement in granted)   # 單一 ARN，不是 *
+
+
+def test_review_machine_logs_to_its_own_group(template: "Template") -> None:
+    """Given 每條 state machine 各有自己的 log group，Then `feedback-review` 也有一個。"""
+    names = {row["Properties"]["LogGroupName"]
+             for row in template.find_resources("AWS::Logs::LogGroup").values()}
+    assert f"/aws/vendedlogs/states/{REVIEW_MACHINE}" in names

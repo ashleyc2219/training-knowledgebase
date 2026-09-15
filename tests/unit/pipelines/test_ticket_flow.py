@@ -396,13 +396,18 @@ def test_unknown_pipeline_is_a_permanent_error(wired: Deps) -> None:
         pipeline_task_handler(event("ensure_embedding", pipeline="nope"), None)
 
 
-def test_module_without_its_handler_is_a_permanent_error(wired: Deps) -> None:
-    """Given controller 預建的空殼（模組 import 得到、handler 屬性還沒有），Then 明確失敗。
+def test_module_without_its_handler_is_a_permanent_error(
+        wired: Deps, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 模組 import 得到、handler 屬性還沒有，Then 明確失敗（不是 `AttributeError`）。
 
-    這條測試會在 P48 落地 `feedback_review_handler` 之後自然失效，那時由 P48 改掉；
-    本 Phase 不預先放寬（不然 Lambda 會丟 `AttributeError`，`errorType` 就看不出原因）。
+    現況核對 2026-09-14（**Phase 48 代改**，本測試原本的 docstring 就寫明由 P48 接手）：
+    原本指的是 controller 預建的 `pipelines/feedback.py` 空殼；P48 已經落地
+    `feedback_review_handler`，那個空殼不存在了。改成把對照表指到一個真的沒有那個屬性的
+    入口，**本測試要守的行為完全不變**：接不起來時 `errorType` 要說得出原因。
     """
-    with pytest.raises(PermanentError, match="feedback_review_handler"):
+    monkeypatch.setitem(common._PIPELINE_HANDLERS, "feedback-review",
+                        "training_kb.pipelines.feedback:not_a_handler_yet")
+    with pytest.raises(PermanentError, match="not_a_handler_yet"):
         pipeline_task_handler(event("list_targets", pipeline="feedback-review"), None)
 
 
