@@ -15,6 +15,7 @@ P48／P52 也用那支檔（COMMON.md R3）。
 """
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,9 +23,11 @@ import pytest
 from test_ticket_decide import FakeOperations, FakeRepository, FakeWriter, dt
 
 from training_kb.config import Settings
-from training_kb.errors import PermanentError, TransientError
+from training_kb.errors import PermanentError, PublishError, TransientError
 from training_kb.keys import META, operation_ref, ticket_pk, tutorial_pk
 from training_kb.models import Ticket, Tutorial, TutorialStatus, TutorialVersion
+from training_kb.operations import OperationRecord
+from training_kb.pipelines import common
 from training_kb.pipelines import ticket as ticket_pipeline
 from training_kb.pipelines.common import (
     Deps,
@@ -76,8 +79,17 @@ class FlowRepository(FakeRepository):
     def table_name(self) -> str:
         return "training_kb"
 
+    condition_failure_index: int | None = None
+    """設了就模擬「第 n 個 action 條件不符」：`transact_write` 回 index、什麼都不寫。"""
+
     def transact_write(self, items: list[dict[str, Any]]) -> int | None:
-        """只套用 `SET <欄位> = :值`，條件一律視為成立（見模組 docstring）。"""
+        """只套用 `SET <欄位> = :值`，條件一律視為成立（見模組 docstring）。
+
+        `condition_failure_index` 是唯一的例外：真實 `Repository.transact_write` 在
+        `ConditionalCheckFailed` 時**回 index 而不是丟例外**，發布路徑的失敗語意要靠它。
+        """
+        if self.condition_failure_index is not None:
+            return self.condition_failure_index
         for item in items:
             update = item["Update"]
             key = (str(update["Key"]["PK"]), META)
@@ -100,15 +112,25 @@ class FlowRepository(FakeRepository):
 
 
 class FlowOperations(FakeOperations):
-    """P40 的假 operation 紀錄再加上 `run_sequence` 失敗時會呼叫的 `fail`。"""
+    """P40 的假 operation 紀錄再加上 `run_sequence` 失敗時會呼叫的 `fail`。
+
+    `fail` 照真實版本把 `status` 轉成 `failed`（`operations.py:343`），
+    所以「這條路徑有沒有留下可追溯的失敗」可以直接用 `load(...).status` 斷言。
+    """
 
     def __init__(self, operation_id: str = OPERATION_ID) -> None:
         super().__init__(operation_id)
         self.failures: list[tuple[str, str, bool]] = []
+        self.status = "accepted"
 
     def fail(self, operation_id: str, error: str, retryable: bool, *,
              now: datetime) -> None:
         self.failures.append((operation_id, error, retryable))
+        self.status = "failed"
+
+    def load(self, operation_id: str) -> OperationRecord | None:
+        record = super().load(operation_id)
+        return None if record is None else replace(record, status=self.status)
 
 
 class FlowWriter(FakeWriter):
@@ -275,6 +297,7 @@ def test_recurring_create_builds_v1_and_publishes_it(local_deps: Deps) -> None:
     assert result["action"] == "CREATE"
     assert result["version_id"] == "prepare-meeting@v1"
     assert result["published"] is True
+    assert set(result) <= set(TICKET_STATE_FIELDS)   # 最長的一條路徑也不得多帶欄位
     version = local_deps.repository.get_version("prepare-meeting@v1")
     assert version is not None and version.published_at is not None
     tutorial = local_deps.repository.get_meta(tutorial_pk("prepare-meeting"), Tutorial)
@@ -432,12 +455,77 @@ def test_fault_task_is_read_on_every_invoke(wired: Deps,
         pipeline_task_handler(event("ensure_embedding"), None)
 
 
-def test_build_deps_wires_the_four_dependencies() -> None:
-    """Given 一份 `Settings`，Then `build_deps` 組出四個相依（形狀照 `_build_wiring`）。"""
-    deps = build_deps(Settings(table_name="training_kb", content_bucket="tkb",
-                               aws_region="us-east-1"))
+def test_build_deps_wires_the_four_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 一份 `Settings`，Then `build_deps` 用**它**的欄位組出四個相依。
 
-    assert deps.need_settings().table_name == "training_kb"
-    assert deps.need_repository().table_name == "training_kb"
-    assert deps.need_writer() is not None
+    單元測試不建真的 boto3 resource 與 bedrock client：把兩個工廠換成記錄呼叫參數的
+    假物件，順便斷言 region／table／bucket／model id 真的傳下去了（形狀照
+    `ingress._build_wiring`）。
+    """
+    calls: dict[str, Any] = {}
+
+    class FakeResource:
+        def __init__(self, service: str) -> None:
+            self.service = service
+
+        def Table(self, name: str) -> str:            # boto3 resource 的方法名
+            calls["table"] = name
+            return name
+
+        def Bucket(self, name: str) -> str:
+            calls["bucket"] = name
+            return name
+
+    def fake_resource(service: str, *, region_name: str) -> FakeResource:
+        calls.setdefault("regions", []).append((service, region_name))
+        return FakeResource(service)
+
+    def fake_bedrock(region: str) -> str:
+        calls["bedrock_region"] = region
+        return "fake-bedrock-client"
+
+    monkeypatch.setattr(common.boto3, "resource", fake_resource)
+    monkeypatch.setattr(common, "build_bedrock_client", fake_bedrock)
+
+    settings = Settings(table_name="training_kb", content_bucket="tkb",
+                        aws_region="us-east-1", bedrock_region="us-east-1")
+    deps = build_deps(settings)
+
+    assert deps.need_settings() is settings
+    assert (calls["table"], calls["bucket"]) == ("training_kb", "tkb")
+    assert calls["regions"] == [("dynamodb", "us-east-1"), ("s3", "us-east-1")]
+    assert calls["bedrock_region"] == "us-east-1"
+    assert deps.need_writer().client == "fake-bedrock-client"
     assert deps.operations is not None
+
+
+def test_build_deps_refuses_without_a_region() -> None:
+    """Given 沒有 `TKB_AWS_REGION`，Then 當場說出缺什麼，不讓 boto3 用預設 region。"""
+    with pytest.raises(PermanentError, match="TKB_AWS_REGION"):
+        build_deps(Settings(table_name="training_kb", content_bucket="tkb"))
+
+
+def test_publish_condition_failure_fails_the_whole_run(local_deps: Deps) -> None:
+    """Given 發布交易條件不符，Then 整條流程失敗並留下紀錄，**不會**變成 `SUCCEEDED`。
+
+    review 必修 3：`PublishResult.failed` 有值代表 DynamoDB 擋下了這次切換、兩個欄位都
+    沒變。若 task 只回 `{"published": False}` 正常結束，ASL 會走到名為 `Published` 的
+    Succeed 終點、execution 是 `SUCCEEDED`，而且 `operations.fail(...)` 不會被呼叫
+    ——從外面完全看不出這次其實沒發布（設計 §14.2）。
+    """
+    make_recurring(local_deps)
+    local_deps.repository.save_feature("Prepare")
+    local_deps.writer.replies["name_gap"] = naming("Prepare")
+    local_deps.writer.replies["create_v1"] = four_step_draft()
+    # 第一個 action（VERSION 的 published_at）條件不符
+    local_deps.repository.condition_failure_index = 0
+
+    with pytest.raises(PublishError, match="publish_rejected"):
+        run_ticket_analysis(start_state(), local_deps)
+
+    record = local_deps.operations.load(OPERATION_ID)
+    assert record is not None and record.status == "failed"
+    assert local_deps.operations.failures[0][2] is False       # 不是暫時錯誤，不重試
+    version = local_deps.repository.get_version("prepare-meeting@v1")
+    assert version is not None and version.published_at is None
+    assert not [key for key in local_deps.repository.objects if key.startswith("site/")]

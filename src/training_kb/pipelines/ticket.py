@@ -24,7 +24,7 @@ from training_kb.analytics.status_writer import load_validated_at
 from training_kb.clock import to_iso, utc_date
 from training_kb.config import Thresholds, load_settings
 from training_kb.content import VersionPlan, allocate_version, create_version, validate_content
-from training_kb.errors import ContentError, PermanentError
+from training_kb.errors import ContentError, PermanentError, PublishError
 from training_kb.keys import META, feature_pk, operation_ref, ticket_pk
 from training_kb.models import (
     Feature,
@@ -628,12 +628,18 @@ def _gap_of(state: dict[str, JSONValue], repository: Repository) -> TicketGap:
     body = repository.get_object(ref)
     if body is None:
         raise PermanentError(f"讀不到 gap 命名結果 {ref}")
-    naming: dict[str, Any] = json.loads(body.decode("utf-8"))
+    try:
+        naming: dict[str, Any] = json.loads(body.decode("utf-8"))
+        gap = str(naming["gap"])
+    except (ValueError, KeyError, TypeError) as error:
+        # 物件壞掉是確定不合法的資料，要走 Catch；讓 KeyError／JSONDecodeError 原樣冒出去
+        # 會變成 ASL 認不得的 errorType（比照 `_input_ticket`）。
+        raise PermanentError(f"gap 命名結果不合法：{ref}") from error
     cluster_id = _text(state, "cluster_id")
     feature_id = naming.get("feature_id")
     members = tuple(one.id for one in repository.list_tickets(_text(state, "project_id"))
                     if one.cluster_id == cluster_id)
-    return TicketGap(cluster_id=cluster_id, gap=str(naming["gap"]),
+    return TicketGap(cluster_id=cluster_id, gap=gap,
                      feature_id=None if feature_id is None else str(feature_id),
                      ticket_ids=members)
 
@@ -713,8 +719,18 @@ def task_publish_version(state: dict[str, JSONValue], deps: Deps) -> dict[str, J
     """把本輪建立的 v1 發布出去（Phase 24 `Publisher`）；CREATE 以外一律原樣回傳。
 
     `commit` 的第一件事就是 `inspect`，檢查沒過會丟 `PublishError`，所以這裡不重複呼叫
-    一次 `inspect`。條件不符**不是例外**而是 `PublishResult.failed`（DynamoDB 已經擋下
-    這次切換，兩個欄位都沒變），所以它只讓 `published` 是 `False`，不讓整條流程失敗。
+    一次 `inspect`。
+
+    **交易條件不符也要往外丟**（Phase 41 review 必修 3）：`PublishResult.failed` 代表
+    DynamoDB 擋下了這次切換、`published_at` 與 `current_version` 都沒變、`site/` 也沒有
+    新檔。回一個 `{"published": False}` 正常結束會讓 ASL 走到名為 `Published` 的 Succeed
+    終點、整次 execution `SUCCEEDED`、`run_sequence` 也不會呼叫 `operations.fail(...)`
+    ——與設計 §14.2「失敗就不發布、整次失敗」相反，而且從外面看不出這次其實沒發布。
+    所以這裡丟 `PublishError`，交給 Catch 導向 `PipelineFailed`。
+
+    底層真正的暫時性失敗（`transact_write` 把非條件式的取消翻成 `TransientError`、S3 的
+    5xx…）**不在這裡攔**：本函式沒有 `try/except`，它們原樣往上冒，ASL 的第一條 retrier
+    才抓得到（攔下來包成 `PublishError` 就等於把可重試的失敗變成不可重試）。
     """
     version_id = state.get("version_id")
     if state.get("action") != "CREATE" or not isinstance(version_id, str) or not version_id:
@@ -725,7 +741,11 @@ def task_publish_version(state: dict[str, JSONValue], deps: Deps) -> dict[str, J
                              operation_id=_text(state, "operation_id"))
     prepared = publisher.prepare(request, now=deps.now())
     result = publisher.commit(prepared, now=deps.now())
-    return {**state, "published": result.failed is None}
+    if result.failed is not None:
+        raise PublishError(
+            f"publish_rejected：{result.failed} 的發布交易條件不符，"
+            f"沒有任何欄位被切換（{'；'.join(result.reasons)}）")
+    return {**state, "published": True}
 
 
 TICKET_ANALYSIS_TASKS: tuple[TaskFn, ...] = (

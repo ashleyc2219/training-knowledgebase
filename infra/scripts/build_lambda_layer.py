@@ -35,6 +35,19 @@ PYTHON_PLATFORM = "x86_64-manylinux2014"
 REQUIREMENTS = ("pydantic>=2,<3", "jsonschema>=4,<5")
 """`pyproject.toml` 三個 runtime 相依裡「Lambda 沒有的」兩個。"""
 
+MARKERS = ("pydantic", "jsonschema")
+"""`is_built` 要看到的頂層套件目錄；空的 `python/` 不算建好。"""
+
+
+def is_built(root: Path = LAYER_ROOT) -> bool:
+    """layer **真的裝好了嗎**——不是只看目錄在不在。
+
+    只查 `is_dir()` 會被一個空的 `build/lambda-layer/python/` 騙過去（測試或手動
+    `mkdir` 都可能留下），然後部署出一支 import 才爆 `Runtime.ImportModuleError`
+    的 Lambda。所以這裡查的是每個頂層套件目錄。
+    """
+    return all((root / "python" / name).is_dir() for name in MARKERS)
+
 
 def command(target: Path = LAYER_PYTHON_DIR) -> list[str]:
     """完整的 uv 指令；獨立出來讓報告與測試都引用同一份，不各自抄一次。"""

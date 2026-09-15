@@ -34,10 +34,10 @@ import aws_cdk as cdk  # noqa: E402
 from aws_cdk.assertions import Match, Template  # noqa: E402
 
 from infra import training_kb_stack as stack_module  # noqa: E402
+from infra.scripts.build_lambda_layer import MARKERS, is_built  # noqa: E402
 from infra.training_kb_stack import (  # noqa: E402
     CONTENT_BUCKET_CONTEXT,
     CONTENT_BUCKET_ENV,
-    LAYER_PATH,
     TrainingKbStack,
 )
 
@@ -118,21 +118,50 @@ ACCOUNT, REGION = "111122223333", "us-east-1"
 
 
 @pytest.fixture
-def template(monkeypatch: pytest.MonkeyPatch) -> "Template":
+def fake_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
+    """把 layer 路徑指到 `tmp_path` 下一份**看起來裝好了**的目錄。
+
+    **不在工作樹裡 `mkdir`**：真的在 `build/lambda-layer/python` 造一個空目錄，會讓
+    「清過 build/ 之後跑一次 pytest」就足以讓部署守門通過，然後部署出一支空 layer
+    （第一次 invoke 才 `Runtime.ImportModuleError`）——Phase 41 review 必修 2。
+    """
+    for marker in MARKERS:
+        (tmp_path / "python" / marker).mkdir(parents=True)
+    monkeypatch.setattr(stack_module, "LAYER_PATH", tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def template(monkeypatch: pytest.MonkeyPatch, fake_layer: pathlib.Path) -> "Template":
     """合成 `TrainingKbApp`。
 
-    **不建 `TrainingKbData`**：本 stack 用 `Table.from_table_name`／`Bucket.from_bucket_name`
-    以純字串名稱接進既有資源，才能 `cdk deploy TrainingKbApp --exclusively` 單獨部署而
-    不碰同一波次 Phase 57 正在改的 data stack（controller 2026-09-14 裁決）。
-
-    layer 只要 asset 目錄存在就合成得出來，內容不影響任何斷言，所以這裡不跑 uv 安裝。
+    **不建 `TrainingKbData`**：本 stack 用 `Table.from_table_attributes`／
+    `Bucket.from_bucket_name` 以純字串名稱接進既有資源，才能
+    `cdk deploy TrainingKbApp --exclusively` 單獨部署而不碰同一波次 Phase 57 正在改的
+    data stack（controller 2026-09-14 裁決）。
     """
     monkeypatch.setenv(SECRET_ENV, "unit-test-secret")
-    (LAYER_PATH / "python").mkdir(parents=True, exist_ok=True)
     app = cdk.App(context={CONTENT_BUCKET_CONTEXT: BUCKET})
     stack = TrainingKbStack(app, "TrainingKbApp",
                             env=cdk.Environment(account=ACCOUNT, region=REGION))
     return Template.from_stack(stack)
+
+
+def role_statements(template: "Template", function_name: str) -> list[dict]:
+    """某一支 Lambda 的 role 上掛的全部 policy 敘述。
+
+    `find_resources("AWS::IAM::Policy")` 的每一份 policy 都帶 `Roles: [{"Ref": <role 的
+    邏輯 ID>}]`，函式則帶 `Role: {"Fn::GetAtt": [<role 的邏輯 ID>, "Arn"]}`，所以兩邊用
+    邏輯 ID 對起來就知道哪些敘述屬於哪一支函式。
+    """
+    functions = template.find_resources("AWS::Lambda::Function")
+    role_id = next(row["Properties"]["Role"]["Fn::GetAtt"][0]
+                   for row in functions.values()
+                   if row["Properties"]["FunctionName"] == function_name)
+    return [statement
+            for policy in template.find_resources("AWS::IAM::Policy").values()
+            if any(ref.get("Ref") == role_id for ref in policy["Properties"]["Roles"])
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]]
 
 
 def statements(template: "Template") -> list[dict]:
@@ -178,6 +207,8 @@ def test_both_lambdas_share_one_dependency_layer_and_get_the_real_bucket(
         assert variables["TKB_AWS_REGION"] == REGION
         # O5 BLOCKED：生成模型 ID 不得填猜測值（00A §3.5）
         assert "TKB_GENERATION_MODEL_ID" not in variables
+        # 預設 prod：faults 的注入開關在正式部署一律不生效
+        assert variables["TKB_ENV"] == "prod"
 
 
 def test_nothing_is_imported_from_another_stack(template: "Template") -> None:
@@ -214,11 +245,14 @@ def test_delete_item_is_scoped_to_the_single_table(template: "Template") -> None
 
 def test_bedrock_is_limited_to_the_approved_embedding_model(template: "Template") -> None:
     """Given O5 BLOCKED，Then 只授權已核定用途的 embedding 模型，不列生成模型。"""
+    titan = f"arn:aws:bedrock:{REGION}::foundation-model/amazon.titan-embed-text-v2:0"
     bedrock = [row for row in statements(template) if "bedrock:InvokeModel" in actions(row)]
-    assert len(bedrock) == 1
+    assert bedrock
     # 單元素的 Resource 會被 CDK 收成純字串，不是 list
-    assert bedrock[0]["Resource"] == \
-        f"arn:aws:bedrock:{REGION}::foundation-model/amazon.titan-embed-text-v2:0"
+    assert all(row["Resource"] == titan for row in bedrock)
+    # webhook 的 ingress Agent 回退也在 Lambda 內跑 Converse，O5 解鎖後沒有這條會 AccessDenied
+    assert any("bedrock:InvokeModel" in actions(row)
+               for row in role_statements(template, "training-kb-webhook"))
 
 
 def test_only_the_webhook_has_a_public_function_url(template: "Template") -> None:
@@ -236,35 +270,54 @@ def test_state_machine_logs_to_its_own_group(template: "Template") -> None:
         {"LoggingConfiguration": Match.object_like({"Level": "ALL"})}))
 
 
-def test_webhook_secret_comes_from_the_deploy_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_webhook_secret_comes_from_the_deploy_shell(
+        monkeypatch: pytest.MonkeyPatch, fake_layer: pathlib.Path) -> None:
     """Given 部署當下的 shell 帶進 `TKB_GITHUB_WEBHOOK_SECRET`，Then 缺值就當場 synth 失敗。
 
     值不寫進 CDK 程式或 repo；缺值時讓 `KeyError` 擋下來，比部署出一支永遠驗簽失敗的
     Lambda 好（Phase 41 §7 Task 3 Step 3）。
     """
     monkeypatch.delenv(SECRET_ENV, raising=False)
-    (LAYER_PATH / "python").mkdir(parents=True, exist_ok=True)
     app = cdk.App(context={CONTENT_BUCKET_CONTEXT: BUCKET})
     with pytest.raises(KeyError, match=SECRET_ENV):
         TrainingKbStack(app, "TrainingKbApp",
                         env=cdk.Environment(account=ACCOUNT, region=REGION))
 
 
-def test_missing_dependency_layer_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Given 還沒建 layer，Then synth 當場失敗並說出要跑哪一支腳本（不是部署後才爆）。"""
+@pytest.mark.parametrize("shape", ["missing", "empty"])
+def test_unbuilt_dependency_layer_fails_loudly(monkeypatch: pytest.MonkeyPatch,
+                                               tmp_path: pathlib.Path, shape: str) -> None:
+    """Given layer 不存在**或只是一個空目錄**，Then synth 當場失敗並說出要跑哪一支腳本。
+
+    空目錄那一格是 review 必修 2：只查 `is_dir()` 的守門會讓空 layer 一路部署上去，
+    到第一次 invoke 才 `Runtime.ImportModuleError: No module named 'pydantic'`。
+    """
     monkeypatch.setenv(SECRET_ENV, "unit-test-secret")
-    monkeypatch.setattr(stack_module, "LAYER_PATH", PROJECT_ROOT / "build" / "does-not-exist")
+    root = tmp_path / "layer"
+    if shape == "empty":
+        (root / "python").mkdir(parents=True)
+    monkeypatch.setattr(stack_module, "LAYER_PATH", root)
     app = cdk.App(context={CONTENT_BUCKET_CONTEXT: BUCKET})
     with pytest.raises(FileNotFoundError, match="build_lambda_layer"):
         TrainingKbStack(app, "TrainingKbApp",
                         env=cdk.Environment(account=ACCOUNT, region=REGION))
 
 
-def test_content_bucket_has_no_silent_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_is_built_only_accepts_a_real_layer(tmp_path: pathlib.Path) -> None:
+    """Given `is_built`，Then 空目錄不算建好、每個頂層套件都在才算。"""
+    assert is_built(tmp_path) is False
+    (tmp_path / "python").mkdir()
+    assert is_built(tmp_path) is False
+    for marker in MARKERS:
+        (tmp_path / "python" / marker).mkdir()
+    assert is_built(tmp_path) is True
+
+
+def test_content_bucket_has_no_silent_default(
+        monkeypatch: pytest.MonkeyPatch, fake_layer: pathlib.Path) -> None:
     """Given 沒有 context 也沒有環境變數，Then 明確失敗，不退回 `training-kb-content`。"""
     monkeypatch.setenv(SECRET_ENV, "unit-test-secret")
     monkeypatch.delenv(CONTENT_BUCKET_ENV, raising=False)
-    (LAYER_PATH / "python").mkdir(parents=True, exist_ok=True)
     with pytest.raises(PermanentError, match=CONTENT_BUCKET_ENV):
         TrainingKbStack(cdk.App(), "TrainingKbApp",
                         env=cdk.Environment(account=ACCOUNT, region=REGION))
@@ -274,3 +327,29 @@ def test_outputs_carry_what_the_next_phases_need(template: "Template") -> None:
     """Given 部署證據要沿用，Then 三個輸出都在（state machine ARN、Function URL、log group）。"""
     assert set(template.to_json()["Outputs"]) >= {
         "TicketAnalysisStateMachineArn", "WebhookFunctionUrl", "TicketAnalysisLogGroup"}
+
+
+def test_public_webhook_role_is_narrower_than_the_pipeline_role(template: "Template") -> None:
+    """Given webhook 是唯一 `AuthType: NONE` 的入口，Then 它的權限必須小於內部流程。
+
+    review 必修 1：公開入口原本拿到與 pipeline 一樣的完整資料權限，含公開 `site/*` 的
+    `s3:PutObject` 與整表的 `Scan`／`PutItem`／`UpdateItem`。驗簽只保證來源，不保證程式
+    沒有其他洞，所以範圍要自己收。
+    """
+    webhook = role_statements(template, "training-kb-webhook")
+    task = role_statements(template, "training-kb-pipeline-task")
+
+    objects = [row for row in webhook if "s3:PutObject" in actions(row)]
+    assert len(objects) == 1
+    # 單元素的 Resource 會被 CDK 收成純字串，不是 list
+    assert "site/" not in json.dumps(objects[0]["Resource"])        # 不得寫公開前綴
+    assert "operations/*" in json.dumps(objects[0]["Resource"])
+    assert any("site/" in json.dumps(row.get("Resource"))
+               for row in task if "s3:PutObject" in actions(row))   # pipeline 才有
+
+    ddb = [row for row in webhook if any(one.startswith("dynamodb:") for one in actions(row))]
+    assert len(ddb) == 1
+    assert set(actions(ddb[0])) == {"dynamodb:GetItem", "dynamodb:PutItem",
+                                    "dynamodb:UpdateItem", "dynamodb:Scan"}
+    assert "dynamodb:DeleteItem" not in json.dumps(webhook)
+    assert "index/by_target" not in json.dumps(ddb[0]["Resource"])   # 接入路徑不查 GSI

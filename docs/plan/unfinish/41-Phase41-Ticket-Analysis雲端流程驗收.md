@@ -235,6 +235,14 @@ def run_ticket_analysis(state, deps):
 
 再補 recurring 但 `NO_FEATURE`（0 個版本、有 `ticket-decision.json`）、recurring 且 `KEEP`（0 個版本）、recurring 且 `CREATE`（有 `version_id`）三個案例，都要斷言 state 不含工單全文與向量。
 
+**修正回合 1（2026-09-14，review 必修 3）：** `PublishVersion` 在
+`PublishResult.failed` 有值時**丟 `PublishError`**，不再回 `{"published": False}` 正常結束。
+條件不符代表 DynamoDB 擋下了這次切換（兩個欄位都沒變、`site/` 也沒有新檔），正常結束會讓
+ASL 走到名為 `Published` 的 Succeed 終點、整次 execution `SUCCEEDED`、`run_sequence` 也不會
+呼叫 `operations.fail(...)`——從外面完全看不出這次其實沒發布，與 §6 的失敗語意相反。
+底層真正的暫時性失敗（`transact_write` 翻出來的 `TransientError` 等）**不攔**，原樣往上冒，
+第一條 retrier 才抓得到。ASL 形狀不變。
+
 **本計畫選擇（2026-09-14）：** CREATE 案例的 `published_at` **不是** `null`。設計 §7.3 的成功條件是「CREATE 經第 8 節發布後，讀者可讀新教學」，所以 `PublishVersion` 真的呼叫 `Publisher.prepare/commit`，本機案例斷言 `published is True`、`published_at` 有值、`current_version` 已切換。**真實 AWS 上這條路徑到不了**（O5 BLOCKED 擋在 `NameGap`），所以雲端仍然只能宣稱到「未發布 v1 已建立」以前的節點。
 
 **本計畫選擇（2026-09-14）：** `task_decide_action` 只在 KEEP／NO_FEATURE 時寫 `ticket-decision.json`；CREATE 的那一份由 `create_first_version` 在版本建好之後寫（Phase 40 已固定的順序），三種結果仍然都有紀錄，但不會先寫一份「還沒建版」的 CREATE 紀錄。
@@ -534,6 +542,28 @@ webhook_fn.add_to_role_policy(iam.PolicyStatement(
 `delete_edge(..., "ASKS_ABOUT", ...)` 丟 `PermanentError: 不允許刪除 ASKS_ABOUT 邊`，
 `delete_edge(..., "APPLIED_TO", ...)` 成功（報告 §4）。`Template` 斷言改成「恰好一條
 `DeleteItem`、資源只有這張表、沒有任何 `dynamodb:*`」。
+
+**修正回合 1（2026-09-14，review 後補的四條裁決）：**
+
+1. **公開入口的權限要比內部流程小。** `training-kb-webhook` 是唯一 `AuthType: NONE` 的
+   入口，原本與 `training-kb-pipeline-task` 拿到同一份資料權限（含公開 `site/*` 的
+   `s3:PutObject` 與整表 `Scan`／`PutItem`／`UpdateItem`）。`_grant_data` 改成吃
+   `prefixes`／`actions`／`with_index` 三個 keyword：webhook 只有 `operations/*` 與
+   `GetItem`／`PutItem`／`UpdateItem`／`Scan`（逐一對得上 `operations`／`rote`／`ingress`
+   的呼叫），**不給索引、不給 `site/`**；`site/` 只屬於 pipeline Lambda。
+   webhook 另外要 `bedrock:InvokeModel`（限同一個已核定 model ARN）：ingress 的 Agent
+   回退在這支 Lambda 裡跑 `Converse`，O5 解鎖後沒有這條會 AccessDenied。
+2. **layer 守門要查真的裝好的套件**（`is_built`：`python/pydantic` 與 `python/jsonschema`
+   都在才算）。只查 `LAYER_PATH.is_dir()` 的話，一個空的 `build/lambda-layer/python/`
+   就能讓 synth、deploy 全部通過，到第一次 invoke 才 `Runtime.ImportModuleError`。
+   單元測試改用 `monkeypatch.setattr(stack_module, "LAYER_PATH", tmp_path)`，**不再在
+   工作樹裡 `mkdir`**。
+3. **`base_env` 加 `TKB_ENV`**，值取 `os.environ.get("TKB_ENV", "prod")`：預設 prod 讓
+   `faults.active_fault` 在正式部署一律不生效；P59 要做復原演練時以 `TKB_ENV=demo`
+   重新部署。（`TKB_FAULT_TASK` 是另一個開關，由 `update-function-configuration` 臨時加，
+   跑完立刻移除。）
+4. **state machine log group 保留 3 個月**：證據依賴 execution history 的 90 天保留期，
+   log 要活得比它久一點。
 
 **本計畫選擇（2026-09-14）：** `infra/app.py` 在三個前提（`TKB_GITHUB_WEBHOOK_SECRET`、
 bucket 名稱、`build/lambda-layer/`）任一缺席時**只跳過** `TrainingKbApp` 並把原因印到

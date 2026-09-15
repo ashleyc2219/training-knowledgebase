@@ -16,6 +16,7 @@ import sys
 
 import aws_cdk as cdk
 
+from infra.scripts.build_lambda_layer import is_built
 from infra.training_kb_data_stack import TrainingKbDataStack
 from infra.training_kb_stack import (
     CONTENT_BUCKET_CONTEXT,
@@ -40,7 +41,7 @@ if not os.environ.get(SECRET_ENV):
     missing.append(f"環境變數 {SECRET_ENV}")
 if not (app.node.try_get_context(CONTENT_BUCKET_CONTEXT) or os.environ.get(CONTENT_BUCKET_ENV)):
     missing.append(f"環境變數 {CONTENT_BUCKET_ENV} 或 cdk context {CONTENT_BUCKET_CONTEXT}")
-if not LAYER_PATH.is_dir():
+if not is_built(LAYER_PATH):
     missing.append(f"{LAYER_PATH}（先跑 uv run python -m infra.scripts.build_lambda_layer）")
 if missing:
     print(f"[infra] 跳過 TrainingKbApp，缺少：{'；'.join(missing)}", file=sys.stderr)
