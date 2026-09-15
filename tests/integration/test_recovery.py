@@ -24,6 +24,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Any
+from uuid import uuid4
 
 import boto3
 import pytest
@@ -40,7 +41,7 @@ from training_kb.content import (
     put_private_artifact,
     render_markdown,
 )
-from training_kb.errors import PublishError, TransientError
+from training_kb.errors import CoordinationError, PublishError, TransientError
 from training_kb.faults import FAULT_POINTS
 from training_kb.keys import operation_ref, tutorial_pk
 from training_kb.models import (
@@ -132,6 +133,11 @@ class World:
         self.v1_html = ""
         self.features: dict[str, str] = {}
         self.public_seeded: list[str] = []
+        self.prefix = ""
+        self.seed_site_index = True
+        """seed 時要不要寫 `site/index.html`。**真實 bucket 上一律 `False`**：那是所有教學
+        共用的公開物件（P57 發布過一份），演練沒有理由覆寫它；真的需要它反映新版時，
+        第一次 `commit`／`resume_publish` 會自己從真表重建（Phase 59 review Minor）。"""
 
     # --- seed ---
 
@@ -184,6 +190,8 @@ class World:
             self._write_public(f"{PUBLIC}tutorials/{slug}/index.html",
                                renderer.render_tutorial_index(tutorial, [version]))
             self.public_seeded.append(slug)
+        if not self.seed_site_index:
+            return
         seeded = [self.tutorial(slug) for slug in self.public_seeded]
         self._write_public(f"{PUBLIC}index.html", renderer.render_site_index(seeded))
 
@@ -342,6 +350,39 @@ def test_cut_point_4_is_the_o3_gap(world: World, monkeypatch: pytest.MonkeyPatch
     assert "v2.html" not in world.tutorial_index(SLUG)
 
 
+def test_create_version_cut_points_leave_exactly_the_expected_artifacts(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 切點 1／2，Then 私有產物與關係邊停在矩陣寫的那一格（§2 的前兩列）。
+
+    切點 1：`v2.md` 有、`v2.diff` 無、VERSION item 還沒建。
+    切點 2：兩個私有產物齊全、VERSION item 已建、**STEP 邊還是 0 條**、`published_at` 是
+    `None`。這兩行是 §2 矩陣「私有產物」那一欄的直接斷言，moto 與真實 AWS 各驗一次
+    （真實版在 `test_real_aws_create_version_cut_points`）。
+    """
+    operation_id = "op-release-r_cv"
+    _accept_sub(world, operation_id, "r_cv")
+
+    monkeypatch.setenv("TKB_FAULT", "s3_after_md")
+    with pytest.raises(TransientError, match="s3_after_md"):
+        world.build_version(operation_id, SLUG)
+    assert world.repository.object_exists(markdown_key(SLUG, 2))
+    assert not world.repository.object_exists(diff_key(SLUG, 2))
+    assert world.repository.get_version(f"{SLUG}@v2") is None
+
+    monkeypatch.setenv("TKB_FAULT", "ddb_after_version")
+    with pytest.raises(TransientError, match="ddb_after_version"):
+        world.build_version(operation_id, SLUG)
+    assert world.repository.object_exists(diff_key(SLUG, 2))
+    version = world.repository.get_version(f"{SLUG}@v2")
+    assert version is not None and version.published_at is None
+    assert world.repository.get_steps(f"{SLUG}@v2") == []
+
+    monkeypatch.delenv("TKB_FAULT")
+    assert world.build_version(operation_id, SLUG) == f"{SLUG}@v2"   # 同版號，沒有 v3
+    assert len(world.repository.get_steps(f"{SLUG}@v2")) == 4
+    assert world.repository.get_version(f"{SLUG}@v3") is None
+
+
 def test_batch_publish_is_all_or_nothing(world: World,
                                          monkeypatch: pytest.MonkeyPatch) -> None:
     """Given 兩篇整批在切點 3 失敗，Then 兩篇同時維持舊狀態（F49）。"""
@@ -361,7 +402,15 @@ def test_batch_publish_is_all_or_nothing(world: World,
 
 def test_batch_resume_uses_pending_promote_list(world: World,
                                                 monkeypatch: pytest.MonkeyPatch) -> None:
-    """Given 兩篇在切點 4 中斷，When 同 operation 復原，Then 依 `pending-promote.json` 補齊。"""
+    """Given 兩篇在切點 4 中斷，When 同 operation 復原，Then 依 `pending-promote.json` 補齊。
+
+    **訊息裡的 `a3_after_first_site_before_second` 只是 `_cut_point` 依批次大小（>= 2 篇）
+    貼的標籤，不代表本測試重現了 partial。** 切點 4 插在第一次 `_restage` 之前，所以這裡
+    兩篇的公開頁都還沒寫出去——DynamoDB 全新、公開站**全舊**。真正的 partial（A 的 v2
+    HTTP 200、B 的 v2 HTTP 404）要讓**第 2 篇的 promote** 失敗才會出現，那在 moto 由
+    `tests/integration/test_batch_publish_cutpoints.py::test_batch_cutpoint_5_partial_is_observed_not_accepted`
+    重現，在真實 AWS 由 `docs/plan/report/recovery-20260915-0644.md` §4 重現（判 FAIL／O3）。
+    """
     parent = "op-release-r_batch"
     version_ids = tuple(world.build_version(f"op-release-r_{slug}", slug)
                         for slug in (SLUG, SLUG_B)
@@ -377,10 +426,15 @@ def test_batch_resume_uses_pending_promote_list(world: World,
         assert not world.object_exists(world.public_key(version_id))
     monkeypatch.delenv("TKB_FAULT")
     world.resume(parent)
+    bodies = {version_id: world.public_bodies(version_id) for version_id in version_ids}
     for version_id in version_ids:
         assert world.object_exists(world.public_key(version_id))
-        assert b'data-published="false"' not in (
-            world.repository.get_object(world.public_key(version_id)) or b"")
+        assert b'data-published="false"' not in bodies[version_id]
+    # 復原本身也要冪等：第二次 resume 走同一條路（bytes 相同 → `_put_public_object`
+    # 撞 412 之後比對通過），不丟例外、不改變任何公開物件。
+    world.resume(parent)
+    assert {version_id: world.public_bodies(version_id)
+            for version_id in version_ids} == bodies
 
 
 def _accept_sub(world: World, operation_id: str, canonical_id: str) -> bool:
@@ -449,10 +503,38 @@ def test_same_event_resend_adds_no_samples(world: World) -> None:
 
 def test_resume_refuses_an_operation_without_a_version(world: World) -> None:
     """Given 沒有版號也沒有待補清單的 operation，Then `resume_publish` 明確拒絕。"""
-    from training_kb.errors import CoordinationError
     _accept_sub(world, "op-release-r_empty", "r_empty")
     with pytest.raises(CoordinationError, match="沒有可沿用"):
         world.resume("op-release-r_empty")
+
+
+def test_batch_before_transaction_has_no_resume_input(world: World,
+                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given 多篇在交易**之前**中斷，Then `resume_publish` 明確說沒有輸入（D-59 的直接後果）。
+
+    多篇的復原輸入只有 `pending-promote.json`，而它是在**交易成功之後**才寫的；父 operation
+    依 D-59 又不持有版號。所以「多篇 ＋ 交易前中斷」這一格 `resume_publish` **拿不到**要補
+    什麼，只能 `CoordinationError` 交人工看——**正確的復原方式是上游用同一份 `version_ids`
+    重跑 `prepare`／`commit`**（版本都還沒發布，走正常路徑就好）。
+
+    單篇沒有這個問題：`allocate_version` 已經把版號寫進同一筆 ledger
+    （見 `test_resume_before_transaction_runs_the_normal_commit`）。
+    真實 AWS 的同一組觀察在 `docs/plan/report/recovery-20260915-0644.md` §9 切點 4a。
+    """
+    parent = "op-release-r_batch"
+    version_ids = tuple(world.build_version(f"op-release-r_{slug}", slug)
+                        for slug in (SLUG, SLUG_B)
+                        if _accept_sub(world, f"op-release-r_{slug}", slug))
+    _accept_sub(world, parent, "r_batch")
+    monkeypatch.setenv("TKB_FAULT", "publish_before_transact")
+    with pytest.raises(TransientError):
+        world.publish_batch(version_ids, operation_id=parent)
+    monkeypatch.delenv("TKB_FAULT")
+    with pytest.raises(CoordinationError, match="沒有可沿用"):
+        world.resume(parent)
+    world.publish_batch(version_ids, operation_id=parent)      # 上游重跑同一份清單
+    for version_id in version_ids:
+        assert world.object_exists(world.public_key(version_id))
 
 
 def test_resume_before_transaction_runs_the_normal_commit(world: World,
@@ -501,7 +583,6 @@ def test_closed_execution_needs_a_ledger_result(world: World,
     """
     from botocore.exceptions import ClientError
 
-    from training_kb.errors import CoordinationError
     from training_kb.pipeline_starter import BotoPipelineStarter
 
     class AlreadyExists(ClientError):
@@ -560,7 +641,17 @@ def test_lease_serialises_two_writers_on_the_same_tutorial(world: World) -> None
 
 AWS_REGION = "us-east-1"
 AWS_PREFIX = "p59-"
-"""真實資源上所有 demo 資料的 slug／ID 前綴；演練後自己清掉（留下的列進報告）。"""
+"""真實資源上所有 demo 資料的共同前綴；實際用的是它加一段 run id（見 `_run_prefix`）。"""
+
+
+def _run_prefix() -> str:
+    """這一次演練專屬的前綴 `p59-<6 碼>-`。
+
+    加 run id 是為了讓**並發**的兩次演練不會撞名、也不會互相清掉對方的資料
+    （Phase 59 review Minor）。代價是：某次演練中途當掉留下的 `p59-` 資料不會被下一次
+    自動掃掉，要人工用 `contains(PK, "p59-")` 掃一次——recovery 報告 §7 就是那道查詢。
+    """
+    return f"{AWS_PREFIX}{uuid4().hex[:6]}-"
 
 
 @pytest.fixture
@@ -576,8 +667,10 @@ def aws_world(monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
         os.environ.get("TKB_TABLE_NAME", "training_kb"))
     bucket = boto3.resource("s3", region_name=AWS_REGION).Bucket(bucket_name)
     built = World(Repository(table, bucket))
-    # `site/index.html` 是**共用**的公開物件（P57 已經發布過一份）：seed 會覆寫它，
-    # 所以先原樣存起來，清理時逐字寫回去，演練不留痕跡在別人的頁面上。
+    built.prefix = _run_prefix()
+    built.seed_site_index = False       # 共用物件，seed 不碰它
+    # 但 `commit`／`resume_publish` 仍會從真表重建 `site/index.html`（那是它們的正常步驟），
+    # 所以原 bytes 還是先存起來、清理時逐字寫回，當作最後一道保險。
     saved_index = built.repository.get_object(f"{PUBLIC}index.html")
     monkeypatch.delenv("TKB_FAULT", raising=False)
     monkeypatch.setenv("TKB_ENV", "demo")
@@ -586,13 +679,16 @@ def aws_world(monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
 
 
 def _cleanup(world: World, table: Any, bucket: Any, saved_index: bytes | None) -> None:
-    """清掉本次演練 seed 的 `p59-` item 與物件；刪不掉的由報告列出來交人工處理。"""
+    """清掉**本次 run** 的 item 與物件；刪不掉的由報告列出來交人工處理。
+
+    過濾用 `world.prefix`（帶 run id）而不是共同的 `p59-`：並發的另一次演練不該被清掉。
+    """
     for entity in ("TUTORIAL", "VERSION", "FEATURE", "STEP", "RULE", "OPS"):
         for item in world.repository.scan_entity(entity, meta_only=False):
-            if AWS_PREFIX in f"{item.get('PK', '')}{item.get('SK', '')}":
+            if world.prefix in f"{item.get('PK', '')}{item.get('SK', '')}":
                 table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
     for summary in bucket.objects.all():
-        if AWS_PREFIX in summary.key:
+        if world.prefix in summary.key:
             summary.delete()
     if saved_index is not None:
         world.repository.put_object(f"{PUBLIC}index.html", saved_index,
@@ -611,10 +707,10 @@ def test_real_aws_publish_cut_points_and_resume(aws_world: World,
     **O3 仍是 FAIL**：切點 4 觀察到的「DynamoDB 已新、公開頁還舊」原樣記錄，不宣稱通過。
     """
     world = aws_world
-    slug = f"{AWS_PREFIX}{SLUG}"
-    world.seed_one(slug, f"{AWS_PREFIX}{FEATURE}")
-    operation_id = f"op-release-{AWS_PREFIX}r1"
-    _accept_sub(world, operation_id, f"{AWS_PREFIX}r1")
+    slug = f"{world.prefix}{SLUG}"
+    world.seed_one(slug, f"{world.prefix}{FEATURE}")
+    operation_id = f"op-release-{world.prefix}r1"
+    _accept_sub(world, operation_id, f"{world.prefix}r1")
     version_id = world.build_version(operation_id, slug)
 
     monkeypatch.setenv("TKB_FAULT", "publish_before_transact")
@@ -641,10 +737,10 @@ def test_real_aws_create_version_cut_points(aws_world: World,
                                             monkeypatch: pytest.MonkeyPatch) -> None:
     """真實 S3 條件寫入上跑切點 1、2，並以同一個 operation 重送沿用同版號（O2 PASS）。"""
     world = aws_world
-    slug = f"{AWS_PREFIX}{SLUG_B}"
-    world.seed_one(slug, f"{AWS_PREFIX}{FEATURE_B}")
-    operation_id = f"op-release-{AWS_PREFIX}r2"
-    _accept_sub(world, operation_id, f"{AWS_PREFIX}r2")
+    slug = f"{world.prefix}{SLUG_B}"
+    world.seed_one(slug, f"{world.prefix}{FEATURE_B}")
+    operation_id = f"op-release-{world.prefix}r2"
+    _accept_sub(world, operation_id, f"{world.prefix}r2")
 
     monkeypatch.setenv("TKB_FAULT", "s3_after_md")
     with pytest.raises(TransientError, match="s3_after_md"):
