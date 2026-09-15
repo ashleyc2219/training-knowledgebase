@@ -184,11 +184,21 @@ renamed 且 old_name 不在 name/aliases？ ---------+   （alias 已命中 -> �
 
 `SAFETY_NET_CANDIDATES = 5` 是**本計畫選擇**的候選預算（上限五個版本、五次確認呼叫），不是業務門檻，也不是另一個 cosine 值。要留意**候選前的 `embed` 次數與「目前已發布步驟總數」成正比**：§2 的三篇教學共約十步，就是 1 次查詢向量加十次步驟向量；教學變多時線性成長，而且每次 `safety_net` 都重算（設計 §10 允許單次執行內重用向量，但不往 ERM 加 embedding 欄位）。每一次 `embed` 與 `generate_json` 都是一次真實 Bedrock attempt，依 F45 必須計入 `CallTrace`。Demo 規模可接受；要放大資料量前先回頭看設計 §18。
 
+### 本計畫選擇（2026-09-14，實作時裁決）
+
+1. **`kind` 比較寫法**：`needs_safety_net` 用 `release.kind is not ReleaseKind.RENAMED`。`ReleaseKind` 是 `StrEnum`，與 `"renamed"` 字串也相等，但 enum 比較不會被打錯的字面值騙過，mypy 也擋得住。
+2. **候選 tie-break**：`scored` 的元素固定是 `(-score, slug, number, version_id)`，`list.sort()` 一次得到「分數降序 → slug 升序 → number 升序 → version_id 升序」，同分的勝者固定、重跑 byte 相同。
+3. **`safety_net` 不自己先跑 `find_release_hits`**：它只回補漏證據，聯集由呼叫端（P52 的 `task_safety_net`）做 `set(direct) | set(net)`。補漏因此只會新增，不可能抹掉明確命中。
+4. **prompt 分區**：system 常數叫 `_SAFETY_NET_SYSTEM`（與 `_TUTORIAL_SYSTEM`／`_GAP_SYSTEM`／`_DIAGNOSE_SYSTEM` 同風格）；user 固定三個分區 `<change>`（改版名稱）→ `<version>`（候選所屬版本，沿用 P45 `prompt_diagnose_weak` 的名字）→ `<source_data>`（候選步驟的 `number` 與文字，經 `_as_data` 轉義）。
+5. **node 名稱**：`safety_net_query`（查詢向量）、`safety_net_step`（每個步驟一次）、`safety_net_confirm`（每個候選版本一次）。三個都是字面值，沒有再宣告 00A §6.9 以外的公開常數。
+6. **退役教學的不對稱**：`find_release_hits` 會回退役教學的 current 已發布步驟（P27 不看 `status`，見 §7 Task 1 Step 4 的現況核對），`safety_net` 的 `_current_published` **會**排除退役教學——明確證據照實回報，補漏證據只補到 active 的教學上。
+7. **整合測試的 GSI 替身**：moto 的 GSI 是即時的，所以用兩個比真實更嚴格的替身——`blind_gsi`（候選來源整個關掉）與「少了 `entity` 屬性的邊」（`by_target` 看得到、`scan_entity` 掃不到）。做法沿用 P27 的 `tests/integration/test_current_published_steps.py`。
+
 ## 7. TDD Tasks
 
 ### Task 1：把 Phase 27 的反查包成 `StepHit` 座標
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 import pytest
@@ -216,7 +226,7 @@ def test_gsi_row_without_base_row_is_not_silently_dropped(three_tutorials):
 
 `three_tutorials` 就是 §2 的圖譜：A `prepare-meeting`（current `@v2`，四步，第 3 步引用 `FEATURE#Prepare`；歷史版 `@v1` 第 3 步也引用它）、B `share-summary`（current `@v1`，兩步；另有未發布的 `@v2`，第 1 步也引用該 Feature）、C `notification-settings`（current `@v1`，兩步）。它和 [Phase 27](./27-Phase27-固定圖譜查詢.md) 的 `repo` fixture 同一種做法：**被測的是真的 `Repository`**，只有 Phase 06／08 的原語（`scan_entity`、`query_by_target`、`get_steps`、`get_tutorial`、`get_version`）由記憶體字典頂替，`gsi_hide(pk)` 讓某筆邊暫時不出現在 GSI、`clear_steps(version_id)` 只刪基表的 STEP item。這樣跑到的 `find_current_published_steps_referencing` 是 Phase 27 的真程式，不是另一份複製品。第一個測試同時蓋掉 F17 的兩種排除（歷史版 `@v1`、未發布的 `share-summary@v2`）與 `REL` Rule 12（B、C 零命中）。
 
-- [ ] **Step 2：執行並確認紅燈**
+- [x] **Step 2：執行並確認紅燈**
 
 ```bash
 uv run pytest tests/unit/test_release_hits.py -q
@@ -224,7 +234,7 @@ uv run pytest tests/unit/test_release_hits.py -q
 
 預期：FAIL，訊號包含 `cannot import name 'find_release_hits'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from dataclasses import dataclass
@@ -249,9 +259,11 @@ def find_release_hits(feature_id, *, repository):
 
 只有這幾行：GSI 候選、基表核對、`PermanentError` 都在 Phase 27 裡，本 Phase **不得**另寫一份 `query_by_target` 篩選（00A D-38）。函式不吞例外，所以第三個測試才會看到 `PermanentError`。
 
-- [ ] **Step 4：跑 `uv run pytest tests/unit/test_release_hits.py -q` 確認綠燈。** 另補三個案例：同一篇兩步都命中時依 `number` 升序、`status="retired"` 的教學不納入、`current_version` 為 `None`（尚未首次發布）不納入。三者都由 Phase 27 的篩選達成，本 Phase 只負責證明包裝沒有把它們放行。
+- [x] **Step 4：跑 `uv run pytest tests/unit/test_release_hits.py -q` 確認綠燈。** 另補三個案例：同一篇兩步都命中時依 `number` 升序、`status="retired"` 的教學不納入、`current_version` 為 `None`（尚未首次發布）不納入。三者都由 Phase 27 的篩選達成，本 Phase 只負責證明包裝沒有把它們放行。
 
-- [ ] **Step 5：提交**
+  > **現況核對（2026-09-14，實作）：** 三個案例都補了，但第二個的預期相反——`status="retired"` 的教學**仍然會命中**。`retire_tutorial` 只改 `status` 與 `successor`，`current_version` 與該版 `published_at` 都保留（設計 §8.1 要保存歷史），而 Phase 27 的 `_is_current_published` 只看「是不是 current 而且已發布」，沒有看 `status`。本 Phase 依 D-38 只包裝、不得自己加一層篩選，所以測試 `test_retired_tutorial_is_still_hit_because_it_keeps_a_published_current_version` 照實斷言現況；要不要在 Phase 27 排除退役教學留給 controller／P52 裁決（報告 §9）。補漏那一側的 `_current_published` **有**排除退役教學——建議不該把不再維護的教學拉回來改版。
+
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/release.py tests/unit/test_release_hits.py
@@ -260,7 +272,7 @@ git commit -m "feat(release): 反查目前已發布的引用步驟"
 
 ### Task 2：固定 Safety Net 的觸發條件
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 HIT = StepHit("prepare-meeting", "prepare-meeting@v2", 3)
@@ -278,9 +290,9 @@ def test_safety_net_trigger_follows_f16(kind, old_name, hits, expected):
     assert needs_safety_net(release, feature, hits) is expected
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_release_safety_net.py -q` 並確認紅燈**，訊號包含 `cannot import name 'needs_safety_net'`。
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_release_safety_net.py -q` 並確認紅燈**，訊號包含 `cannot import name 'needs_safety_net'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 def needs_safety_net(release, feature, hits):
@@ -294,9 +306,9 @@ def needs_safety_net(release, feature, hits):
 
 `release.kind` 是 Phase 03 的 `ReleaseKind` StrEnum，成員值就是小寫字串，所以 `!= "renamed"` 成立。純函式、不碰 `Repository` 也不碰 `Writer`：這一步決定要不要花錢，不該有副作用。
 
-- [ ] **Step 4：跑 `uv run pytest tests/unit/test_release_safety_net.py -q` 確認綠燈。** F16 四種組合全部 PASS；特別確認「alias 已命中且有 references 命中」是唯一完全不觸發的組合。
+- [x] **Step 4：跑 `uv run pytest tests/unit/test_release_safety_net.py -q` 確認綠燈。** F16 四種組合全部 PASS；特別確認「alias 已命中且有 references 命中」是唯一完全不觸發的組合。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/release.py tests/unit/test_release_safety_net.py
@@ -305,7 +317,7 @@ git commit -m "feat(release): 固定 safety net 觸發條件"
 
 ### Task 3：候選排序、逐版確認與空結果
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 def test_safety_net_confirms_per_version_and_validates_numbers(
@@ -337,9 +349,9 @@ def test_safety_net_returns_empty_when_nothing_confirmed(
 
 `renamed_release` 是 `r_42`（`kind="renamed"`、`feature="Prepare"`、`old_name="Meeting Summary"`、`new_name="Prepare"`）。`fake_writer` 與 Phase 49 同型（**現況核對 2026-09-14：各自在自己的測試檔內定義，不共用、不改 `tests/unit/conftest.py`**——那支檔依 COMMON.md R3.6 只有 P55 可以動，而且 P49／P50 同波次並行，共用會互相卡住）：`embed` 把查詢文字回成 `[1.0] + [0.0] * 1023`、把分數為 `s` 的步驟回成 `[s, sqrt(1 - s * s)] + [0.0] * 1022`，所以 Phase 16 的真 `cosine` 算出來剛好等於 `s`，排序不會被浮點誤差推翻；`generate_json` 依 `user` 裡出現的 `version_id` 從 `replies` 取回覆（沒設就用 `default_reply`），並把 `(system, user, schema, node)` 記進 `json_calls`（共用 `RecordingWriter` 記的是 **dict**；自備 fixture 要用屬性存取就自己定義 dataclass，別假設共用那支有 `json_calls`）。八個步驟裡分數最高的五個是 A 的四步加 B 的第 1 步，剛好等於 `SAFETY_NET_CANDIDATES`，所以會有兩次確認呼叫、依 `(slug, version_id)` 升序先 A 後 B。
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_release_safety_net.py -q` 並確認紅燈**，訊號包含 `cannot import name 'safety_net'`。
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_release_safety_net.py -q` 並確認紅燈**，訊號包含 `cannot import name 'safety_net'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 from training_kb.errors import ContentError
@@ -383,7 +395,7 @@ def _score_steps(release, *, repository, writer, operation_id):
     return scored, steps_by_version
 ```
 
-- [ ] **Step 4：補確認迴圈並跑完整檔案確認綠燈**
+- [x] **Step 4：補確認迴圈並跑完整檔案確認綠燈**
 
 ```python
 def safety_net(release, *, repository, writer, operation_id):
@@ -426,7 +438,7 @@ uv run pytest tests/integration/test_release_hits_consistency.py -q
 
 （現況核對 2026-09-14：原寫「保存 `aws dynamodb query --index-name by_target` 與 `get-item --consistent-read` 的原始輸出」——本檔跑在 **moto** 上，產不出真實帳號的輸出，**真實 GSI／基表比對移交 P52 §6 證據表**（COMMON.md R1）。**O2 現況是 PASS**（P11），但 moto 綠燈仍只證明資料形狀，不得用它宣稱真實併發下反查已完整。）
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/release.py src/training_kb/writing/prompts.py \
@@ -475,9 +487,9 @@ git commit -m "feat(release): 補漏候選與逐版確認"
 
 ## 11. 完成清單
 
-- [ ] `StepHit`、`find_release_hits`、`needs_safety_net`、`safety_net` 的名稱與簽名符合本文件。
-- [ ] `find_release_hits` 只包裝 Phase 27 的 `find_current_published_steps_referencing`，沒有另一份 GSI 篩選；歷史版、未發布版與「GSI 有、基表沒有」各有直接 assertion。
-- [ ] Safety Net 四種觸發組合都有測試，alias 已命中時零次 `embed`；候選上限固定為 5。
-- [ ] 確認呼叫依版本分組，非法編號被丟棄，空結果回 `()`。
-- [ ] 有聯集測試證明補漏不會抹掉既有明確命中；`REL` Rule 5、6、7、12 有直接 assertion。
-- [ ] 未把 Fake 的 PASS 說成 Bedrock、GSI 延遲或 O2／O5 已驗證。
+- [x] `StepHit`、`find_release_hits`、`needs_safety_net`、`safety_net` 的名稱與簽名符合本文件。
+- [x] `find_release_hits` 只包裝 Phase 27 的 `find_current_published_steps_referencing`，沒有另一份 GSI 篩選；歷史版、未發布版與「GSI 有、基表沒有」各有直接 assertion。
+- [x] Safety Net 四種觸發組合都有測試，alias 已命中時零次 `embed`；候選上限固定為 5。
+- [x] 確認呼叫依版本分組，非法編號被丟棄，空結果回 `()`。
+- [x] 有聯集測試證明補漏不會抹掉既有明確命中；`REL` Rule 5、6、7、12 有直接 assertion。
+- [x] 未把 Fake 的 PASS 說成 Bedrock、GSI 延遲或 O2／O5 已驗證。
