@@ -579,10 +579,64 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
     return accepted
 
 
-# ---- Phase 43（owner）：回饋類別核定表的預設值（00A §6.8）。 ----
-# controller 2026-09-14 預先宣告，讓 W1／W2 併行的 P44／P53／P54／P57 可直接 import；
-# `PENDING_CATEGORY`／`approved_categories`／`classify_feedback_category` 仍由 Phase 43 補齊。
+# ---- Phase 43 ----------------------------------------------------------------
+# 一筆回饋的 `category` 怎麼定（設計 §7.6、§12.1、§19.1 的 D12／D13）。決策表逐列互斥，
+# 由上往下第一個命中者決定結果：
+#
+#     1  勾選值在核定表內        -> 原值            0 次模型呼叫
+#     2  勾選值非空但未核定      -> 待分類          0 次
+#     3  沒勾選且留言去頭尾後為空 -> None（只有評分） 0 次
+#     4  沒勾選且留言非空        -> 模型值收斂      恰好 1 次
+#
+# 核定表 `CONFIG#feedback_categories` **只讀**：本區段沒有任何寫入路徑，模型輸出與使用者
+# 勾選都不會擴充它（新增類別是維護者的受控匯入工作）。`CommentClassification` 在 Phase 18
+# 的「走 correction？」對照表是**否**，所以這裡直接呼叫 `Writer.generate_json`，未核定的
+# 回答由 `_settle` 降級成 `待分類`，全程只有一次 request。
+#
+# `DEFAULT_FEEDBACK_CATEGORIES` 由 controller 2026-09-14 預先宣告（值不變），讓 W1／W2
+# 併行的 P44／P53／P54／P57 可以先 import。
+
+PENDING_CATEGORY = "待分類"
+"""收斂用的保留值。**不是**新的核定類別：設計 §12.1 的負面回饋數不算它。"""
+
 DEFAULT_FEEDBACK_CATEGORIES: frozenset[str] = frozenset({"找不到按鈕", "缺少資訊"})
+"""設定讀不到或形狀不合法時的退路（設計 §13 的 widget 初始兩類）。
+
+**不得改成空集合**：Phase 44 的同類計數會整批歸零，一個壞掉的設定就等於「永遠沒有弱教學」。
+"""
+
+FEEDBACK_CATEGORIES_PK = "CONFIG#feedback_categories"
+"""核定類別表的唯一來源；`CONFIG#` 與 `OPS#`／`SEQ#`／`LEASE#` 同屬不走模型的 item。"""
+
+CLASSIFY_NODE = "classify_comment"
+"""留言分類節點的名字；`CallTrace` 與 `Writer.generate_json` 的 `node` 都用它。"""
+
+
+def approved_categories(repository: Repository) -> frozenset[str]:
+    """讀核定類別表；查不到或形狀不合法一律退回 `DEFAULT_FEEDBACK_CATEGORIES`。
+
+    用 Phase 10 的 `get_meta_item`（`CONFIG#` 不走 Pydantic，00A §3.6），不是 `get_meta`。
+    `categories` 非 list、空 list、缺欄位、元素全是空白——四種都退回預設兩類而不是空集合。
+    """
+    item = repository.get_meta_item(FEEDBACK_CATEGORIES_PK)
+    values = item.get("categories") if item is not None else None
+    if isinstance(values, list):
+        names = frozenset(str(value).strip() for value in values if str(value).strip())
+        if names:
+            return names
+    return DEFAULT_FEEDBACK_CATEGORIES
+
+
+def _settle(value: str | None, approved: frozenset[str]) -> str | None:
+    """把任意字串收斂成「核定值／`待分類`／`None`」三選一。
+
+    空字串與 `None` 回 **`None`**（決策表第 3 列「只有評分」），**不是** `PENDING_CATEGORY`：
+    回保留值會讓只給評分的回饋憑空長出一個問題類別。`待分類` 本身再收斂一次仍然是它。
+    """
+    name = (value or "").strip()
+    if not name:
+        return None
+    return name if name in approved or name == PENDING_CATEGORY else PENDING_CATEGORY
 
 
 # ---- Phase 42 ----------------------------------------------------------------
