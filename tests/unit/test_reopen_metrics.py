@@ -228,10 +228,14 @@ def test_version_metrics_keeps_average_and_negative_ids_from_phase_53() -> None:
 
 def test_handler_rejects_unknown_action_before_touching_aws(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """Given 未知 action（Phase 55 才有的 `validate_rules`），Then 在接線前就 `PermanentError`。
+    """Given 未知 action，Then 在接線前就 `PermanentError`。
 
     把 `_wiring` 換成會爆炸的版本：真的有人把接線提前，這個測試就會變成 `AssertionError`
     而不是 `PermanentError`，也就不會需要 AWS 憑證才能跑單元測試。
+
+    現況核對（2026-09-14，Phase 55）：原本拿 `validate_rules` 當「未知 action」的例子，
+    Phase 55 已把它實作成第二個分支，所以改用一個沒有任何 Phase 認領的名字；
+    `validate_rules` 走新分支的斷言在 `tests/unit/test_rule_status_writer.py`。
     """
     def explode() -> tuple[object, frozenset[str], str]:
         raise AssertionError("未知 action 不得建立任何 boto3 資源")
@@ -239,6 +243,6 @@ def test_handler_rejects_unknown_action_before_touching_aws(
     monkeypatch.setattr(analytics_handler, "_wiring", explode)
     analytics_handler._reset_wiring()
     with pytest.raises(PermanentError):
-        handler({"action": "validate_rules"}, None)
+        handler({"action": "curation"}, None)
     with pytest.raises(PermanentError):
         handler({}, None)

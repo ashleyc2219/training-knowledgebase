@@ -10,13 +10,24 @@
 """
 
 import importlib
+from datetime import datetime
 from typing import Any
 
 import boto3
 
+from training_kb.analytics.status_writer import apply_rule_status, record_evaluation
+from training_kb.analytics.validation import (
+    RuleEvaluation,
+    SeedBatch,
+    evaluate_batch,
+    next_status,
+)
 from training_kb.analytics.version import metrics_action
+from training_kb.clock import parse_iso
 from training_kb.config import load_settings
 from training_kb.errors import PermanentError
+from training_kb.keys import rule_pk
+from training_kb.models import AuthoringRule
 from training_kb.repository import Repository
 
 Wiring = tuple[Repository, frozenset[str], str]
@@ -69,11 +80,55 @@ def _reset_wiring() -> None:
     _WIRING = None
 
 
+# ---- Phase 55 ----
+
+
+def _seed_batch(raw: dict[str, Any]) -> SeedBatch:
+    """把 event 裡的一筆批次還原成 `SeedBatch`；`approved_at` 走 ISO 字串。"""
+    approved_at: datetime | None = parse_iso(raw["approved_at"]) if raw.get("approved_at") else None
+    return SeedBatch(**{**raw, "approved_at": approved_at})
+
+
+def validate_rules_action(event: dict[str, Any], *, repository: Repository,
+                          approved: frozenset[str]) -> dict[str, Any]:
+    """`action: "validate_rules"`：評估批次、寫證據檔，再由唯一寫入者落狀態。
+
+    批次先依 `approved_at` **升序**排序，`next_status` 的「最新一批」才有確定意義。
+    `conflict` 固定傳 `None`：衝突判定要由呼叫端先取得 `ConflictJudgement` 並通過
+    `validated_conflict`，這個 action **不自行呼叫模型**（O5 BLOCKED，也非本 Phase 職責）。
+
+    `approved` 是 Phase 43 的**回饋類別**核定表（`_approved_categories`），與批次的
+    `approved_by` 無關；未核定的批次會被 `evaluate_batch` 判成 `undecidable`，
+    `next_status` 就不會動狀態，`apply_rule_status` 也不會被呼叫。
+    """
+    now = parse_iso(event["now"])
+    by_rule: dict[str, list[RuleEvaluation]] = {}
+    for raw in sorted(event["batches"], key=lambda item: item.get("approved_at") or ""):
+        batch = _seed_batch(raw)
+        evaluation = evaluate_batch(batch, approved=approved, repository=repository)
+        record_evaluation(evaluation, repository=repository)
+        by_rule.setdefault(batch.rule_id, []).append(evaluation)
+    results: list[dict[str, Any]] = []
+    for rule_id, evaluations in sorted(by_rule.items()):
+        rule = repository.get_meta(rule_pk(rule_id), AuthoringRule)
+        if rule is None:
+            raise PermanentError(f"找不到規則：{rule_id}")
+        target = next_status(rule.status, evaluations, None)
+        if target is not rule.status:
+            apply_rule_status(rule_id, target, repository=repository, now=now)
+        results.append({"rule_id": rule_id, "status": target.value,
+                        "verdicts": [item.verdict for item in evaluations]})
+    return {"action": "validate_rules", "results": results}
+
+
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
-    """`training-kb-analytics` 的入口；本 Phase 只認得 `action: "metrics"`。"""
+    """`training-kb-analytics` 的入口；認得 `metrics`（P54）與 `validate_rules`（P55）。"""
     action = str(event.get("action"))
     if action == "metrics":
         repository, approved, project_id = _wiring()
         return metrics_action(event, repository=repository,
                               approved=approved, project_id=project_id)
+    if action == "validate_rules":
+        repository, approved, _ = _wiring()
+        return validate_rules_action(event, repository=repository, approved=approved)
     raise PermanentError(f"未知的 analytics action：{action!r}")

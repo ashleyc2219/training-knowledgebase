@@ -23,10 +23,15 @@ Phase 55 之前這個檔不存在，`load_validated_at` 回 `{}`，而且也不�
 """
 
 import json
+from collections.abc import Mapping
+from dataclasses import asdict
 from datetime import datetime
 
-from training_kb.clock import parse_iso
+from training_kb.analytics.validation import RuleEvaluation
+from training_kb.clock import parse_iso, to_iso
 from training_kb.errors import PermanentError
+from training_kb.keys import rule_pk
+from training_kb.models import AuthoringRule, RuleStatus
 from training_kb.repository import Repository
 
 VALIDATED_AT_KEY = "operations/rules/validated_at.json"
@@ -57,3 +62,76 @@ def load_validated_at(repository: Repository) -> dict[str, datetime]:
         return {str(rule_id): parse_iso(str(value)) for rule_id, value in payload.items()}
     except (ValueError, UnicodeDecodeError) as error:
         raise PermanentError(f"{VALIDATED_AT_KEY} 內容損壞或有不合法的時間字串") from error
+
+
+# ---- Phase 55 ----
+#
+# 寫入端。`apply_rule_status` 是**全系統唯一**寫 `RULE.status` 與最近驗證時間的位置
+# （VAL Rule 8）：Feedback Review 只提出 `status=candidate` 的新規則，Phase 28 的
+# `rebuild_rule_projection` 動的是 `applied_to`，兩者都不碰 `status`。
+
+LEGAL_TRANSITIONS = frozenset({
+    (RuleStatus.CANDIDATE, RuleStatus.ACTIVE),
+    (RuleStatus.CANDIDATE, RuleStatus.RETIRED),
+    (RuleStatus.ACTIVE, RuleStatus.RETIRED)})
+"""唯三合法的轉移；`retired` 是終態，規則不自動復活（設計 §12.2）。"""
+
+
+def _write_json(key: str, payload: Mapping[str, object], *, repository: Repository) -> None:
+    """整檔覆寫一個私有 JSON 物件。
+
+    `if_none_match=False`：這兩個檔都是**可重寫**的彙總檔（同一批次重跑要得到同樣結果），
+    不是「只能建立一次」的 operation 紀錄。`sort_keys=True` 讓同一份內容永遠是同一串
+    位元組，冪等才看得出來。
+    """
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    repository.put_object(key, body, "application/json", if_none_match=False)
+
+
+def record_evaluation(evaluation: RuleEvaluation, *, repository: Repository) -> str:
+    """把一個批次的評估寫成人工核對用的證據檔，回傳它的 key。
+
+    `asdict` 保證證據檔一定含全部欄位（含兩個差值）；`version_ids` 是 `frozenset`，
+    `json.dumps` 會 `TypeError`，所以覆寫成排序後的清單。這個檔**不是**
+    `validated_at_by_rule` 的來源——最近驗證時間只有 `VALIDATED_AT_KEY` 一個權威位置。
+    """
+    key = (f"operations/analytics/rule-validation/{evaluation.rule_id}"
+           f"/{evaluation.batch_id}.json")
+    payload = asdict(evaluation) | {"version_ids": sorted(evaluation.version_ids)}
+    _write_json(key, payload, repository=repository)
+    return key
+
+
+def apply_rule_status(rule_id: str, status: RuleStatus, *, repository: Repository,
+                      now: datetime) -> AuthoringRule:
+    """唯一寫入者：改 `RULE.status`，並把最近驗證時間併進單一檔（D-28）。
+
+    四件事，順序不可調換：
+
+    1. 先 `get_meta` 判 `None`——`revision_of` 對不存在的 item 丟 **`CoordinationError`**
+       而不是 `PermanentError`，先問它會讓「規則不存在」變成看不懂的協調錯誤。
+    2. 目前狀態就是目標狀態時**跳過** `update_meta`（不製造無意義的 revision 位移），
+       其餘步驟照做——同一批次帶同一個 `now` 重跑兩次結果才會完全相同。
+    3. 非法轉移（含 `retired -> active`）丟 `PermanentError`；寫入用
+       `expected_revision=revision_of(pk)` 的 compare-and-swap，避免靜默覆蓋（D-27）。
+    4. 併寫 `operations/rules/validated_at.json`。`clock.to_iso` 遇到帶微秒的時間**直接
+       丟 `PermanentError`**（不靜默截斷），所以這裡先 `now.replace(microsecond=0)`。
+    """
+    target = RuleStatus(status)
+    pk = rule_pk(rule_id)
+    rule = repository.get_meta(pk, AuthoringRule)
+    if rule is None:
+        raise PermanentError(f"找不到規則：{rule_id}")
+    if rule.status is not target:
+        if (rule.status, target) not in LEGAL_TRANSITIONS:
+            raise PermanentError(f"不合法的狀態轉移：{rule.status} -> {target}")
+        repository.update_meta(pk, {"status": target.value},
+                               expected_revision=repository.revision_of(pk))
+        written = repository.get_meta(pk, AuthoringRule)
+        if written is None:
+            raise PermanentError(f"寫入後讀不回規則：{rule_id}")
+        rule = written
+    table = {key: to_iso(value) for key, value in load_validated_at(repository).items()}
+    table[rule_id] = to_iso(now.replace(microsecond=0))
+    _write_json(VALIDATED_AT_KEY, table, repository=repository)
+    return rule
