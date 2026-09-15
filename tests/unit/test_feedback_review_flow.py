@@ -71,7 +71,9 @@ from training_kb.pipelines.feedback import (
     review_operation_id,
     run_feedback_review,
     select_weak_targets,
+    task_commit_batch,
     task_evaluate_targets,
+    task_inspect_batch,
     task_list_targets,
     task_prepare_batch,
 )
@@ -196,6 +198,15 @@ class ReviewWorld:
         """目前公開前綴底下的全部物件 key；`site/` 是全案唯一的公開前綴。"""
         bucket = boto3.resource("s3", region_name=MOTO_REGION).Bucket(BUCKET_NAME)
         return sorted(row.key for row in bucket.objects.filter(Prefix="site/"))
+
+    def objects(self) -> dict[str, bytes]:
+        """整個 bucket 的 key -> bytes 快照；用來斷言某個 Task **一個物件都沒寫**。
+
+        只比 key 不夠：覆寫同一個 key 的 `put_object` 也是寫入，`InspectBatch` 連那個
+        都不該做（review 修正回合 1 第 1 項）。
+        """
+        bucket = boto3.resource("s3", region_name=MOTO_REGION).Bucket(BUCKET_NAME)
+        return {row.key: row.get()["Body"].read() for row in bucket.objects.all()}
 
     def object_of(self, key: str) -> dict[str, Any]:
         body = self.repository.get_object(key)
@@ -494,6 +505,91 @@ def test_resend_does_not_call_the_model_or_allocate_a_new_version(
     versions = {str(row["version_id"])
                 for row in review_deps_two_weak.repository.scan_entity("VERSION")}
     assert versions == {"b@v1", "b@v2", "c@v1", "c@v2", "d@v1"}  # 沒有 v3
+    # 重送**不得**把當天的發布紀錄洗掉（review 修正回合 1 第 2 項）：F23 會讓第二次的
+    # `prepared_version_ids` 是空的，直接覆寫就會看不出今天到底發布了什麼。
+    result = review_deps_two_weak.object_of(str(second["result_ref"]))
+    assert result["published_version_ids"] == ["b@v2", "c@v2"]
+    assert result["prepared_version_ids"] == ["b@v2", "c@v2"]
+    assert result["candidate_rule_ids"] == sorted(
+        [expected_rule_id("b@v1", B_IDS + tuple(f"f_b{index}" for index in range(6, 11))),
+         expected_rule_id("c@v1", C_IDS)])
+
+
+def test_inspect_batch_writes_nothing(review_deps_two_weak: ReviewWorld) -> None:
+    """Given `InspectBatch`，Then bucket 裡一個位元組都沒變（「只讀不寫」是逐字成立的）。
+
+    `InspectBatch` 從 `publish-request.json` 重建 `PreparedPublish`，**不重跑**
+    `Publisher.prepare`；重跑的話同一批 staging 會被寫第二遍（review 修正回合 1 第 1 項）。
+    """
+    state = task_prepare_batch(
+        task_evaluate_targets(task_list_targets({"mode": "formal"}, review_deps_two_weak.deps),
+                              review_deps_two_weak.deps), review_deps_two_weak.deps)
+    before = review_deps_two_weak.objects()
+    assert task_inspect_batch(state, review_deps_two_weak.deps) == state
+    assert review_deps_two_weak.objects() == before
+
+
+def test_commit_batch_is_retryable_after_everything_is_published(
+        review_deps_two_weak: ReviewWorld) -> None:
+    """Given `commit` 成功但結果還沒寫就重試，Then 第二次照樣寫得出 `review-result.json`。
+
+    直接再 `commit` 一次會被 `inspect` 擋下（「`published_at` 已經有值」）而整條流程
+    `PipelineFailed`。`CommitBatch` 因此先看這一批是不是全部已經發布，是就當成上一次的
+    成果續寫結果（review 修正回合 1 第 3 項）。
+    """
+    deps = review_deps_two_weak.deps
+    state = task_inspect_batch(task_prepare_batch(
+        task_evaluate_targets(task_list_targets({"mode": "formal"}, deps), deps), deps), deps)
+    first = task_commit_batch(state, deps)
+    review_deps_two_weak.repository.put_object(   # 假裝上一次寫結果之前就掛了
+        str(first["result_ref"]), b"{}", "application/json", if_none_match=False)
+
+    again = task_commit_batch(state, deps)
+
+    assert again["result_ref"] == first["result_ref"]
+    result = review_deps_two_weak.object_of(str(again["result_ref"]))
+    assert result["published_version_ids"] == ["b@v2", "c@v2"]
+
+
+def test_a_half_published_batch_is_a_permanent_error(
+        review_deps_two_weak: ReviewWorld) -> None:
+    """Given 一批裡一篇已發布、一篇還沒（有人繞過流程動過資料），Then `PermanentError`。
+
+    `Publisher.commit` 的交易是全有或全無，所以這個狀態不可能由本流程造成，也**不是**
+    可以續跑的狀態——當成「已完成」續寫結果會宣稱發布了一批其實只發布一半的版本。
+    """
+    deps = review_deps_two_weak.deps
+    state = task_inspect_batch(task_prepare_batch(
+        task_evaluate_targets(task_list_targets({"mode": "formal"}, deps), deps), deps), deps)
+    pk = version_pk("b@v2")
+    review_deps_two_weak.repository.update_meta(
+        pk, {"published_at": to_iso(NOW)},
+        expected_revision=review_deps_two_weak.repository.revision_of(pk))
+
+    with pytest.raises(PermanentError, match="一新一舊"):
+        task_commit_batch(state, deps)
+
+
+def test_each_successful_refine_completes_its_sub_operation(
+        review_deps_two_weak: ReviewWorld) -> None:
+    """Given 兩篇都 REFINE 成功，Then 兩筆子 operation 都被 `complete`，不停在 `accepted`。"""
+    deps = review_deps_two_weak.deps
+    task_evaluate_targets(task_list_targets({"mode": "formal"}, deps), deps)
+    subs = [row for row in review_deps_two_weak.operations.accepted_ids if row != OP]
+    assert len(subs) == 2
+    for sub_id in subs:
+        record = review_deps_two_weak.operations.load(sub_id)
+        assert record is not None and record.status == "done", sub_id
+
+
+def test_missing_mode_is_permanent(review_deps: ReviewWorld) -> None:
+    """Given input 沒有 `mode`，Then `PermanentError`——不靜默退回 `formal`。
+
+    排程與手動入口的 input 都固定帶 `mode`（00A §7），缺值代表呼叫端搞錯形狀；
+    退回 formal 會讓一次本來要用 demo 門檻的執行改用正式門檻，錯得看不出來。
+    """
+    with pytest.raises(PermanentError, match="None"):
+        task_list_targets({}, review_deps.deps)
 
 
 def test_a_batch_over_the_transaction_limit_is_rejected_before_any_write(

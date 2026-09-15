@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from training_kb.analytics.ratings import average_rating
 from training_kb.analytics.status_writer import load_validated_at
+from training_kb.clock import parse_iso, to_iso
 from training_kb.config import Thresholds, load_settings
 from training_kb.content import (
     allocate_version,
@@ -43,6 +44,7 @@ from training_kb.models import (
     Tutorial,
     TutorialContent,
     TutorialStatus,
+    TutorialVersion,
 )
 from training_kb.operations import AcceptOperation, OperationCoordinator, OperationRecord
 from training_kb.pipelines.common import (
@@ -59,7 +61,6 @@ from training_kb.publishing import (
     PreparedPublish,
     Publisher,
     PublishRequest,
-    assert_batch_publishable,
 )
 from training_kb.repository import Repository, item_to_model
 from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
@@ -154,6 +155,29 @@ def _top_category(feedback: Sequence[Feedback],
     return best, tuple(sorted(groups[best]))
 
 
+# ---- Phase 48 抽出的共用 helper（P44／P48 共用，review 修正回合 1 第 7 項）----
+def current_published_versions(
+        repository: Repository) -> list[tuple[Tutorial, TutorialVersion]]:
+    """每一篇 active Tutorial 的 current，而且該版**已發布**（設計 §7.5）；依版本 ID 升序。
+
+    retired、`current_version is None`、`published_at is None` 一律跳過。這條判準原本在
+    `select_weak_targets` 與 `_review_targets` 各寫了一份，兩份漂移就會出現「檢視清單裡有、
+    弱教學判斷卻看不到」這種對不起來的狀況，所以抽成一個函式讓兩邊共用。
+
+    回 `(Tutorial, TutorialVersion)` 而不是只回 ID：`select_weak_targets` 要 `tutorial.slug`
+    組 `WeakTarget`，只回 ID 的話它得再讀一次表。
+    """
+    found: list[tuple[Tutorial, TutorialVersion]] = []
+    for item in repository.scan_entity("TUTORIAL", consistent=True):  # meta_only 預設 True
+        tutorial = item_to_model(item, Tutorial)
+        if tutorial.status is not TutorialStatus.ACTIVE or tutorial.current_version is None:
+            continue
+        version = repository.get_version(tutorial.current_version)
+        if version is not None and version.published_at is not None:
+            found.append((tutorial, version))
+    return sorted(found, key=lambda pair: pair[1].version_id)
+
+
 def select_weak_targets(*, repository: Repository, mode: ReviewMode, now: datetime,
                         thresholds: Thresholds | None = None) -> tuple[WeakTarget, ...]:
     """掃出所有弱教學版本（設計 §7.5；`REV` Rule 2、3、4，Rule 1 的 primary 在 Phase 48）。
@@ -180,13 +204,8 @@ def select_weak_targets(*, repository: Repository, mode: ReviewMode, now: dateti
     # `approved_categories` 自己退回 `DEFAULT_FEEDBACK_CATEGORIES`（初始兩類）。
     approved = approved_categories(repository)
     targets: list[WeakTarget] = []
-    for item in repository.scan_entity("TUTORIAL", consistent=True):  # meta_only 預設 True
-        tutorial = item_to_model(item, Tutorial)
-        if tutorial.status != TutorialStatus.ACTIVE or tutorial.current_version is None:
-            continue
-        version = repository.get_version(tutorial.current_version)
-        if version is None or version.published_at is None:
-            continue
+    # 「active + current + 已發布」的判準只有一份（`current_published_versions`，P48 抽出）。
+    for tutorial, version in current_published_versions(repository):
         feedback = [row for row in repository.list_feedback_of_version(version.version_id)
                     if row.ts is not None and row.ts <= now]
         rated = [row for row in feedback if row.rating is not None]
@@ -751,15 +770,23 @@ FEEDBACK_REVIEW_PIPELINE: PipelineName = "feedback-review"
 REVIEW_MODES: tuple[ReviewMode, ...] = ("formal", "demo")
 """ASL input 只有 `mode` 這一個必要欄位，合法值就是 `ReviewMode` 的兩個（設計 §19.2 F20）。"""
 
+PUBLISH_REQUEST_NAME = "publish-request"
+REVIEW_RESULT_NAME = "review-result"
+REVIEW_NO_CHANGE_NAME = "review-no-change"
+"""三個私有產物的檔名；完整 key 一律由 `operation_ref(operation_id, 名稱)` 產生。"""
+
 
 def _review_mode(state: Mapping[str, Any]) -> ReviewMode:
-    """讀 `state["mode"]`；未知的值一律 `PermanentError`（不重試、不默默退回 formal）。
+    """讀 `state["mode"]`；缺值或未知的值**一律** `PermanentError`（不重試、不退回 formal）。
 
-    退回 formal 會讓一次 demo 觸發用正式門檻挑出一批不該改的教學，錯得看不出來；
+    **缺值也要失敗**（review 修正回合 1 第 4 項）：排程與手動入口的 input 都固定帶 `mode`
+    （`{"mode": "formal"}`／`{"mode": "demo"}`，00A §7），所以「沒有 mode」代表呼叫端搞錯了
+    形狀；靜默退回 formal 會讓一次本來要用 demo 門檻的執行改用正式門檻，錯得看不出來。
     丟 `PermanentError` 則直接進 ASL 的 Catch，整次執行停在 `PipelineFailed`。
+
     回傳值逐一比對 `REVIEW_MODES` 而不是 `cast`，型別收斂由比對本身保證。
     """
-    mode = str(state.get("mode") or "formal")
+    mode = state.get("mode")
     for candidate in REVIEW_MODES:
         if mode == candidate:
             return candidate
@@ -781,21 +808,13 @@ def _listed(value: JSONValue) -> list[str]:
 
 
 def _review_targets(repository: Repository) -> list[str]:
-    """本次要檢視的版本 ID：active Tutorial 的 current，而且該版已發布（設計 §7.5）。
+    """本次要檢視的版本 ID，依 ID 升序。
 
-    retired、`current_version is None`、`published_at is None` 一律跳過；輸出依 ID 升序，
-    同一批資料重跑得到逐字相同的 `target_version_ids`。這裡**只列 ID**：弱教學判斷與
-    candidate 判斷都在 `EvaluateTargets`（00A §7 明講不拆成兩個 Task）。
+    判準與 `select_weak_targets` **共用同一個** `current_published_versions`（review 修正
+    回合 1 第 7 項），兩邊不會漂移。這裡**只列 ID**：弱教學判斷與 candidate 判斷都在
+    `EvaluateTargets`（00A §7 明講不拆成兩個 Task），`WeakTarget` 也不進 state。
     """
-    found: list[str] = []
-    for item in repository.scan_entity("TUTORIAL"):
-        tutorial = item_to_model(item, Tutorial)
-        if tutorial.status is not TutorialStatus.ACTIVE or tutorial.current_version is None:
-            continue
-        version = repository.get_version(tutorial.current_version)
-        if version is not None and version.published_at is not None:
-            found.append(version.version_id)
-    return sorted(found)
+    return [version.version_id for _, version in current_published_versions(repository)]
 
 
 def review_operation_id(state: Mapping[str, Any], deps: Deps) -> str:
@@ -877,12 +896,18 @@ def task_evaluate_targets(state: dict[str, JSONValue], deps: Deps) -> dict[str, 
                                   repo=repository, writer=writer, operations=deps.operations,
                                   operation_id=refine_id)
             if plan is not None:
+                # 子 operation 走完就收尾（review 修正回合 1 第 6 項）：`OPS#` 不會一直停在
+                # `accepted`，維護者查得出「這批證據已經產出版本了」。`plan is None` 的兩種
+                # 合法結果（NO_STEP／no_new_evidence）**不** complete：前者這批證據還沒產出
+                # 任何東西，後者本來就是之前那筆 operation 的成果。失敗則照常往上丟，由
+                # `run_sequence`／ASL 的 Catch 處理，不在這裡吞。
+                deps.operations.complete(refine_id, now=deps.now())
                 prepared.append(plan.version_id)
         rule_ids.extend(found)
         if not found and plan is None:
             reasons[version_id] = ("不是弱教學" if target is None
                                    else "診斷沒有可改步驟，或沒有新證據")
-    repository.put_object(f"operations/{operation_id}/review-no-change.json",
+    repository.put_object(operation_ref(operation_id, REVIEW_NO_CHANGE_NAME),
                           json.dumps(reasons, ensure_ascii=False).encode("utf-8"),
                           "application/json", if_none_match=False)
     return {**state, "candidate_rule_ids": _ids(sorted(rule_ids)),
@@ -894,15 +919,13 @@ def _publisher(deps: Deps) -> Publisher:
     return Publisher(deps.need_repository(), SiteRenderer(), deps.operations)
 
 
-def _prepared(state: Mapping[str, Any], deps: Deps) -> PreparedPublish | None:
-    """這一批的 staging 產物；沒有要發布的版本時回 `None`。
+def _prepare_batch(state: Mapping[str, Any], deps: Deps) -> PreparedPublish | None:
+    """**只有 `PrepareBatch` 會呼叫**：真的跑一次 `Publisher.prepare` 寫出 staging。
 
-    同一個 operation 重跑會得到**同一批** staging 產物（設計 §14.2：`prepare` 只寫私有
-    前綴、同 bytes 覆寫），所以不必把 `PreparedPublish` 塞進 state——state 只放 ID 與
-    S3 key（00A §7）。三個 Task 各自重算一次，代價是重寫同一份 bytes。
-
-    超過 `MAX_BATCH_VERSIONS` 在**寫第一個 staging 物件之前**就擋下來：交易上限是 100 個
-    action、每篇兩個，拆成兩次交易就不再是全有或全無（F49）。
+    沒有要發布的版本時回 `None`。超過 `MAX_BATCH_VERSIONS` 在**寫第一個 staging 物件
+    之前**就擋下來：交易上限是 100 個 action、每篇兩個，拆成兩次交易就不再是全有或全無
+    （F49）；`Publisher.prepare` 自己的第一件事也是 `assert_batch_publishable`，所以
+    `PrepareBatch` 不必再呼叫一次（review 修正回合 1 第 5 項移掉了那行死碼）。
     """
     version_ids = tuple(_listed(state.get("prepared_version_ids")))
     if not version_ids:
@@ -913,32 +936,76 @@ def _prepared(state: Mapping[str, Any], deps: Deps) -> PreparedPublish | None:
     return _publisher(deps).prepare(request, now=deps.now())
 
 
+def _restored(state: Mapping[str, Any], deps: Deps) -> PreparedPublish | None:
+    """**`InspectBatch`／`CommitBatch` 走這條**：從 `publish-request.json` 重建，不重跑 prepare。
+
+    重跑 `prepare` 會讓每一版再做一次 `verify_version_complete`（整表 Scan）＋渲染＋兩個
+    `put_object`——同一批 staging 被寫三遍，而且 `InspectBatch` 就不再是「只讀不寫」
+    （review 修正回合 1 第 1 項）。`PreparedPublish` 的四個欄位全部都在那份 JSON 裡
+    （`prepared_at` 也一起存），所以重建出來的物件與 `prepare` 當下回傳的**逐欄相同**。
+
+    `publish_request_ref` 是 `None` 代表這一批沒有要發布的版本；ref 有值卻讀不回來是
+    產物被外力刪掉的破損狀態，重試不會變好，一律 `PermanentError`。
+    """
+    ref = state.get("publish_request_ref")
+    if not isinstance(ref, str) or not ref:
+        return None
+    body = deps.need_repository().get_object(ref)
+    if body is None:
+        raise PermanentError(f"publish request 讀不回來，無法重建這一批：{ref}")
+    saved: dict[str, Any] = json.loads(body.decode("utf-8"))
+    version_ids = tuple(str(value) for value in saved["version_ids"])
+    request = PublishRequest(version_ids=version_ids, operation_id=str(state["operation_id"]))
+    return PreparedPublish(request=request, version_ids=version_ids,
+                           staged_keys=tuple(str(value) for value in saved["staged_keys"]),
+                           prepared_at=parse_iso(str(saved["prepared_at"])))
+
+
+def _publish_split(version_ids: Sequence[str],
+                   repository: Repository) -> tuple[list[str], list[str]]:
+    """把這一批拆成（已發布、還沒發布）兩串；找不到 VERSION item 一律 `PermanentError`。
+
+    `Publisher.commit` 的交易是全有或全無，所以正常只會是「全都發布了」或「一個都沒有」。
+    """
+    done: list[str] = []
+    pending: list[str] = []
+    for version_id in version_ids:
+        version = repository.get_version(version_id)
+        if version is None:
+            raise PermanentError(f"找不到 VERSION item {version_id}")
+        (done if version.published_at is not None else pending).append(version_id)
+    return done, pending
+
+
 def task_prepare_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
     """`PrepareBatch`：把整批的公開產物寫進**私有** staging，並記下這次的請求。
 
     這個 Task 結束時**一個公開物件都還沒寫**；`publish_request_ref` 指向的
-    `operations/<op>/publish-request.json` 只是可追溯紀錄，不是發布。
+    `operations/<op>/publish-request.json` 是**後兩個 Task 的唯一輸入**（見 `_restored`），
+    不是發布。`prepared_at` 也存進去，重建出來的 `PreparedPublish` 才逐欄相同。
     """
-    prepared = _prepared(state, deps)
+    prepared = _prepare_batch(state, deps)
     if prepared is None:
         return {**state, "publish_request_ref": None}
-    assert_batch_publishable(prepared)
-    key = f"operations/{state['operation_id']}/publish-request.json"
+    key = operation_ref(str(state["operation_id"]), PUBLISH_REQUEST_NAME)
     deps.need_repository().put_object(
         key, json.dumps({"version_ids": list(prepared.version_ids),
-                         "staged_keys": list(prepared.staged_keys)},
+                         "staged_keys": list(prepared.staged_keys),
+                         "prepared_at": to_iso(prepared.prepared_at)},
                         ensure_ascii=False).encode("utf-8"), "application/json",
         if_none_match=False)
     return {**state, "publish_request_ref": key}
 
 
 def task_inspect_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
-    """`InspectBatch`：整批只讀不寫的檢查；任一篇不過就整批停在這裡（F49）。
+    """`InspectBatch`：整批**只讀不寫**的檢查；任一篇不過就整批停在這裡（F49）。
 
-    停在這裡的時候 `published_at` 與 `current_version` 都還沒動、`site/` 也還是空的，
-    所以「第二篇檢查失敗」一定發生在任何公開前綴寫入**之前**。
+    「只讀不寫」是逐字成立的：這個 Task 從 `publish-request.json` 重建
+    `PreparedPublish`（`_restored`），`Publisher.inspect` 本身也只讀，所以整個 Task
+    一個 `put_object` 都沒有。停在這裡時 `published_at` 與 `current_version` 都還沒動、
+    `site/` 也還是空的，「第二篇檢查失敗」一定發生在任何公開前綴寫入**之前**。
     """
-    prepared = _prepared(state, deps)
+    prepared = _restored(state, deps)
     if prepared is None:
         return dict(state)
     inspection = _publisher(deps).inspect(prepared)
@@ -954,28 +1021,66 @@ def task_commit_batch(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSON
     沒有新檔），那是**失敗**不是「發布了一部分」：丟 `PermanentError` 交給 Catch，
     不回一個看起來正常的結果（比照 P41 review 必修 3 的 `task_publish_version`）。
 
+    **這個 Task 可以重試**（review 修正回合 1 第 3 項）：`commit` 成功之後、寫
+    `review-result.json` 或 `operations.complete(...)` 之前掛掉時，ASL 會重跑整個 Task；
+    直接再 `commit` 一次會被 `inspect` 擋下（「`published_at` 已經有值」）而整條流程失敗。
+    所以先看這一批是不是**全部**已經發布：是的話就把它當成上一次的成果、跳過交易、續寫
+    結果。一新一舊代表有人繞過這條流程動過資料，那是 `PermanentError` 不是可續跑的狀態
+    （交易本身是全有或全無）。**交易成功但 `site/` 只寫了一半**那個切點不走這條路：
+    `Publisher._after_transaction` 會把它轉成 `PublishError`（不可重試），補償重送歸 P59。
+
     這是整條流程的停止點：寫出 `review-result.json` 並 `operations.complete(...)`。
     逐篇的「沒有改動」理由在這裡才從 `review-no-change.json` 併進來。
     """
     repository, operation_id = deps.need_repository(), str(state["operation_id"])
     published: tuple[str, ...] = ()
-    prepared = _prepared(state, deps)
+    prepared = _restored(state, deps)
     if prepared is not None:
-        result = _publisher(deps).commit(prepared, now=deps.now())
-        if result.failed is not None:
-            raise PermanentError(f"整批提交失敗：{result.failed}；{'；'.join(result.reasons)}")
-        published = result.published
-    body = repository.get_object(f"operations/{operation_id}/review-no-change.json")
-    key = f"operations/{operation_id}/review-result.json"
-    repository.put_object(key, json.dumps({
-        "reviewed_version_ids": _listed(state.get("target_version_ids")),
-        "candidate_rule_ids": _listed(state.get("candidate_rule_ids")),
-        "prepared_version_ids": _listed(state.get("prepared_version_ids")),
-        "published_version_ids": list(published),
-        "no_change_reasons": json.loads((body or b"{}").decode("utf-8")),
-    }, ensure_ascii=False).encode("utf-8"), "application/json", if_none_match=False)
+        done, pending = _publish_split(prepared.version_ids, repository)
+        if done and pending:
+            raise PermanentError(
+                f"這一批一新一舊，不是整批交易的結果：已發布 {done}；未發布 {pending}")
+        if pending:
+            result = _publisher(deps).commit(prepared, now=deps.now())
+            if result.failed is not None:
+                raise PermanentError(f"整批提交失敗：{result.failed}；{'；'.join(result.reasons)}")
+            published = result.published
+        else:
+            published = tuple(prepared.version_ids)   # 上一次已經切完，本次只續寫結果
+    key = operation_ref(operation_id, REVIEW_RESULT_NAME)
+    repository.put_object(key, _review_result(state, repository, operation_id, published),
+                          "application/json", if_none_match=False)
     deps.operations.complete(operation_id, now=deps.now())
     return {**state, "result_ref": key}
+
+
+def _review_result(state: Mapping[str, Any], repository: Repository, operation_id: str,
+                   published: Sequence[str]) -> bytes:
+    """`review-result.json` 的內容；**三串「事實」只會增加、不會被覆寫掉**。
+
+    同一天重送時 F23（`no_new_evidence`）會讓 `prepared_version_ids` 變成空的，直接覆寫
+    會把當天真的發布過什麼**整個抹掉**——而且 D-59 讓版本掛在子 operation 底下，父 `OPS#`
+    也沒有記，等於當天的發布紀錄消失（review 修正回合 1 第 2 項）。所以
+    `candidate_rule_ids`／`prepared_version_ids`／`published_version_ids` 一律與既有物件
+    取聯集；`reviewed_version_ids` 與 `no_change_reasons` 描述的是「**這一次**看了什麼、
+    為什麼沒動」，以最新一次為準。
+    """
+    saved = repository.get_object(operation_ref(operation_id, REVIEW_RESULT_NAME))
+    previous: dict[str, Any] = json.loads(saved.decode("utf-8")) if saved else {}
+
+    def union(field: str, values: Sequence[str]) -> list[str]:
+        return sorted({*_listed(previous.get(field)), *values})
+
+    reasons = repository.get_object(operation_ref(operation_id, REVIEW_NO_CHANGE_NAME))
+    return json.dumps({
+        "reviewed_version_ids": _listed(state.get("target_version_ids")),
+        "candidate_rule_ids": union("candidate_rule_ids",
+                                    _listed(state.get("candidate_rule_ids"))),
+        "prepared_version_ids": union("prepared_version_ids",
+                                      _listed(state.get("prepared_version_ids"))),
+        "published_version_ids": union("published_version_ids", list(published)),
+        "no_change_reasons": json.loads((reasons or b"{}").decode("utf-8")),
+    }, ensure_ascii=False).encode("utf-8")
 
 
 FEEDBACK_REVIEW_TASKS: tuple[TaskFn, ...] = (task_list_targets, task_evaluate_targets,

@@ -622,7 +622,12 @@ scheduler.CfnSchedule(
 
 `from aws_cdk import aws_scheduler as scheduler`。EventBridge Scheduler 的 cron 是**六個欄位**（分 時 日 月 週 年），`cron(30 0 * * ? *)` 就是每天 00:30；`schedule_expression_timezone="UTC"` 明寫時區，不依賴預設值；`flexible_time_window` 必填，設 `OFF` 才準點觸發。本 Phase **不新增任何 Lambda**：stack 裡的三支分別由 Phase 41（`training-kb-pipeline-task`、`training-kb-webhook`）與 Phase 42（`training-kb-import`）建立，state machine 才叫 `training-kb-feedback-review`（00A D-23、D-58）。[Phase 54](54-Phase54-重開票與呼叫規則指標.md) 之後會再加第四支 `training-kb-analytics`，屆時要把上面那個名稱集合補齊，否則這個測試會轉紅。**（現況核對 2026-09-14：這個等號斷言依賴 P42 已把 `training-kb-import` 加進 stack；P42 若尚未合併，先寫成 `names >= {"training-kb-pipeline-task", "training-kb-webhook"}` 並在報告註明差異，不要為了綠燈把 P42 的資源自己補進 stack。）**Demo 手動觸發用同一個 ARN 改傳 `{"mode": "demo"}`，**不另建第四條 pipeline**。
 
-- [x] **Step 4：跑綠燈、存快照、部署並做雲端整批故障驗收**
+- [ ] **Step 4：跑綠燈、存快照、部署並做雲端整批故障驗收**
+      —— **部分完成（修正回合 1 改回未勾）**：綠燈、`save_asl_snapshot`、`cdk deploy` 與
+      三次雲端執行都做了（報告 §4），但本步驟同時要求的
+      `TKB_FAULT=publish_before_transact`／`publish_after_transact_before_site` 兩次整合
+      測試**沒有做**——`faults.maybe_fail` 當時還沒被插進 `publishing.py`（那是 P59 的
+      Task）。**由 P59 承接**，本 Phase 不預先插進別人的區段。
 
 ```bash
 uv run pytest tests/unit/test_feedback_review_flow.py -q
@@ -732,10 +737,11 @@ git commit -m "feat(infra): feedback-review ASL 與每日排程"
 
 ### 本計畫選擇（2026-09-14）
 
-1. **`EvaluateTargets` 的核定類別用 `DEFAULT_FEEDBACK_CATEGORIES`**：§7 的片段寫
-   `approved_categories(repository)`，但 Phase 43 尚未合併（`ingress.py` 只有
-   `DEFAULT_FEEDBACK_CATEGORIES`，第 584 列註明 P43 會補）。改用同一個常數，與
-   `select_weak_targets` 目前用的是同一份表，兩條分支不會分岔；P43 合併後兩處一起改。
+1. ~~**`EvaluateTargets` 的核定類別用 `DEFAULT_FEEDBACK_CATEGORIES`**~~
+   **（修正回合 1 已作廢）**：本段原本寫 P43 尚未合併、暫用常數。P43 已於 `33b2582`
+   合併，`select_weak_targets` 與 `task_evaluate_targets` **兩處現在都呼叫
+   `approved_categories(repository)`**（同一張 `CONFIG#feedback_categories`），讀不到時由
+   它自己退回 `DEFAULT_FEEDBACK_CATEGORIES`。沒有待辦留下。
 2. **Task 1 的紅燈訊號是 `cannot import name 'FEEDBACK_REVIEW_PIPELINE'`**：§7 寫
    `FEEDBACK_REVIEW_TASKS`，但那個名稱要等五個 Task 都存在才生得出來（Task 2）。Task 1 的
    測試只 import 它真的交付的名稱，Task 2 的紅燈才是 `cannot import name
@@ -762,9 +768,10 @@ git commit -m "feat(infra): feedback-review ASL 與每日排程"
 ### 未做／做不到（原因）
 
 - **§7 Task 3 Step 4 的 `TKB_FAULT=publish_before_transact`／`publish_after_transact_before_site`
-  兩次整合測試沒有做。** `faults.maybe_fail` 目前**沒有**被插進 `publishing.py`（`grep` 全案
-  只有 `faults.py` 自己定義它）——五個切點的插入點是 **Phase 59** 的 Task，本 Phase 不預先
-  插入別人的區段。同一組「多篇整批的可觀察切點」在 moto 上已經有 P25 的
+  兩次整合測試沒有做**（該 Step 的 checkbox 已於修正回合 1 改回未勾，標明由 P59 承接）。
+  本 Phase 落地當下 `faults.maybe_fail` 還沒被插進 `publishing.py`——五個切點的插入點是
+  **Phase 59** 的 Task，本 Phase 不預先插入別人的區段（P59 已於 2026-09-15 開始接手）。
+  同一組「多篇整批的可觀察切點」在 moto 上已經有 P25 的
   `tests/integration/test_batch_publish_cutpoints.py`（協定 A），本 Phase 另在
   `tests/unit/test_feedback_review_flow.py` 加了流程層的
   `test_second_version_failing_inspection_publishes_nothing`。**O3 維持 FAIL，不放寬 F49。**
