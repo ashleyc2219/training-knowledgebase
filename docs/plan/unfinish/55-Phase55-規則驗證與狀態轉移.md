@@ -2,6 +2,41 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **（a）已存在、可直接用**
+> - **`src/training_kb/analytics/status_writer.py` 已經存在**（Phase 40 首建，含 `VALIDATED_AT_KEY = "operations/rules/validated_at.json"` 與 `load_validated_at(repository) -> dict[str, datetime]`）。**它的現行實作比 §7 Task 3 的片段嚴格**：`body.decode("utf-8")` 與 `json.loads` 都在同一個 `try` 裡，非 dict、壞 UTF-8、壞 ISO 時間一律轉成 `PermanentError`（修正波 commit `a4f3173`）。§7 重貼它只是為了讓片段可讀，**實作時絕對不要覆寫它**，否則會把這層強化改掉。本 Phase 對這支檔只做 Edit、只**追加** `LEGAL_TRANSITIONS`、`record_evaluation`、`apply_rule_status`。
+> - `src/training_kb/analytics/__init__.py` 已由 Phase 40 建成 docstring-only 空殼；Phase 53（owner）裁決維持不 re-export，所以本 Phase 一律走子模組路徑 import（`from training_kb.analytics.status_writer import ...`、`from training_kb.analytics.validation import ...`），**不必也不得**改 `__init__.py`。
+> - `src/training_kb/repository.py`：`get_meta(pk, model, *, consistent=True)`、`update_meta(pk, changes, *, expected_revision) -> int`、`revision_of(pk) -> int`（item 不存在丟 **`CoordinationError`**，不是 `PermanentError`）、`get_object(key) -> bytes | None`、`put_object(key, body, content_type, *, if_none_match)` 全部已實作，簽名與 §5 一致。
+> - `src/training_kb/rules.py`：`select_active_rules(rules, step_type, validated_at_by_rule)`、`rules_for_content(...)`（Phase 19）已實作，`validated_at_by_rule` 缺 active 規則的時間時丟 `PermanentError`——本 Phase 寫入的 `validated_at.json` 就是它的唯一輸入來源。
+> - `src/training_kb/repository.py::rebuild_rule_projection(rule_id)`（Phase 28）已實作，它會 `update_meta(rule_pk, {"applied_to": ...})`——那是寫 RULE 的 **`applied_to`**、不是 `status`，與本 Phase「`status` 唯一寫入者」不衝突。
+> - `src/training_kb/models.py`：`RuleStatus`（StrEnum，`CANDIDATE/ACTIVE/RETIRED`，值小寫）、`StepType`（`click_ui`／`input`／`read`）、`AuthoringRule.evidence` **至少五個不重複 ID**（`evidence_has_five_distinct_ids`）——§7 Task 1 的 `fx_1…fx_5` 剛好滿足下限，少一個 fixture 就建不起來。
+> - `tests/unit/conftest.py` 目前只有 `RecordingWriter`／`FIXED_EMBEDDING`／`fake_writer`（Phase 15），**本 Phase 是 00A §3.3 記名的唯一修改者**，追加 `fake_repo`／`batch`／`rules` 三個 fixture，不動既有內容。
+>
+> **（b）因上一批裁決／現況而修正的點**
+> 1. **模組路徑更正**：`parse_version_id` 在 **`training_kb.content`**（不是 Phase 20 的 `allocate_version` 那支檔），`to_iso`／`parse_iso` 在 **`training_kb.clock`**（Phase 02）。`parse_version_id` 對不合格式的版本 ID 丟 **`ValueError`**（不是 `PermanentError`），`_batch_problems` 只在前面幾關都過了才呼叫它，順序不能調換（現況核對 2026-09-14：§5 Consumes 原寫「# P20／P02」，模組路徑未標明）。
+> 2. **`to_iso` 對帶微秒的時間丟 `PermanentError`**（`clock.to_iso`：`if value.microsecond: raise PermanentError(...)`），不是靜默截斷——§6.3 說的「寫入前先 `now.replace(microsecond=0)`」是**必要**步驟，不是保險（現況核對 2026-09-14：原文寫「`to_iso` 不會自己截微秒」，實際行為是直接拒絕）。
+> 3. **§7 Task 3 的 `test_record_evaluation_writes_one_evidence_file_per_batch` 目前會失敗。** `rate_delta = 0.2 - 0.7` 的浮點值是 `-0.49999999999999994`，`json` round-trip 之後 `== -0.5` 是 **False**（`average_delta = 4.4 - 2.875 = 1.5250000000000004` 同理）。該行改成 `== pytest.approx(-0.5)`（或 `round(..., 3) == -0.5`，與 Task 1 的 `test_evaluation_reports_both_deltas` 一致）。**不要**為了讓等號成立而在 `_delta` 裡四捨五入——門檻比較一律用未四捨五入的值（Phase 53 §6）。
+> 4. **`fake_repo` 這個 fixture 名稱在測試樹已被用過三次**：`tests/unit/pipelines/conftest.py`（Phase 38，三個方法的精簡版）、`tests/unit/pipelines/test_ticket_name_gap.py`（刻意遮蔽上一個）、`tests/unit/test_allocate_version.py`（Phase 20 的模組層 fixture）。pytest 的解析順序是「模組層 > 最近的 conftest > 上層 conftest」，所以在 `tests/unit/conftest.py` 新增同名 fixture **不會**影響這三處；但**必須跑全套 `uv run pytest tests -q -W error` 確認**，不能只跑自己的兩個測試檔就宣稱沒有副作用。
+> 5. **`rg` 唯一寫入者檢查的指令太寬。** `rg -n '"status"' src/training_kb --glob '!**/analytics/status_writer.py'` 現況會命中 10 行，全部是別的實體的 status（`operations.py` 的 OPS、`rote.py` 的 PROC、`content.py` 的 `TutorialStatus.RETIRED`、`pipeline_starter.py` 的 execution status），沒有一行動到 RULE。更準確的檢查是把它縮到寫入路徑：`rg -n 'update_meta\(.*status|"status":' src/training_kb --glob '!**/analytics/status_writer.py'`，再逐行確認每一筆都不是 `RULE#`。`rg` 在本機可用；沒有的話用 `grep -rn ... src/training_kb --include='*.py'`。注意 Phase 47（同批、尚未實作）**建立**新 RULE 時會把 `status` 設成 `candidate`，那是建立不是修改，不算違反。
+> 6. **`version_metrics` 的 monkeypatch 前提**：§7 Task 1 的 `fake_repo` 要「用 `monkeypatch` 把 `validation.version_metrics` 換成查 `seed_metrics` 表的函式」，這要求 `analytics/validation.py` 以 `from training_kb.analytics.version import version_metrics` 做**模組層名稱綁定**（`monkeypatch.setattr(validation, "version_metrics", ...)` 才換得掉）。不要寫成 `from training_kb.analytics import version` 再 `version.version_metrics(...)`。
+> 7. **00B 的測試名稱與本文件略有出入**：00B §2.12 Rule 3 那一列寫 `test_undecidable_batches_never_retire`，本文件 §7 Task 2 叫 `test_overlapping_undecidable_or_unapproved_batches_never_retire`（同一個測試、涵蓋範圍更大）。以本文件的名字為準，並在報告記一行給 controller（00／00A／00B 由 controller 統一處理，本 Phase 不改）。
+> 8. §7 各 Task Step 5 的 `git commit -m "..."` 片段**沒有帶 trailer**；實作時補上 COMMON R8 的兩行 trailer，`git add` 只加自己的檔案路徑。
+>
+> **（c）gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - **O5 BLOCKED**（Titan／Claude 都回 `ValidationException: Operation not allowed`；`docs/plan/report/o5-20260915T030245Z.md`）：本 Phase **沒有任何模型節點**——`validated_conflict` 收的是別人已經產好的 `ConflictJudgement` dict，不自己呼叫 Writer。真要在測試裡造判定，用 `tests/unit/conftest.py` 的 `RecordingWriter`（假 writer），**絕不連真實 Bedrock**。判斷類模型參數（`maxTokens 512`、`temperature 0.1`）由 `writing/client.py::JUDGEMENT_INFERENCE_CONFIG` 統一提供，本 Phase 不重設。
+> - **O7 未到**：§全域限制「fixture 綠燈 ≠ R-007 已 active ≠ O7 通過」的敘述**維持不變**，這是本 Phase 最容易踩的線。
+> - **O4 未到**：本 Phase 的 rate 比較帶著同一個未定狀態，敘述維持。
+> - **O3 FAIL**、**O2 PASS**、**O6 待核定**：與本 Phase 無關。
+> - 前置 **Phase 54 必須先落地**（`handlers/analytics.py::handler` 與 `action: "metrics"`、`analytics/version.py::version_metrics`）；本 Phase 排在 W3，Phase 54 在 W1。
+>
+> **（d）適用的 controller 裁決（COMMON.md §3）**
+> - **R3（同波同檔）**：`analytics/status_writer.py` 只用 **Edit**（Phase 40 的讀取端不得被 Write 蓋掉）、`handlers/analytics.py` 只用 Edit（Phase 54 的 `metrics` 分支不得被覆寫），新增的東西放自己的 `# ---- Phase 55 ----` 區段。`tests/unit/conftest.py` 只追加 fixture，不改既有的 `RecordingWriter`／`fake_writer`。
+> - **R5**：文件片段是示意，00A §6.10 的名稱與簽名是契約。
+> - **R6／R7／R9**：逐 Task 紅燈→綠燈並留證據；報告寫 `docs/plan/report/phases/2026-09-14-Phase55-REP.md`；不派 subagent。
+> - **本 Phase 不動 CDK**（D-58，Phase 54 已把 `grant_read_write_data`／`grant_read_write` 給足）。
+> - 全套 gate：`uv run pytest tests -q -W error`、`uv run ruff check src tests infra`、`uv run ruff format --check src tests infra`、`uv run mypy`（strict，`files = ["src", "infra"]`——§7 的實作片段**全部省略了型別註記**，`validation.py`、`status_writer.py` 的新函式與 `handlers/analytics.py` 的新分支都要照 §5 Produces 補齊註記才會過）。測試檔 basename 全專案唯一：`test_rule_validation.py`、`test_rule_status_writer.py` 目前都沒被占用。
+
 **目標：** 以同一篇教學套用前後的已發布版本為對照，判定一條規則在一個批次內是否**兩項都嚴格改善**，再由唯一寫入者把 `candidate`／`active`／`retired` 寫回 RULE item。
 
 **架構：** `evaluate_batch` 用 Phase 54 的 `version_metrics` 取得前後指標並輸出 `RuleEvaluation`（同時帶兩個差值）；`next_status` 是純函式狀態機；`apply_rule_status` 是全系統**唯一**能寫 `RULE.status` 與最近驗證時間的入口；`validate_rules_action` 把這三件事接到 Phase 54 的 analytics Lambda。Feedback Review 只提出 candidate，永遠不改 status。
@@ -73,7 +108,7 @@ apply_rule_status("R-007", "active", repository=repo, now=NOW)
 | 動作 | 路徑 | 責任 |
 |---|---|---|
 | 新增 | `src/training_kb/analytics/validation.py` | `SeedBatch`、`RuleEvaluation`、`evaluate_batch`、`next_status`、`validated_conflict`、`curation_groups`。 |
-| 修改 | `src/training_kb/analytics/status_writer.py` | 補上寫入端 `LEGAL_TRANSITIONS`、`record_evaluation`、`apply_rule_status`；**檔案與讀取端 `VALIDATED_AT_KEY`、`load_validated_at` 由 [Phase 40](40-Phase40-Ticket-CREATE與KEEP.md) 首建**（00A §3.2、D-28），本 Phase 沿用同檔同名，不重新宣告也不另開一份。全系統唯一寫 `RULE.status` 與最近驗證時間的位置。 |
+| 修改 | `src/training_kb/analytics/status_writer.py` | 補上寫入端 `LEGAL_TRANSITIONS`、`record_evaluation`、`apply_rule_status`；**檔案與讀取端 `VALIDATED_AT_KEY`、`load_validated_at` 由 [Phase 40](40-Phase40-Ticket-CREATE與KEEP.md) 首建**（00A §3.2、D-28），本 Phase 沿用同檔同名，不重新宣告也不另開一份。全系統唯一寫 `RULE.status` 與最近驗證時間的位置。（現況核對 2026-09-14：**這支檔已經存在**，現行 `load_validated_at` 把 decode 與 `json.loads` 一起包在 `try` 裡、壞檔一律 `PermanentError`（commit `a4f3173`）——只能 Edit 追加，不得 Write 覆寫。） |
 | 修改 | `src/training_kb/handlers/analytics.py` | 加上 `action: "validate_rules"` 分支（D-56；`handler` 與 `action: "metrics"` 由 Phase 54 產出）。 |
 | 修改 | `tests/unit/conftest.py` | 自含合成 fixture：`fake_repo`、`batch`、`rules`。 |
 | 測試 | `tests/unit/test_rule_validation.py` | 對照選取、兩個差值、兩項改善、不可判定、連續兩批退役、衝突與 curation。 |
@@ -100,9 +135,12 @@ Repository.revision_of(pk) -> int                                               
 Repository.get_object(key) / put_object(key, body, content_type, *, if_none_match)     # P07
 VALIDATED_AT_KEY / load_validated_at(repository)：analytics/status_writer.py 的讀取端，
     由 P40 首建；本 Phase 在同一支檔補寫入端，兩邊同檔同名                              # P40，D-28
-parse_version_id(value) -> tuple[str, int] / to_iso(dt) / parse_iso(value)
-PermanentError                                                                # P20／P02
+parse_version_id(value) -> tuple[str, int]                 # training_kb.content（不是 P20 那支檔）
+to_iso(dt) / parse_iso(value)                              # training_kb.clock，P02
+PermanentError                                             # training_kb.errors，P02
 ```
+
+（現況核對 2026-09-14：原寫 `# P20／P02` 未標模組路徑。`parse_version_id` 實際在 `src/training_kb/content.py`，格式不合丟 **`ValueError`**；`to_iso` 在 `src/training_kb/clock.py`，遇到 `microsecond != 0` 丟 **`PermanentError`**（不截斷）。`Repository.revision_of(pk)` 在 item 不存在時丟 **`CoordinationError`**，所以 `apply_rule_status` 的「先 `get_meta` 判 `None`」順序不能調換。）
 
 ### Produces
 
@@ -197,7 +235,7 @@ def validate_rules_action(event: dict, *, repository: "Repository",
 
 ### 6.3 唯一寫入者與最近驗證時間
 
-`apply_rule_status` 是全系統唯一寫 `RULE.status` 的地方（VAL Rule 8），做四件事：（1）讀出 RULE item，不存在丟 `PermanentError`；（2）`status` 與目標相同時**跳過** `update_meta`（不製造無意義的 revision 位移），其餘步驟照做，所以同一批次重跑兩次結果相同；（3）只允許 `candidate -> active`、`candidate -> retired`、`active -> retired`，其餘（含 `retired -> active`）丟 `PermanentError`，寫入用 `update_meta(..., expected_revision=repository.revision_of(pk))`（D-27）避免靜默覆蓋；（4）把最近驗證時間併進單一私有檔 `operations/rules/validated_at.json`（`VALIDATED_AT_KEY`，內容 `{rule_id: ISO 時間}`）整檔覆寫，`to_iso` 不會自己截微秒（Phase 02 明訂），所以寫入前先 `now.replace(microsecond=0)`。
+`apply_rule_status` 是全系統唯一寫 `RULE.status` 的地方（VAL Rule 8），做四件事：（1）讀出 RULE item，不存在丟 `PermanentError`；（2）`status` 與目標相同時**跳過** `update_meta`（不製造無意義的 revision 位移），其餘步驟照做，所以同一批次重跑兩次結果相同；（3）只允許 `candidate -> active`、`candidate -> retired`、`active -> retired`，其餘（含 `retired -> active`）丟 `PermanentError`，寫入用 `update_meta(..., expected_revision=repository.revision_of(pk))`（D-27）避免靜默覆蓋；（4）把最近驗證時間併進單一私有檔 `operations/rules/validated_at.json`（`VALIDATED_AT_KEY`，內容 `{rule_id: ISO 時間}`）整檔覆寫，`to_iso` 遇到帶微秒的時間**直接丟 `PermanentError`**（`clock.to_iso`，Phase 02 明訂不靜默截斷），所以寫入前**必須**先 `now.replace(microsecond=0)`（現況核對 2026-09-14：原寫「不會自己截微秒」，實際是拒絕）。
 
 **最近驗證時間只有這一個權威位置**（D-28）。`AuthoringRule` 沒有 `validated_at` 欄位（D-40：item 屬性 = 模型欄位 + `RESERVED_ATTRS`，沒有第三類），Phase 19 的呼叫端與 Phase 40／49–52 一律用 `load_validated_at(repository)` 讀它。每批證據另由 `record_evaluation` 寫成 `operations/analytics/rule-validation/<rule_id>/<batch_id>.json`，那是給人看的佐證，不是 `validated_at_by_rule` 的來源。`applied_to` 仍由 Phase 28 從 `rules_applied` 重建，本 Phase 不碰。
 
@@ -503,7 +541,11 @@ def test_record_evaluation_writes_one_evidence_file_per_batch(fake_repo, batch):
     key = record_evaluation(evaluate_batch(batch, approved=APPROVED, repository=fake_repo),
                             repository=fake_repo)
     assert key == "operations/analytics/rule-validation/R-007/fixture-b1.json"
-    assert json.loads(fake_repo.objects[key].decode("utf-8"))["rate_delta"] == -0.5
+    # 現況核對 2026-09-14：`0.2 - 0.7` 的浮點值是 -0.49999999999999994，
+    # `== -0.5` 會 FAIL（`4.4 - 2.875 = 1.5250000000000004` 同理）。用 approx 比較，
+    # **不要**在 `_delta` 裡四捨五入——門檻比較一律吃未四捨五入的值。
+    assert json.loads(
+        fake_repo.objects[key].decode("utf-8"))["rate_delta"] == pytest.approx(-0.5)
 
 @pytest.mark.parametrize("current, target", [("retired", "active"), ("retired", "candidate"),
                                              ("active", "candidate")])
@@ -598,10 +640,14 @@ def validate_rules_action(event, *, repository, approved):      # handlers/analy
 
 ```bash
 uv run pytest tests/unit/test_rule_status_writer.py tests/unit/test_rule_validation.py -q
-rg -n '"status"' src/training_kb --glob '!**/analytics/status_writer.py'
+# 現況核對 2026-09-14：原指令 `rg -n '"status"' ...` 太寬，現況會命中 10 行全是別的實體
+# （operations.py 的 OPS、rote.py 的 PROC、content.py 的 TutorialStatus.RETIRED、
+#  pipeline_starter.py 的 execution status），逐行看很費時。縮到寫入路徑：
+rg -n 'update_meta\(.*status|"status":' src/training_kb --glob '!**/analytics/status_writer.py'
+# 沒有 rg 時：grep -rn 'update_meta(.*status\|"status":' src/training_kb --include='*.py'
 ```
 
-預期：測試 PASS；`rg` 在 pipelines 與 writing 模組**不應**出現修改既有 RULE `status` 的路徑（Phase 47 只在建立新 RULE 時把 `status` 設為 `candidate`，不是修改既有值）。同一批次帶同一個 `now` 重跑兩次，RULE item、證據檔與 `validated_at.json` 完全相同；未知 `action` 仍由 Phase 54 的既有分支丟 `PermanentError`，不因本次修改變成靜默成功。
+預期：測試 PASS；命中的每一行都**不是** `RULE#` 的 `status`（`repository.py::rebuild_rule_projection` 動的是 RULE 的 `applied_to`，不是 `status`，不算違反）。Phase 47 只在**建立**新 RULE 時把 `status` 設為 `candidate`，那是建立不是修改。同一批次帶同一個 `now` 重跑兩次，RULE item、證據檔與 `validated_at.json` 完全相同；未知 `action` 仍由 Phase 54 的既有分支丟 `PermanentError`，不因本次修改變成靜默成功。
 
 - [ ] **Step 5：提交**
 
@@ -666,3 +712,5 @@ git commit -m "feat(analytics): 規則狀態唯一寫入者與 validate_rules ac
 - [ ] 退役需要兩個不重疊的已核定批次；重疊批次只算一批。衝突判定先過 `validated_conflict` 才退役 candidate，且不動既有 active；`curation_groups` 只分組。
 - [ ] `apply_rule_status` 是唯一寫 `RULE.status` 的位置（`rg` 已檢查），最近驗證時間只寫 `operations/rules/validated_at.json`，非法轉移丟 `PermanentError`。
 - [ ] 所有 fixture 自含、`AuthoringRule.evidence` 有五個不同 ID 且明示非核定；文件沒有宣稱 R-007 已 active 或 O7 已通過。
+- [ ] `analytics/status_writer.py` 的 Phase 40 讀取端（`VALIDATED_AT_KEY`、`load_validated_at` 的壞檔 `PermanentError` 處理）原封不動，只有追加，沒有覆寫。
+- [ ] 新增 `tests/unit/conftest.py` 的 `fake_repo` 之後，全套 `uv run pytest tests -q -W error` 仍綠（既有三處同名 fixture 未受影響）。
