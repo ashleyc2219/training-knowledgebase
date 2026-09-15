@@ -2,6 +2,38 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **（a）已存在、直接重用（file:function）**
+> - `src/training_kb/pipelines/asl.py`：`RETRY`（**已經是 D-53 的兩條 retrier tuple**）、`CATCH`、`FAIL_STATE_NAME = "PipelineFailed"`、`TASK_TIMEOUT_SECONDS = 120`、`task_state(resource_arn, next_state)`、`assert_safe_asl`（**已檢查 Choice 必須有 `Default`**、Task 前兩條 retrier 逐字相同、`Catch` 單一 `States.ALL` 導向同層 `Fail`）、`canonical_json`、`save_asl_snapshot(repository, pipeline, number, body) -> str`（同 bytes 冪等、不同 bytes 丟 `PermanentError`）、`ASL_LOCAL_PATH = "infra/stepfunctions/{pipeline}/v{number}.json"`、`ASL_SNAPSHOT_KEY = "stepfunctions/{pipeline}/v{number}.json"`。
+> - `src/training_kb/pipelines/common.py`：`Deps(operations, now, repository=None, writer=None, settings=None)` 與 `need_repository`／`need_writer`／`need_settings`、`run_sequence(pipeline, payload, tasks, deps)`（失敗時 `operations.fail(...)` 後**原樣 re-raise**）、`PIPELINE_NAMES`。
+> - `src/training_kb/content.py:retire_tutorial(slug, *, reason, successor, repository, now) -> Tutorial`（**在 `content.py`，不是 `publishing.py`**；只改 `status`／`successor` 兩個欄位、`successor` 只在目前為空時寫入、revision 不符轉 `TransientError`、`reason`／`now` 只驗證不寫 item）、`resolve_successor(slug, successor, *, repository)`、`RETIRED_NOTICE`、`parse_version_id`。
+> - `src/training_kb/publishing.py`：`Publisher(repository, renderer, operations)` 與 `prepare`／`inspect`／`commit`、`PublishRequest(version_ids, operation_id)`、`tutorial_index_key(slug)`、`Publisher._write_tutorial_index(slug)`（用 `list_versions_of_tutorial` 重建，走 `_put_index` → `_put_public_object(..., if_none_match=False)`，**索引頁可覆寫**）。
+> - `src/training_kb/site.py:SiteRenderer.render_tutorial_index(tutorial, versions)` — **退役區塊與後繼連結已於修正波實作（commit `f1ef75a`）**，`_retired_block` 依 `Tutorial.status`／`successor` 產生。
+> - `src/training_kb/ingress.py:validate_release`／`operation_id_for`／`execution_name`、`src/training_kb/keys.py:operation_ref`、`src/training_kb/clock.py:to_iso`／`now_utc`、`src/training_kb/models.py:ReleaseKind.REMOVED`／`TutorialStatus.RETIRED`。
+>
+> **（b）因上一批裁決／實作而修正的點**
+> 1. **§4 的兩個 infra 檔目前都不存在**：`infra/` 只有 `__init__.py`、`app.py`、`training_kb_data_stack.py`、`scripts/`。`infra/training_kb_stack.py` 與 `infra/stepfunctions/` 目錄**由 P41 建立**（COMMON.md R2、00A D-23）；本 Phase 只追加第二條 state machine 與 `infra/stepfunctions/release-update/v1.json`。開工前先確認 P41 已提交。
+> 2. **`task_name`／`build_deps`／`pipeline_task_handler` 目前都不存在**（`pipelines/common.py` 只有 `Deps`／`run_sequence`／`PIPELINE_NAMES`），owner 是 **P41**（00A §6.9、D-24）。本 Phase 不得自己補一份。
+> 3. **`RETRY` 已經是兩條 retrier**（`pipelines/asl.py:33`，D-53 已落地）。§7 Task 2 Step 3 的「若 Phase 29 還停在單一 retrier，先回頭改 Phase 29」已成為歷史備註，不需要執行。`assert_safe_asl` 也已經檢查 `Choice` 的 `Default`，所以 §7 的 `test_choice_has_default_and_no_retry` 是額外保險而非唯一防線。
+> 4. §7 的 `TimeoutSeconds` 與 Fail state 名稱請 **import 常數**（`TASK_TIMEOUT_SECONDS`、`FAIL_STATE_NAME`），不要在測試裡硬寫 `120` 與 `"PipelineFailed"`（與 §11「不另寫一份字面值」同一個理由）。
+> 5. **`cdk` 指令要照 COMMON.md 改寫**：本機互動 shell 把 `node` 定成會拒絕的 function，**一律 `command npx aws-cdk@2 <子命令>`**，並帶 `AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1`；`--outputs-file` 指到 scratchpad，**不提交 `cdk.out/`**。全案固定 `us-east-1`（`aws configure` 預設是 ap-northeast-1，所以每條 `aws` CLI 都要 `--region us-east-1`）。
+> 6. §7 Task 3 Step 4 寫 `cdk deploy TrainingKbApp`：**stack id 以 P41 實際建立的為準**（目前已部署的只有 `TrainingKbData`）。deploy 前先看 `infra/app.py` 裡 P41 加的 stack id，不要照抄一個不存在的名字。
+> 7. **D-83 要在本 Phase 寫程式**（00A D-83、上一批 REP §8）：`retire_tutorial` 之後要呼叫 `Publisher` **重寫該篇教學索引頁**（只有索引頁，不重發版本頁）。§7 Task 1 已補上 **Step 3b** 明確步驟，§8 驗收矩陣與 §11 完成清單各補一列。
+> 8. `retire_for_release` 的實作片段用 `release.kind != ReleaseKind.REMOVED` — 正確（`ReleaseKind` 是 `StrEnum`，與字串也相等，但用 enum 比較較清楚）。`successor_by_slug.get(slug)` 回 `None` 時 `retire_tutorial` 照常退役（F19）——與 `content.py` 現況一致。
+> 9. §5 Consumes 的 `retire_tutorial(...)` 標「Phase 26」正確，但模組路徑是 **`training_kb.content`**，不是 `publishing`。
+>
+> **（c）gate 現況對本 Phase 的影響**（COMMON.md §2）——**本 Phase 是 G4 唯一真的上 AWS 的 Phase（R1）**
+> - **O6 尚未核定 `github.com/pull_request`**（`tests/fixtures/o6/approved-sources.json` 該列 `approved_by`／`approved_at` 皆為空字串；`tests/integration/test_o6_github_mapping.py`、`test_release_extraction.py`、`test_adapter_fixtures.py`、`test_rote_commit.py` 都有 `xfail(strict=True)` 站崗）→ **Release 事件走不進 Rote／webhook 路徑**。所以雲端驗收**不能**從 GitHub webhook 觸發，只能用 `aws stepfunctions start-execution` 直接餵 §2 那三欄 input；而且 `operation_id` 對應的 **operation ledger（`OPS#` item）與 `operations/<op>/release.json` 必須先手動備好**，否則 `run_sequence`／`allocate_version` 會在第一步就 `CoordinationError`。這條 webhook 路徑記 **BLOCKED**，附 `approved-sources.json` 的原文，不得補臨時 mapping、不得改那個 fixture。
+> - **O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`：Titan／Claude 都 `ValidationException: Operation not allowed`）→ 真實 AWS 執行時，**`LocateFeature` 的語意層、`SafetyNet`、`PrepareUpdate` 三個需要模型的節點會走 `PermanentError → Catch → PipelineFailed`**。那是**要保存的 BLOCKED 證據**（execution ARN + `get-execution-history` 裡的 `TaskFailed` 原文），不是 bug，**也不是通過**。能真的跑完的雲端路徑只有「字串層命中 + 零命中 KEEP」與「removed → RETIRE」。
+> - **O3 FAIL**（`docs/plan/report/o3-20260914t181109z.md`）→ `PublishBatch` 依協定 A 實作與驗證，跑到發布切點就把觀察到的結果原樣記錄；**不得宣稱 O3 PASS、不得放寬 F49**，決策出口仍在維護者手上（D-80）。
+> - **O2 PASS**（P11）：同 `operation_id` 重送取回同一 `version_id` 可以依賴。
+> - 前置：P01–P40 完成；**同批的 P41（Lambda／stack／`pipeline_task_handler`）、P49／P50／P51 必須全部先落地**。
+>
+> **（d）適用的 controller 裁決**：R1（真的部署與執行、做不到的標 BLOCKED 附錯誤原文）、R2（沿用 P41 的相依 layer／bundling，**不各自再做一套**）、R3（`pipelines/release.py`、`infra/training_kb_stack.py` 共用檔只 Edit、只 `git add` 自己的檔）、R5、R6、R7（`docs/plan/report/phases/2026-09-14-Phase52-REP.md`）、R8（**絕不 push**）、R10、R11（最小權限、不把憑證寫進 repo）。
+>
+> **實作波次**：W1（P49 ∥ P50）→ W2（P51）→ **W3（P52，本 Phase）**。
+
 **目標：** 補上 `kind=removed` 的退役分支，把 Phase 49–51 接成 `release-update` Standard workflow，並留下「A 只改第 3 步、B 與 C 完全不變」的實際 AWS 證據。
 
 **架構：** 七個 Task 節點共用 Phase 41 建好的 Lambda `training-kb-pipeline-task`，由 ASL 的 `Parameters.pipeline` 與 `Parameters.task` 分派；`ChooseAction` 這個 Choice 節點決定走 UPDATE、RETIRE 還是 KEEP。發布仍由 Phase 25 的 `Publisher` 整批提交，alias 更新排在發布成功之後。
@@ -16,7 +48,7 @@
 - 本階段不做：不新增第四條 pipeline、不建立人工發布審核佇列、不另建第二個 Lambda、不在 Map 內逐篇發布、不自行決定 successor。
 - successor 只由維護者透過 `successor_by_slug` 傳入；來源事件不得指定（F54）。沒有 successor 仍完成退役（F19）。
 - O1–O7 是設計文件第 18 節的七個待確認事項，F 與 D 開頭的編號（F19、F49…）是第 19 節的決策編號；本文件引用它們只是指出依據，不代表已驗證。
-- O1–O7 狀態：O3 未通過時停止公開發布路徑，保留可追溯 FAIL；O2、O5、O6 任一未通過時，本 Phase 的雲端驗收只能記為 BLOCKED。**本 Phase 不得把文件、CDK synth 或 mock 綠燈寫成雲端流程已通過。**
+- O1–O7 狀態（現況核對 2026-09-14，見 COMMON.md §2）：**O2 PASS**；**O3 FAIL** → 停止公開發布路徑、保留可追溯 FAIL，不得放寬 F49；**O5 BLOCKED** → 三個需要模型的節點在真實 AWS 會走 Catch，保存 BLOCKED 證據；**O6 尚未核定 `github.com/pull_request`** → Release 事件走不進 webhook／Rote，雲端驗收改用 `start-execution` 直接餵 input。**雲端驗收因此分成「可實證路徑」與「BLOCKED 路徑」兩欄（§6、§8），不得把文件、CDK synth 或 mock 綠燈寫成雲端流程已通過。**
 - 以下程式檔與 AWS 資源均是實作時預計建立；本計畫本身不代表它們已存在或已部署。
 
 ---
@@ -73,8 +105,8 @@ FEATURE#Prepare             name: Meeting Summary -> Prepare；PK 不變
 | 動作 | 路徑 | 責任 |
 |---|---|---|
 | 修改 | `src/training_kb/pipelines/release.py` | `retire_for_release`、七個 `task_*`、`RELEASE_UPDATE_TASKS`、`run_release_update`、`release_update_handler`。 |
-| 建立 | `infra/stepfunctions/release-update/v1.json` | 固定 Standard ASL 定義（00A D-14）。 |
-| 修改 | `infra/training_kb_stack.py` | 第二條 state machine 與最小執行角色（Lambda 與 log group 沿用 Phase 41 的）。 |
+| 建立 | `infra/stepfunctions/release-update/v1.json` | 固定 Standard ASL 定義（00A D-14；路徑樣板是 `asl.ASL_LOCAL_PATH`）。 |
+| 修改 | `infra/training_kb_stack.py` | 第二條 state machine 與最小執行角色（Lambda 與 log group 沿用 Phase 41 的）。（現況核對 2026-09-14：這支檔與 `infra/stepfunctions/` 目錄**目前都不存在**，由 P41 建立；開工前先確認 P41 已提交。） |
 | 測試 | `tests/unit/test_release_retire.py` | removed 分支、successor 來源、無 successor、退役紀錄。 |
 | 測試 | `tests/unit/test_release_asl.py` | Retry／Catch／`Default`、task 名稱與 Python 對齊、本機三分支序列。 |
 | 測試 | `tests/integration/test_release_update_state_machine.py` | 真實隔離環境的雲端驗收（`@pytest.mark.aws`）。 |
@@ -89,11 +121,13 @@ FEATURE#Prepare             name: Meeting Summary -> Prepare；PK 不變
 locate_feature / update_feature_aliases                                          # Phase 49
 StepHit / find_release_hits / needs_safety_net / safety_net                      # Phase 50
 prepare_update(release, hits, *, repository, writer, operations, operation_id)   # Phase 51
-retire_tutorial(slug, *, reason, successor, repository, now) -> Tutorial         # Phase 26
+retire_tutorial(slug, *, reason, successor, repository, now) -> Tutorial         # Phase 26，在 content.py
+Publisher._write_tutorial_index(slug) -> None ; SiteRenderer.render_tutorial_index  # Phase 24/26，D-83 索引重寫
 Publisher.prepare / inspect / commit ; PublishRequest(version_ids, operation_id) # Phase 24/25
 run_sequence(pipeline, payload, tasks, deps) -> dict ; RETRY / CATCH / task_state /
-    assert_safe_asl / canonical_json / save_asl_snapshot                         # Phase 29
-task_name(task) / build_deps(settings) / pipeline_task_handler(event, context)   # Phase 41
+    assert_safe_asl / canonical_json / save_asl_snapshot /
+    FAIL_STATE_NAME / TASK_TIMEOUT_SECONDS / ASL_LOCAL_PATH / ASL_SNAPSHOT_KEY   # Phase 29
+task_name(task) / build_deps(settings) / pipeline_task_handler(event, context)   # Phase 41（現況：尚未存在，等 P41）
 Deps(operations, now, repository, writer, settings) 與 need_* 三個方法             # Phase 29 + 38
 OperationCoordinator.load / record_version / complete / fail ; operation_ref(op, name)  # Phase 10
 Repository.get_object / put_object(key, body, content_type, *, if_none_match)    # Phase 07
@@ -181,15 +215,30 @@ Retry[0] 命中 -> 等 1 秒、再等 2 秒，最多兩次
 
 `RetireTutorials` 直接接 `Succeeded`，**不經過 `PublishBatch`**：退役不產生新版本，也沒有東西要發布。`UpdateAliases` 排在 `PublishBatch` 之後，因為設計 §7.4 要求「寫下一版、diff、reason，完成後更新 aliases」；`kind=changed` 時這個 Task 原樣回傳 state，不呼叫 `update_feature_aliases`。部署前先用 Phase 29 的 `save_asl_snapshot`（內部是 `put_object(..., if_none_match=True)`）把**與部署完全相同的 bytes** 存成 `stepfunctions/release-update/v1.json`（設計 §9.3、RUN Rule 10）。
 
-雲端驗收要留下的證據格式如下。這是**預計取得**的清單，尚未執行：
+雲端驗收要留下的證據格式如下。這是**預計取得**的清單，尚未執行。**所有 `aws` CLI 一律帶 `--region us-east-1`**（COMMON.md §1：`aws configure` 預設是 ap-northeast-1）。現況核對 2026-09-14：依 COMMON.md §2 拆成**可實證路徑**與 **BLOCKED 路徑**兩張表。
+
+**可實證路徑（本 Phase 一定要做到並保存證據）**
 
 | 證據 | 取得方式 | 必須看到 |
 |---|---|---|
-| 執行 ARN 與歷史 | `aws stepfunctions describe-execution` / `get-execution-history` | 一個 `SUCCEEDED`、一個注入故障後的 `FAILED`；每個 Task 的 `TaskStateEntered`，失敗終點是 `PipelineFailed`。 |
-| ASL 快照 | `aws s3api head-object --key stepfunctions/release-update/v1.json` | 與部署中的 definition 相同；同內容重送冪等，改內容要升成 `v2.json`。 |
-| 資料結果 | `aws dynamodb get-item --consistent-read`（A／B／C／`FEATURE#Prepare`） | A 切到 v3；B、C 的 `current_version` 不變；Feature PK 不變。 |
-| 公開頁 | `curl http://<bucket>.s3-website-<region>.amazonaws.com/site/tutorials/prepare-meeting/v3.html` | A 第 3 步是新文字、第 1／2／4 步逐字相同；B、C 無新版。 |
+| ASL 快照 | `aws s3api head-object --region us-east-1 --bucket <content bucket> --key stepfunctions/release-update/v1.json` | 與部署中的 definition 相同 bytes；同內容重送冪等（`save_asl_snapshot` 撞 key 會先比對 bytes），改內容要升成 `v2.json`。 |
+| state machine 存在與定義 | `aws stepfunctions describe-state-machine --region us-east-1 --state-machine-arn "$TKB_RELEASE_SM_ARN"` | `name` 是 `training-kb-release-update`、`type` 是 `STANDARD`、`definition` 的七個 `Resource` 都是 P41 那支共用 Lambda 的 ARN。 |
+| KEEP 路徑執行 | `start-execution`（零命中的 Release input）→ `describe-execution` / `get-execution-history` | `SUCCEEDED`；`TaskStateEntered` 依序是 `LocateFeature`、`FindSteps`、`SafetyNet`，再走 `ChooseAction` → `RecordKeep` → `Succeeded`；`prepared_version_ids` 為空。**前提是 `locate_feature` 在字串層就命中或直接回 `None`，不進語意層**（否則撞 O5）。 |
+| RETIRE 路徑執行 | `start-execution`（`kind=removed`，`operations/<op>/successors.json` 先放好）→ `get-execution-history` | `SUCCEEDED`；終點 `Succeeded`；`RetireTutorials` **不經** `PublishBatch`。 |
+| 退役資料結果 | `aws dynamodb get-item --region us-east-1 --consistent-read --table-name training_kb --key '{"PK":{"S":"TUTORIAL#prepare-meeting"},"SK":{"S":"META"}}'` | `status=retired`、`successor` 依 `successors.json`；`current_version`、`VERSION`／`STEP`、S3 `.md`／`.diff` 全部保留。 |
+| 退役紀錄 | `aws s3 cp s3://<bucket>/operations/<op>/retire.json -` | JSON 陣列，每篇一筆 `{"slug", "reason", "retired_at", "successor"}`；同 `operation_id` 重送內容不變。 |
+| **退役索引頁（D-83）** | `aws s3 cp s3://<bucket>/site/tutorials/prepare-meeting/index.html -`（key 以 `tutorial_index_key(slug)` 為準） | 含 `RETIRED_NOTICE` 與後繼連結；版本清單仍列已發布版；**版本頁 `v2.html` 的 bytes 完全未變**。 |
+| 失敗語意 | 注入 `TransientError` 後換 execution name 重跑 → `get-execution-history` | `FAILED`、終點 `PipelineFailed`、`Retry` 真的重試兩次（`TaskScheduled` 出現三次）；A 的 `current_version` 不變、`site/` 無新檔。 |
 | 模型呼叫數 | 逐次 `CallTrace` 紀錄 | 與該次執行的 attempt 數相符，含 retry 與每個 embedding（F45）。 |
+
+**BLOCKED 路徑（照跑、原樣記錄觀察到的結果，不得寫成通過）**
+
+| 路徑 | 為什麼 blocked | 要保存什麼 |
+|---|---|---|
+| 從 GitHub webhook 觸發 release-update | **O6 未核定 `github.com/pull_request`**（`tests/fixtures/o6/approved-sources.json` 的 `approved_by` 為空） | `approved-sources.json` 該列原文 ＋ 「本 Phase 改用 `start-execution` 直接餵 input、operation ledger 先手動備好」的說明。**不得**補臨時 mapping、不得改那個 fixture。 |
+| `LocateFeature` 語意層／`SafetyNet`／`PrepareUpdate` | **O5 BLOCKED**（Titan／Claude 都 `ValidationException: Operation not allowed`） | 執行 ARN ＋ `get-execution-history` 裡 `TaskFailed` 的 `error`／`cause` 原文（會是 `PermanentError` → `Catch` → `PipelineFailed`）＋ `docs/plan/report/o5-20260915T030245Z.md`。這是 **BLOCKED 證據，不是 bug，也不是通過**。 |
+| `PublishBatch` 的「整批舊或整批新」 | **O3 FAIL**（`docs/plan/report/o3-20260914t181109z.md`、D-80） | 跑到發布切點時觀察到的 DynamoDB 與 `site/` 實際狀態，原樣記錄；決策出口留給維護者。不得宣稱 O3 PASS、不得放寬 F49。 |
+| A 切到 v3 的公開頁 `curl http://<bucket>.s3-website-<region>.amazonaws.com/site/tutorials/prepare-meeting/v3.html` | 需要 `PrepareUpdate`（O5）與 `PublishBatch`（O3）都成功 | 若因上兩列取不到，記 BLOCKED 並指向該列；不得用 moto 綠燈或本機渲染的 HTML 頂替。 |
 
 ## 7. TDD Tasks
 
@@ -255,8 +304,38 @@ def task_retire(state, deps):
 
 `successor` 的唯一來源是維護者事先寫進 `operations/<operation_id>/successors.json` 的 `{slug: successor_slug}`，讀不到就是空 dict（F54）。合法性檢查（存在、非自身、不形成循環）由 Phase 26 的 `resolve_successor` 負責，本 Phase 不重寫一份。`_hits(state)` 從 `hit_refs` 的 `"<version_id>#<number>"` 還原 `StepHit`，slug 用 Phase 20 的 `parse_version_id(version_id)[0]`。
 
+- [ ] **Step 3b：退役之後重寫該篇的教學索引頁（00A D-83，本批必做）**
+
+這是上一批最終 review 裁決、留給本 Phase 寫程式的事（`docs/plan/report/2026-09-14-Phase21-40實作-REP.md` §8、00A D-83）。背景：協定 A 下**已發布的版本頁不可覆寫**（`Publisher._version_problems` 擋已發布版、`_put_public_object` 會比對 bytes），所以退役提示寫不進既有的 `v<n>.html`。出口 c 是把提示掛在**可覆寫**的教學索引頁。
+
+- renderer 那一半**已經完成**：`src/training_kb/site.py:SiteRenderer.render_tutorial_index` 已經輸出退役區塊與後繼連結（修正波 commit `f1ef75a`，`_retired_block` 讀 `Tutorial.status`／`successor`）。本 Phase **不改 renderer**。
+- 本 Phase 要做的是「何時寫」：`task_retire` 在 `retire_for_release(...)` **回來之後**，對每一個退役成功的 slug 各呼叫一次 `Publisher._write_tutorial_index(slug)`。順序不可顛倒——索引頁的內容取自 `repository.get_tutorial(slug)`，`status` 還沒變成 `retired` 就寫不出退役區塊。
+- **只寫索引頁**：不呼叫 `Publisher.prepare`／`inspect`／`commit`，不重發版本頁，不碰 `render_version_page`，不建立任何新版本。`_write_tutorial_index` 走 `_put_index` → `_put_public_object(..., if_none_match=False)`，本來就是可覆寫的投影。
+- **本計畫選擇**：直接呼叫既有的 `Publisher._write_tutorial_index`（雖然是私有方法），**不**在本 Phase 複製一份索引渲染邏輯、也不為此改 `publishing.py` 的公開介面（兩份排序邏輯遲早分岔；ruff 的 `select` 只有 `E`／`F`／`I`／`UP`，不會擋私有存取）。若 P57 之後把它改成公開方法，本 Phase 只要改呼叫點。`Publisher` 由 `Publisher(repository, SiteRenderer(), operations)` 建出來（`renderer` 的實作 P57 才會換）。
+- **`retire_tutorial` 自己仍然不寫任何 `site/` 物件**（D-83 明訂），寫入點只有這裡。
+
+補兩個測試到 `tests/unit/test_release_retire.py`：
+
+```python
+def test_retire_rewrites_only_the_tutorial_index(repo, local_deps, retire_state):
+    before = repo.get_object("site/tutorials/prepare-meeting/v2.html")
+    task_retire(retire_state, local_deps)
+    index = repo.get_object(tutorial_index_key("prepare-meeting")).decode("utf-8")
+    assert RETIRED_NOTICE in index and "share-summary" in index
+    assert repo.get_object("site/tutorials/prepare-meeting/v2.html") == before   # 版本頁 bytes 未變
+    assert repo.published_version_ids == []                                      # 沒有新版本被發布
+
+def test_index_rewrite_happens_after_status_is_retired(repo, local_deps, retire_state):
+    task_retire(retire_state, local_deps)
+    assert repo.get_tutorial("prepare-meeting").status == TutorialStatus.RETIRED
+    assert 'class="tutorial-index"' in repo.get_object(
+        tutorial_index_key("prepare-meeting")).decode("utf-8")
+```
+
+（公開 key 以 `publishing.tutorial_index_key(slug)` 為準，不要自己拼字串。）
+
 - [ ] **Step 4：跑 `uv run pytest tests/unit/test_release_retire.py -q` 確認綠燈。** 另補三個案例：`kind="renamed"` 呼叫本函式丟 `PermanentError`；退役後該篇既有版本與回饋仍可讀取（設計 §8.4）；同 `operation_id` 重送時 `retire.json` 內容不變且沒有第二次寫入。
-- [ ] **Step 5：提交** `git add src/training_kb/pipelines/release.py tests/unit/test_release_retire.py`，再 `git commit -m "feat(release): 依改版退役受影響教學"`。
+- [ ] **Step 5：提交** `git add src/training_kb/pipelines/release.py tests/unit/test_release_retire.py`，再 `git commit -m "feat(release): 依改版退役受影響教學"`。（只 `git add` 自己的檔案路徑，不用 `git add -A`；COMMON.md R3.3。）
 
 ### Task 2：建立 ASL 與 state machine，鎖定失敗語意
 
@@ -311,16 +390,16 @@ release_machine.grant_start_execution(webhook_fn)   # Phase 30 的 webhook 收�
 release_machine.grant_start_execution(import_fn)    # Phase 42 的受控匯入走同一條流程（Phase 60 IAM 核對表：兩條 state machine）
 ```
 
-ASL 的 `RETRY`／`CATCH` 直接引用 Phase 29 的常數產生（`from training_kb.pipelines.asl import CATCH, RETRY, assert_safe_asl, task_state`），不在本檔另寫一份字面值；若 Phase 29 還停在單一 retrier，**先回頭改 Phase 29**（D-53），不要在本 Phase 放寬檢查。
+ASL 的 `RETRY`／`CATCH` 直接引用 Phase 29 的常數產生（`from training_kb.pipelines.asl import CATCH, FAIL_STATE_NAME, RETRY, TASK_TIMEOUT_SECONDS, assert_safe_asl, task_state`），不在本檔另寫一份字面值。（現況核對 2026-09-14：原寫「若 Phase 29 還停在單一 retrier，先回頭改 Phase 29」——**`RETRY` 已經是 D-53 的兩條 retrier tuple**（`pipelines/asl.py:33`），這句已成歷史備註，不需要執行；`assert_safe_asl` 也已經檢查 `Choice` 必須有 `Default`。）
 
 - [ ] **Step 4：存快照、合成並檢查**
 
 ```bash
 uv run pytest tests/unit/test_release_asl.py -q
-cdk synth --quiet
+AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 command npx aws-cdk@2 synth --quiet
 ```
 
-`cdk` 是 Node.js 套件，指令**不加** `uv run`（00A §3.1、D-22）。預期：測試 PASS；template 中恰有一個新增的 `AWS::StepFunctions::StateMachine`（`StateMachineType: STANDARD`、`StateMachineName: training-kb-release-update`），沒有新的 `AWS::Lambda::Function`，也沒有第四條 pipeline。刪掉任何一個 `Catch` 後測試必須轉紅。若 Phase 09／41 的 CDK 環境尚未建立，先完成前置再跑，不把目前缺指令寫成已通過。
+`cdk` 是 Node.js 套件，指令**不加** `uv run`（00A §3.1、D-22）。（現況核對 2026-09-14，COMMON.md §1：本機互動 shell 把 `node` 定成會拒絕的 function，所以**一律用 `command npx aws-cdk@2 <子命令>`**，並帶 `AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1`；`--outputs-file` 指到 scratchpad，**不要提交 `cdk.out/`**。`jsii` 在 `uv run pytest` 下正常，所以 `Template.from_stack` 的單元斷言可用。）預期：測試 PASS；template 中恰有一個新增的 `AWS::StepFunctions::StateMachine`（`StateMachineType: STANDARD`、`StateMachineName: training-kb-release-update`），沒有新的 `AWS::Lambda::Function`，也沒有第四條 pipeline。刪掉任何一個 `Catch` 後測試必須轉紅。若 Phase 09／41 的 CDK 環境尚未建立，先完成前置再跑，不把目前缺指令寫成已通過。
 
 - [ ] **Step 5：提交** `git add infra/stepfunctions/release-update/v1.json infra/training_kb_stack.py tests/unit/test_release_asl.py`，再 `git commit -m "feat(infra): 建立 release-update 流程定義"`。
 
@@ -388,17 +467,38 @@ def release_update_handler(event, context):
 - [ ] **Step 4：部署、跑 S5 主案例並注入故障**
 
 ```bash
-cdk deploy TrainingKbApp --require-approval never
-aws stepfunctions start-execution --state-machine-arn "$TKB_RELEASE_SM_ARN" --name "op-release-r_42" \
+# 0) 部署（stack id 以 P41 在 infra/app.py 建立的為準；COMMON.md §1）
+AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \
+  command npx aws-cdk@2 deploy <P41 的 stack id> --require-approval never \
+  --outputs-file "$SCRATCH/cdk-outputs.json"
+
+# 1) 先備好 operation ledger 與輸入（O6 未核定 pull_request，走不進 webhook，
+#    所以 OPS# item 與 operations/<op>/release.json 必須先手動寫好）
+aws s3 cp ./release-r_42.json s3://<bucket>/operations/op-release-r_42/release.json --region us-east-1
+#    OPS# item 用一小段 uv run python 呼叫 OperationCoordinator.accept(AcceptOperation(...)) 寫入，
+#    不要手拼 DynamoDB item（欄位形狀由 operations.py 的 codec 決定）。
+
+# 2) 直接餵 input 啟動（不經 PipelineStarter／webhook）
+aws stepfunctions start-execution --region us-east-1 --state-machine-arn "$TKB_RELEASE_SM_ARN" \
+  --name "op-release-r_42" \
   --input '{"operation_id":"op-release-r_42","project_id":"demo","input_ref":"operations/op-release-r_42/release.json"}'
-aws stepfunctions get-execution-history --execution-arn "$ARN" --max-results 200 \
+
+aws stepfunctions get-execution-history --region us-east-1 --execution-arn "$ARN" --max-results 200 \
   --query "events[?type=='TaskStateEntered'].stateEnteredEventDetails.name" --output text
-diff <(aws s3 cp s3://<bucket>/tutorials/prepare-meeting/v2.md -) \
-     <(aws s3 cp s3://<bucket>/tutorials/prepare-meeting/v3.md -)
+
+# 3) 可實證的資料比對
+diff <(aws s3 cp s3://<bucket>/tutorials/prepare-meeting/v2.md - --region us-east-1) \
+     <(aws s3 cp s3://<bucket>/tutorials/prepare-meeting/v3.md - --region us-east-1)
+
 TKB_RUN_AWS_INTEGRATION=1 uv run pytest tests/integration/test_release_update_state_machine.py -q
 ```
 
-預期：`diff` 只出現第 3 步那兩行，B、C 沒有 `v2.md`；依 §6 證據表逐列保存輸出。接著讓 `PublishBatch` 必定丟 `TransientError` 後換 execution name 重跑：執行以 `FAILED` 結束、終點是 `PipelineFailed`、A 的 `current_version` 仍是 v2、公開頁仍是舊內容；移除故障後以**同一個** `operation_id` 重送，取回同一個 `prepare-meeting@v3`，不得出現 v4。
+（現況核對 2026-09-14：三處改寫——`cdk` 換成 `command npx aws-cdk@2` 並固定 `us-east-1`；stack id 不寫死 `TrainingKbApp`，以 P41 實際建立的為準；**加上第 1 步**，因為 **O6 未核定 `github.com/pull_request`**，Release 事件走不進 webhook／Rote，`operation_id` 對應的 `OPS#` 紀錄與 `release.json` 必須先手動備好，否則 `run_sequence` 第一步就 `CoordinationError`。）
+
+預期（**照 §6 的兩張表分別記錄**）：
+
+- **可實證**：RETIRE 與 KEEP 兩條路徑各一個 `SUCCEEDED` execution；`retire.json`、退役索引頁（D-83）、`status=retired` 與 `successor` 都對得上；注入 `TransientError` 後換 execution name 重跑，執行以 `FAILED` 結束、終點是 `PipelineFailed`、A 的 `current_version` 不變、`site/` 沒有新檔；移除故障後以**同一個** `operation_id` 重送，`retire.json` 不重寫、沒有重複退役。
+- **BLOCKED**：`renamed` 主案例會在 `SafetyNet`／`PrepareUpdate` 撞 **O5**（`ValidationException: Operation not allowed` → `PermanentError` → Catch → `PipelineFailed`），所以上面第 3 步的 `diff`（`v3.md`）與 `PublishBatch` 的整批切換（**O3 FAIL**）**取不到**。把 execution ARN、`get-execution-history` 的 `TaskFailed` 原文與兩份 gate 報告路徑（`o5-20260915T030245Z.md`、`o3-20260914t181109z.md`）原樣存進證據索引，**不得**用 moto 綠燈或本機渲染頂替，也不得宣稱流程已通過。
 
 - [ ] **Step 5：保存證據並提交**
 
@@ -406,17 +506,24 @@ TKB_RUN_AWS_INTEGRATION=1 uv run pytest tests/integration/test_release_update_st
 
 ## 8. 驗收矩陣
 
-| 路徑 | 刺激 | 預期資料結果 |
-|---|---|---|
-| Happy | `r_42` renamed 命中 A 第 3 步 | A 切到 v3 且只有第 3 步不同；B、C 無新版；`FEATURE#Prepare` 的 PK 不變、name 變 Prepare。 |
-| Happy | `kind=removed` 命中 A | A `status=retired`、`successor` 依 `successors.json`；歷史原文保留；`retire.json` 記下這一筆。 |
-| Boundary | removed 但維護者未指定 successor | 仍完成退役，`successor` 為 `None`（F19）。 |
-| Boundary | 零命中且 safety_net 零確認，或只命中歷史／未發布版步驟 | `action="KEEP"`，走 `RecordKeep`，執行 `SUCCEEDED` 且 `prepared_version_ids` 為空（F17、F18）。 |
-| Failure | 任一 Task 的 Retry 耗盡 | execution `FAILED`，終點 `PipelineFailed`，零新版本公開（F49）。 |
-| Failure | alias 撞名 | `UpdateAliases` 以 `PermanentError` 失敗；不降級成 KEEP（D07）。 |
-| Idempotency | 同 `operation_id` 重送 | 同一個 `version_id`，沒有 v4，`retire.json` 不重寫，沒有重複退役。 |
+現況核對 2026-09-14（COMMON.md §2）：每一列都標明它在**本機／moto 單元測試**是可實證的，還是在**真實 AWS** 上被 gate 擋住。**本機那一欄全部都要做到**；真實 AWS 那一欄做不到的列 BLOCKED 並附錯誤原文。
 
-人工驗收：在 Step Functions console 打開一個成功與一個失敗執行，逐一檢視每個 Task 的輸入輸出；再用瀏覽器打開 A、B、C 的公開頁與 A 的退役頁，確認退役頁顯示過期說明、原文與後繼連結，且不能送出新回饋。不能只看測試顯示 PASS。
+| 路徑 | 刺激 | 預期資料結果 | 本機／moto | 真實 AWS |
+|---|---|---|---|---|
+| Happy | `kind=removed` 命中 A | A `status=retired`、`successor` 依 `successors.json`；歷史原文保留；`retire.json` 記下這一筆。 | ✅ 必做 | ✅ **可實證**（不需要模型） |
+| Happy（D-83） | 同上 | A 的教學索引頁 `tutorial_index_key("prepare-meeting")` 被重寫，含 `RETIRED_NOTICE` 與後繼連結；**版本頁 bytes 未變**、沒有新版本被發布。 | ✅ 必做 | ✅ **可實證** |
+| Boundary | removed 但維護者未指定 successor | 仍完成退役，`successor` 為 `None`（F19）。 | ✅ 必做 | ✅ 可實證 |
+| Boundary | 零命中且 safety_net 零確認，或只命中歷史／未發布版步驟 | `action="KEEP"`，走 `RecordKeep`，執行 `SUCCEEDED` 且 `prepared_version_ids` 為空（F17、F18）。 | ✅ 必做 | ✅ 可實證（前提：`locate_feature` 在字串層結束，不進語意層） |
+| Failure | 任一 Task 的 Retry 耗盡 | execution `FAILED`，終點 `PipelineFailed`，零新版本公開（F49）。 | ✅ 必做 | ✅ 可實證（注入 `TransientError`） |
+| Idempotency | 同 `operation_id` 重送 | 同一個 `version_id`，沒有 v4，`retire.json` 不重寫，沒有重複退役。 | ✅ 必做 | ✅ 可實證（RETIRE／KEEP 這兩條） |
+| Happy | `r_42` renamed 命中 A 第 3 步 | A 切到 v3 且只有第 3 步不同；B、C 無新版；`FEATURE#Prepare` 的 PK 不變、name 變 Prepare。 | ✅ 必做（假 writer） | ⛔ **BLOCKED**：`PrepareUpdate` 撞 **O5**、`PublishBatch` 撞 **O3 FAIL** |
+| Failure | alias 撞名 | `UpdateAliases` 以 `PermanentError` 失敗；不降級成 KEEP（D07）。 | ✅ 必做 | ⛔ BLOCKED（走不到 `UpdateAliases`，它排在 `PublishBatch` 之後） |
+| Entry | 由 GitHub `pull_request` webhook 觸發整條流程 | `training-kb-webhook` 啟動 `training-kb-release-update`。 | — | ⛔ **BLOCKED**：**O6 未核定 `github.com/pull_request`**；改用 `start-execution` 直接餵 input，operation ledger 先手動備好 |
+
+人工驗收（分兩條路徑）：
+
+- **可實證**：在 Step Functions console 打開一個成功（RETIRE 或 KEEP）與一個失敗（注入 `TransientError`）的執行，逐一檢視每個 Task 的輸入輸出；再用瀏覽器打開 A 的**教學索引頁**（D-83 重寫的那一頁），確認顯示過期說明與後繼連結；並確認退役後送新回饋會被 Phase 26 的 `assert_accepts_feedback` 擋下。不能只看測試顯示 PASS。
+- **BLOCKED**：A 切到 v3 的版本頁 `site/tutorials/prepare-meeting/v3.html` 取不到（O5／O3），記 BLOCKED 並附 execution ARN 與 `TaskFailed` 原文。
 
 ## 9. 常見錯誤與停止條件
 
@@ -429,13 +536,16 @@ TKB_RUN_AWS_INTEGRATION=1 uv run pytest tests/integration/test_release_update_st
 | 退役教學仍收得到新回饋 | 沒呼叫 Phase 26 的檢查 | 回 Phase 26／42 補 `assert_accepts_feedback`。 |
 | successor 由 PR 內容決定 | 把 evidence 當設定 | 只讀維護者寫的 `successors.json`（F54）。 |
 | ASL 快照被覆寫 | 沒用條件寫入 | 走 `save_asl_snapshot`（內部 `if_none_match=True`）；改內容要升 `v2.json`。 |
+| 退役後讀者看不到過期說明 | 只改了 DynamoDB，沒重寫教學索引頁 | 依 D-83 在 `retire_tutorial` 之後呼叫 `Publisher._write_tutorial_index(slug)`；**只有索引頁**，不重發版本頁（已發布版本頁的 bytes 不可覆寫）。 |
+| 想把退役提示寫回 `v<n>.html` | 沒注意協定 A 下已發布版本頁不可覆寫 | 停止：`_version_problems` 會擋、`_put_public_object` 會比對 bytes；出口 c 就是索引頁（D-83）。 |
+| 雲端驗收卡在 webhook 進不來 | 以為 Release 事件能從 GitHub webhook 觸發 | **O6 未核定 `github.com/pull_request`**：改用 `start-execution` 直接餵 input，`OPS#` 與 `release.json` 先手動備好；webhook 那條記 BLOCKED，不補臨時 mapping。 |
 
 ## 10. 來源與 Rule 對照
 
 - [依改版更新教學.feature](../../spec/features/依改版更新教學.feature)
   - Rule 9「kind 為 removed 的改版動作為 RETIRE」（primary）→ `tests/unit/test_release_retire.py::test_removed_retires_each_hit_tutorial` 與 ASL `ChooseAction` 的 `RETIRE` 分支直接斷言。
   - Rule 12「未引用改版 Feature 的教學維持 KEEP」→ 相關（primary Phase 50）：本 Phase 在流程層再驗一次，§8 Happy 案例斷言 B、C 的 `current_version` 不變、`action="KEEP"` 走 `RecordKeep`。
-  - Rule 16「RETIRE 將受影響教學標記為過期」→ 相關（primary Phase 26）：本 Phase 只在 `release-update` 流程中呼叫 `retire_tutorial`，`status == "retired"` 的權威斷言在 `tests/unit/test_retire_tutorial.py`。
+  - Rule 16「RETIRE 將受影響教學標記為過期」→ 相關（primary Phase 26）：本 Phase 只在 `release-update` 流程中呼叫 `retire_tutorial`，`status == "retired"` 的權威斷言在 `tests/unit/test_retire_tutorial.py`。**讀者真的看得到過期說明，靠的是本 Phase 的 D-83 索引頁重寫**（Task 1 Step 3b）——renderer 已於修正波完成（`f1ef75a`），寫入時機是本 Phase 的交付物。
   - Rule 17「RETIRE 的教學導向後繼 Tutorial」→ 相關（primary Phase 26）：本 Phase 斷言 successor 只來自維護者的 `successors.json`，未指定時為 `None`（F19、F54）。
 - [執行教學流程.feature](../../spec/features/執行教學流程.feature)
   - Rule 2「教學 pipeline 依 Step Functions 預定義節點執行」→ 相關（primary Phase 29）：`test_asl_task_names_match_python_tasks` 在本條 pipeline 再驗固定節點名稱。
@@ -452,6 +562,7 @@ TKB_RUN_AWS_INTEGRATION=1 uv run pytest tests/integration/test_release_update_st
 - [ ] `infra/stepfunctions/release-update/v1.json` 的七個 Task 都用 `${PipelineTaskFunctionArn}`、`Parameters` 帶 `pipeline`／`task`／`state.$`，Retry 是 Phase 29 的兩個 retrier、Catch 導向 `PipelineFailed`，Choice 有 `Default`，RETIRE 分支不經 `PublishBatch`。
 - [ ] `training-kb-release-update` 只授權給 `training-kb-webhook` 與 `training-kb-import` 兩支函式啟動（`grant_start_execution`），對齊 Phase 60 的 IAM 核對表。
 - [ ] `task_prepare_update` 只傳這次 Release 的 `operation_id`，per-slug 子 operation 由 Phase 51 的 `prepare_update` 內部產生（D-59），本 Phase 沒有第二份取號邏輯。
-- [ ] state machine 名為 `training-kb-release-update`、沒有新增第二個 Lambda、`cdk` 指令沒有加 `uv run`；ASL 快照經 `save_asl_snapshot` 條件寫入 `stepfunctions/release-update/v1.json`，不同內容不覆寫。
-- [ ] 雲端驗收保存成功與失敗各一個 execution ARN 並附 §6 證據表每一列；A 只改第 3 步且第 1、2、4 步逐字相同，B、C 無新版，歷史或未發布步驟不觸發改寫。
+- [ ] state machine 名為 `training-kb-release-update`、沒有新增第二個 Lambda、`cdk` 指令沒有加 `uv run`（用 `command npx aws-cdk@2`，帶 `AWS_REGION=us-east-1`，不提交 `cdk.out/`）；ASL 快照經 `save_asl_snapshot` 條件寫入 `stepfunctions/release-update/v1.json`，不同內容不覆寫。
+- [ ] **D-83：`task_retire` 在 `retire_for_release` 之後，對每個退役成功的 slug 呼叫 `Publisher._write_tutorial_index(slug)`；只重寫索引頁、不重發版本頁、不建立新版本，且版本頁 bytes 未變有直接 assertion。**
+- [ ] 雲端驗收依 §6 的兩張表分別保存：**可實證路徑**（RETIRE／KEEP 各一個 `SUCCEEDED`、一個注入故障後的 `FAILED`、ASL 快照、`retire.json`、退役索引頁）與 **BLOCKED 路徑**（webhook 入口 O6、`SafetyNet`／`PrepareUpdate` O5、`PublishBatch` O3），每一列都附取得方式與原始輸出或錯誤原文。
 - [ ] REL Rule 9 有 primary assertion；REL Rule 12／16／17 與 RUN Rule 2／6／7／10 寫成「相關」並指出 primary Phase（50、26、29）；O2／O3／O5／O6 任一未通過時雲端驗收標為 BLOCKED，沒有宣稱流程已完成或已核定。
