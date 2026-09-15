@@ -6,7 +6,8 @@
 
 **指標公式一份都不在這裡。** 平均、負面回饋、重開票窗口與呼叫數全部轉呼
 `training_kb.analytics`（Phase 53／54）；本檔只做「挑哪些版本、怎麼排、缺值寫什麼字」。
-守門：`rg -n "days=14|sum\\(.*\\)/len\\(" demo/` 必須無命中。
+守門：`tests/unit/test_demo_dashboard_guard.py::test_demo_package_has_no_second_metric_formula`
+會掃過整個 `demo/`，找到十四天窗口或自己算平均的樣式就紅燈。
 
 四個區塊與來源固定如下，其他欄位不加（設計 §13）：
 
