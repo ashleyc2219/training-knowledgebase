@@ -303,3 +303,96 @@ def candidate_groups(feedback: Iterable[Feedback],
         for (version_id, category), ids in sorted(buckets.items())
         if len(ids) >= MIN_CANDIDATE_FEEDBACK
     )
+
+
+PROPOSE_NODE = "propose_rule"
+"""`propose_candidate` 呼叫模型時的節點名；`CallTrace` 與 Phase 48 的 ASL 狀態都用它。"""
+
+
+def _require_rule_text(value: object) -> str:
+    """模型的 `rule` 必須是去頭尾後非空的字串（`PRP` Rule 5）。
+
+    schema 已經擋過 `minLength: 1`，但 `"   "` 在 schema 眼裡是合法字串；這裡多擋一次，
+    免得寫進 `AuthoringRule` 時才被 `rule_is_filled` 用 `ValidationError` 打回——
+    後者是 pydantic 的例外，不會被 ASL 的 Catch 當成 `PermanentError` 處理。
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ContentError(f"RuleProposal.rule 必須是非空字串：{value!r}")
+    return value.strip()
+
+
+def _require_step_type(value: object) -> StepType:
+    """模型的 `applies_when` 必須是單一 `step.type` 字串，轉型後才存入（`PRP` Rule 3、D-10）。
+
+    `bool` 單獨先擋掉：Python 的 `bool` 是 `int` 的子類，這一行明說「`True` 不是合法值」，
+    日後放寬型別也不會破功。list／dict／`"click_ui, read"` 這種「多條件」寫法一律拒絕——
+    MVP 的 `applies_when` 只表達單一 `step.type` 等值（設計 D16），不是運算式也不是 dict。
+    """
+    if isinstance(value, bool) or not isinstance(value, str):
+        raise ContentError(f"applies_when 必須是單一 step.type 字串：{value!r}")
+    try:
+        return StepType(value)
+    except ValueError as error:
+        raise ContentError(f"applies_when 不是合法 step.type：{value!r}") from error
+
+
+def _evidence_comments(group: CandidateGroup, *, repo: Repository) -> tuple[str, ...]:
+    """取 group 內這幾個 ID 的留言原文，給 prompt 當素材；同版別組的留言不進 prompt。
+
+    留言只是**素材**，不會被寫進 `AuthoringRule`：`evidence` 只存 ID（設計 D15）。
+    沒有留言（只有評分或只有類別）的回饋自然跳過，不會在 prompt 留下空行。
+    """
+    wanted = set(group.feedback_ids)
+    found: list[str] = []
+    for item in repo.list_feedback_of_version(group.version_id):
+        if item.id in wanted and item.comment:
+            found.append(item.comment)
+    return tuple(found)
+
+
+def propose_candidate(group: CandidateGroup, *, writer: Writer, repo: Repository,
+                      operation_id: str, rule_id: str) -> AuthoringRule:
+    """對一組已驗證的證據提出一條 candidate 規則（`PRP` Rule 1–5、`REV` Rule 9）。
+
+    順序是固定的（Phase 文件 §6）：先重驗門檻 → 已存在就回既有規則 → 才呼叫模型一次 →
+    驗證模型只該決定的兩個欄位 → 組 `AuthoringRule` → `put_meta`。所以
+
+    - 不足五個**不同** ID 連模型都不會打（前置檢查丟好讀的 `ContentError`；模型層的
+      `evidence_has_five_distinct_ids` 是第二道防線，不是唯一防線）。
+    - `RULE#<rule_id>` 已存在就**原樣回傳既有規則**：不覆寫、不再打模型。搭配
+      `candidate_rule_id` 的決定性 ID，同一組證據重送不會多出第二條規則。
+    - 模型只決定 `rule` 與 `applies_when`；`rule_id`／`evidence`／`derived_from`／`status`／
+      `applied_to` 一律由程式依已驗證的 group 填。模型回傳的 `evidence` 與 `derived_from`
+      讀完就丟——它們留在 schema 裡只是為了在 trace 中比對（設計 D15、D18）。
+
+    寫出的 `status` 永遠是 `candidate`：這代表「已提出、待驗證」，**不代表已驗證有效**。
+    只有 Phase 55 的狀態轉移能把它改成 active／retired，Phase 19 的一般寫作只取 active
+    （設計 F27），所以這裡不需要、也不得碰 `status`。
+
+    keyword 是 `repo=` 不是 `repository=`（00A §6.9，Phase 48 已照這個名稱呼叫）。
+    判斷類參數（`max_tokens` 512、`temperature` 0.1）由 Phase 15／18 的 `inference_config`
+    依 schema 的 `$id` 決定，本函式不重設。
+    """
+    if len(set(group.feedback_ids)) < MIN_CANDIDATE_FEEDBACK:
+        raise ContentError(
+            f"candidate 需要至少 {MIN_CANDIDATE_FEEDBACK} 個不同 Feedback ID："
+            f"{group.version_id} / {group.category} 只有 {len(set(group.feedback_ids))} 個")
+    existing = repo.get_meta(rule_pk(rule_id), AuthoringRule)
+    if existing is not None:
+        return existing
+    system, user = prompt_propose_rule(group.version_id, group.category,
+                                       group.feedback_ids,
+                                       _evidence_comments(group, repo=repo))
+    payload = writer.generate_json(system, user, RuleProposal,
+                                   operation_id=operation_id, node=PROPOSE_NODE)
+    candidate = AuthoringRule(
+        rule_id=rule_id,
+        rule=_require_rule_text(payload.get("rule")),
+        applies_when=_require_step_type(payload.get("applies_when")),
+        evidence=list(group.feedback_ids),
+        status=RuleStatus.CANDIDATE,
+        applied_to=[],
+        derived_from=group.version_id,
+    )
+    repo.put_meta(candidate)
+    return candidate
