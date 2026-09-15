@@ -1,0 +1,12 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "status": "BLOCKED",
+  "reason": "PermanentError: ValidationException",
+  "upstream": "An error occurred (ValidationException) when calling the InvokeModel operation: Operation not allowed",
+  "probed_at": "2026-09-15T06:46:38Z",
+  "operation_id": "demo-cluster-01",
+  "model_id": "amazon.titan-embed-text-v2:0",
+  "observed": null,
+  "tickets": []
+}

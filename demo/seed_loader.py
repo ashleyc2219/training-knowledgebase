@@ -75,6 +75,11 @@ from training_kb.pipelines.ticket import assign_cluster, ensure_embedding
 from training_kb.repository import Repository
 from training_kb.writing.client import Writer
 
+SYNTHETIC_NOTICE = (
+    "合成資料示範（SYNTHETIC）：本檔由 docs/design/training-kb.md §11 的 Demo 配方展開，"
+    "不是真實觀測、不是實測成效，也不含任何真人資料、帳號或金鑰。")
+"""十份種子檔與兩份產物共用的檔頭聲明；改字只改這一處（設計 §11.5、§12.3）。"""
+
 SEED_FILES: tuple[str, ...] = (
     "features.json", "tutorials.json", "versions.json", "steps.json", "releases.json",
     "feedback.json", "views.json", "tickets.json", "rules.json", "batches.json",
@@ -538,6 +543,10 @@ def apply_seed(bundle: SeedBundle, *, repository: Repository, now: datetime) -> 
         written.append(release_pk(release.id))
     for item in bundle.feedback:
         repository.put_meta(item, create_only=False)
+        # 與 `ingress._complete_feedback` 同一條邊：`list_feedback_of_version` 只看
+        # `FEEDBACK#<id> --REFERS_TO--> VERSION#<version_id>`，少了它指標就掃不到回饋。
+        repository.put_edge(feedback_pk(item.id), "REFERS_TO",
+                            version_pk(item.tutorial_version))
         written.append(feedback_pk(item.id))
     for view in bundle.views:
         repository.put_meta(view, create_only=False)
