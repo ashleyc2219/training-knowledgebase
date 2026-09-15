@@ -2,6 +2,41 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **(a) 已存在、可直接重用（不要重寫）**
+> - `src/training_kb/ingress.py`：`missing_nonempty_strings`、`_parsed_ts`（`ts` 必須是 aware ISO-8601 **整秒**，naive／格式錯／帶微秒一律 `IngressError(("ts",))`）、`_optional_string`、`_invalid_fields`、`validate_ticket`／`validate_release`、`operation_id_for(kind: OperationKind, canonical_id) -> str`、`normalize_then_accept`、`PIPELINE_FOR_KIND`（只有 `ticket`／`release`，已明寫「Feedback／View 走 P42 的固定匯入，不啟動任何 pipeline」）。
+> - `src/training_kb/content.py::assert_accepts_feedback(tutorial) -> None`（P26）。`content.py` 不 import `ingress`，所以 `ingress` 反向 import 它**沒有循環風險**。
+> - `src/training_kb/models.py`：`Feedback` **已經**有 `rating_is_strict_int`（`mode="before"`，`bool` 與非 1..5 直接 `ValueError`）與 `carries_signal`（rating／category／comment 全空即拒絕）；`TutorialView.ts` 是必填 `datetime`；兩者的 ID 欄位都過 `bare_id`。
+> - `src/training_kb/keys.py`：`feedback_pk`、`version_pk`、`view_pk(tutorial_version, user, ts)`（內部呼叫 `to_iso`，**ts 帶微秒會丟 `PermanentError`**）、`parse_pk`。
+> - `src/training_kb/repository.py`：`get_meta`／`put_meta`／`put_edge`／`get_tutorial`／`get_version`／`get_meta_item`／`list_feedback_of_version`／`list_views_of_version` 全部已實作，本 Phase 只呼叫。`_entity_pk` 已經認得 `Feedback` 與 `TutorialView`（後者的 PK 就是 `view_pk`），`put_meta` 不必再自己算鍵。
+> - `src/training_kb/operations.py`：`OperationKind` 已含 `"feedback"`／`"view"`；`AcceptOperation(operation_id, kind, canonical_id, project_id, now)`、`Acceptance(status, operation_id, record)`、`accept`、`complete(operation_id, *, now)`。
+> - `src/training_kb/config.py::DEFAULT_PROJECT_ID = "demo"`、`load_settings(env=None)`。
+> - 測試器材：`tests/integration/conftest.py` 的 `table`／`bucket`／`repository`（moto 表＋bucket＋`by_target` GSI）；`tests/integration/test_retired_feedback_rejected.py`（P26）是現成的退役種子範例，照抄形狀即可，**不要改那支檔**。
+>
+> **(b) 因上一批裁決／實作而修正的點**
+> 1. `normalize_then_accept` **回 `list[Acceptance]`**（D-73；F14 一個 PR 展開成 n 筆子 Release），不是單一 `Acceptance`。§5 Consumes 與 §7 Task 4 的 handler 片段已改。
+> 2. `build_deps(settings) -> Deps` 的 owner 是 **P41**（00A §6 `pipelines/common.py` 名稱表）。目前 `pipelines/common.py` 只有 `Deps`／`run_sequence`，**還沒有 `build_deps`**；P41 在 W1 建立，本 Phase（W2）才 import。
+> 3. `infra/training_kb_stack.py` 目前**不存在**（`infra/` 只有 `app.py` 與 `training_kb_data_stack.py`）；`tests/unit/infra/` 目錄也還沒建。兩者都由 P41 在 W1 產出，本 Phase 只用 **Edit** 往裡面追加。
+> 4. P41 的包含式斷言在 `tests/unit/infra/test_ticket_asl.py::test_stack_has_one_standard_machine_and_two_named_lambdas`（原文只寫函式名，這裡補上檔案路徑）。它已經用 `handlers[...]` 的包含式比對，多一支 Lambda 不會轉紅。
+> 5. §6「Phase 03 的 `StrictModel` 只設 `extra="forbid"`、`frozen=True`，入口必須自己擋」的**理由**要更新：`Feedback` 模型自己就擋掉 `bool` 與 1..5 範圍了。入口仍然要自己判斷，但原因是**要吐 `IngressError(fields=("rating",))` 而不是 pydantic `ValidationError`**（00A §6.8「模型層 `ValidationError` 一律收斂成 `IngressError`」），不是模型沒擋。
+> 6. `ts` 一律 aware ISO-8601 **整秒**（00A §3.5）。`validate_feedback`／`validate_view` 應**重用既有的 `_parsed_ts`**（它已同時擋 naive、格式錯與微秒），不要只用 `parse_iso`：`parse_iso` 放行微秒，之後 `view_pk` 內部的 `to_iso` 會丟 `PermanentError`，那不是使用者輸入錯誤該有的形狀。
+> 7. §7 Task 4 的 `assert active_repo.started_executions == []` **不成立**：`Repository` 沒有這個屬性。零啟動要用「把 `ingress._build_wiring` 換成會丟 `AssertionError` 的函式」＋「表裡沒有新的 `PROC#`／`VERSION#` item」來斷言（內文已改）。
+> 8. 名稱歸屬：`ImportResult`、`FEEDBACK_FIELDS`、`VIEW_FIELDS` 與四個函式放 `ingress.py`；`IMPORT_KINDS`、`IMPORT_DEADLINE_SECONDS`、`handler` 放 `handlers/import_.py`（00A §6.8 那一列）。
+> 9. 00A 第 915 列寫成「`validate_feedback` 必須呼叫 P26 的 `assert_accepts_feedback`」，但 `validate_feedback` 是純欄位函式、拿不到 `Tutorial`。**以 00A 第 425 列的實質規則為準**：P42 這條路徑一律呼叫 `assert_accepts_feedback`、不自己再寫一次 retired 判斷；呼叫點在 `import_feedback`（已取得 `Tutorial` 之後）。已回報 controller。
+>
+> **(c) gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - **O2 PASS**（P11，`docs/plan/report/o2-20260914t182824z.md`）：永久去重可以依賴；但本 Phase 的 moto 綠燈只代表「這條路徑也套用了同一份契約」，不是新的 O2 證據。
+> - **O3 FAIL**（`docs/plan/report/o3-20260914t181109z.md`）：本 Phase 不公開任何內容，不受影響，也不得宣稱 O3 有變化。
+> - **O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`）：feedback／view 這條路徑零模型呼叫，**不受阻**；真正呼叫模型的是 [Phase 43](./43-Phase43-Feedback類別判定.md)。
+> - **O6 4 列待核定**（`docs/plan/report/o6-mapping.md`）：11 個 `xfail(strict=True)` 全部在 Rote／來源簽名那一側（`tests/integration/test_o6_*`、`test_adapter_fixtures.py`、`test_release_extraction.py`、`test_rote_commit.py`、`tests/unit/rote/`）。**固定匯入的 `feedback`／`view` 分支不經 Rote、不查 `approved_stable_keys()`，所以 O6 不擋它**；被擋的只有 handler 的 `ticket`／`release` 分支（那條會走 `normalize_then_accept` → Rote）。`stable_user_from_import` 目前只被 `adapters.py` 的手動 batch parser 呼叫，不在本 Phase 路徑上。**本計畫選擇**：`validate_feedback`／`validate_view` 直接重用 `source_ids.stable_user_from_import(user)` 做 `user` 格式檢查（它丟的正是 `IngressError(fields=("user",))`），既滿足 `COL` Rule 9 又不另寫一份判斷，但**不因此宣稱 O6 已核定**。
+>
+> **(d) 適用的 controller 裁決**（COMMON.md §3）
+> - **R2**：`training-kb-import` **沿用 P41 建立的相依 layer／bundling**，不自己再做一套（`lambda_.Code.from_asset("src")` 不含 `pydantic`／`jsonschema`）。
+> - **R3**：本 Phase 在 **W2**，同波次的 **P54 也會改 `infra/training_kb_stack.py`**（加 `training-kb-analytics`）。只用 Edit、放進自己的 `# ---- Phase 42 ----` 區段、不重排別人的程式、`git add` 只加自己的路徑。`ingress.py` 在 W2 只有 P42 動（P43 在 W3、P59 在 W4）。
+> - **R5**：本文件的程式片段是示意，名稱與簽名以 00A ＋ 既有程式為準。
+> - **R10 本計畫選擇**：`release` 分支要啟動的 `training-kb-release-update` state machine 在 **P52（W3）** 才建立，本 Phase 只能對當下已存在的 `training-kb-ticket-analysis` 授權 `states:StartExecution`；release-update 的授權由 P52 建 state machine 時一併補上，本 Phase 寫進報告「未做／建議」。
+
 **目標：** 讓維護者上傳的回饋與瀏覽紀錄走一條只有程式判斷的固定路徑：驗證欄位、確認版本、永久去重、寫入 DynamoDB，全程不呼叫模型也不啟動流程。
 
 **架構：** `ingress` 先做純欄位檢查（`validate_feedback`／`validate_view`），再由 `import_feedback`／`import_view` 查 `Repository` 的版本與教學狀態、向 `OperationCoordinator` 取得永久去重結果，最後寫 metadata 與 `REFERS_TO` 邊。Rote、Step Functions 與 PROC 完全不參與這條路徑。
@@ -14,7 +49,7 @@
 - 前置為 [Phase 41：Ticket Analysis 雲端流程驗收](./41-Phase41-Ticket-Analysis雲端流程驗收.md)；資料面另需 [Phase 08：分頁查詢與一致讀取基礎](./08-Phase08-分頁查詢與一致讀取基礎.md) 與 [Phase 11：O2 接受順序與重啟整合驗證](./11-Phase11-O2接受順序與重啟整合驗證.md)；判斷與接線另需 [Phase 26：教學退役與後繼導向](./26-Phase26-教學退役與後繼導向.md)（`assert_accepts_feedback`）、[Phase 30：GitHub Webhook 原始 Body 驗簽](./30-Phase30-GitHub-Webhook原始Body驗簽.md)（`handlers/` 套件與 `normalize_then_accept`）與 [Phase 32：事件接受去重與流程啟動](./32-Phase32-事件接受去重與流程啟動.md)（`operation_id_for`）。前置未通過時停止。
 - 下一階段是 [Phase 43：Feedback 類別判定](./43-Phase43-Feedback類別判定.md)。
 - 本階段不做：**Feedback／View 這條路徑**不呼叫任何模型、不收斂 `category` 也不分類留言（全部屬 Phase 43）、不啟動 Step Functions、不更新 PROC、不建立或修改教學版本、不計算任何指標。匯入 handler 的 `ticket`／`release` 分支只是把事件原樣交給 [Phase 32](./32-Phase32-事件接受去重與流程啟動.md)／[Phase 37](./37-Phase37-Rote-Agent回退與成功提交.md) 已經寫好的 `normalize_then_accept`，本 Phase 不重寫那條路徑，也不改它的行為。
-- 與本 Phase 有關的 O1–O7 gate 狀態：O2 未取得真實整合證據前，「同 ID 重送不重複」只能宣稱單元與 moto 測試通過；O6 未核定前不得宣稱 `user` 已能跨來源對上 `Ticket.author`。本階段不碰 O3，因為它不公開任何內容。
+- 與本 Phase 有關的 O1–O7 gate 狀態（**現況核對 2026-09-14**：原寫「O2 未取得真實整合證據前」，實際上 **O2 已 PASS**）：O2 **PASS**（P11，`docs/plan/report/o2-20260914t182824z.md`），永久去重可以依賴，但本 Phase 的 moto 綠燈只是同一份契約的再套用，不是新的 O2 證據；O6 **4 列待核定**（`docs/plan/report/o6-mapping.md`），不得宣稱 `user` 已能跨來源對上 `Ticket.author`——但 O6 blocked 的是 Rote 那一側，`feedback`／`view` 這條不經 Rote 的路徑不受它阻擋（只有 handler 的 `ticket`／`release` 分支受阻）。O3 **FAIL**（`docs/plan/report/o3-20260914t181109z.md`），本階段不碰它，因為它不公開任何內容。O5 **BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`），本階段零模型呼叫，不受影響。
 - 以下程式檔均是實作時預計建立或修改；本計畫本身不代表它們已存在。
 
 ---
@@ -62,8 +97,8 @@ ImportResult(status="saved", object_id="f_12", message="已保存 f_12；來源�
 |---|---|---|
 | 修改 | `src/training_kb/ingress.py` | `FEEDBACK_FIELDS`、`VIEW_FIELDS`、`ImportResult`、`validate_feedback`／`validate_view`、`import_feedback`／`import_view`；`operation_id_for` 與 [Phase 32](./32-Phase32-事件接受去重與流程啟動.md) 共用同一個函式，不另外宣告。 |
 | 建立 | `src/training_kb/handlers/import_.py` | `training-kb-import` 這支 Lambda 的入口 `handler(event, context)`（00A D-56）；套件 `handlers/__init__.py` 由 Phase 30 建立。 |
-| 修改 | `infra/training_kb_stack.py` | 加 `training-kb-import` 這支 Lambda 與它的最小 IAM（00A D-58）；stack 本體由 [Phase 41](./41-Phase41-Ticket-Analysis雲端流程驗收.md) 建立，本 Phase 只加資源。 |
-| 測試 | `tests/unit/infra/test_import_lambda.py` | 用 CDK `Template` 斷言這支 Lambda 的名稱、handler 與「沒有 Function URL」。 |
+| 修改 | `infra/training_kb_stack.py` | 加 `training-kb-import` 這支 Lambda 與它的最小 IAM（00A D-58）；stack 本體由 [Phase 41](./41-Phase41-Ticket-Analysis雲端流程驗收.md) 建立（**現況核對 2026-09-14：這支檔目前還不存在，P41 在 W1 才建**），本 Phase 只用 **Edit** 加資源，打包沿用 P41 的相依 layer／bundling（COMMON.md R2）。同波次的 P54 也會改這支檔。 |
+| 測試 | `tests/unit/infra/test_import_lambda.py` | 用 CDK `Template` 斷言這支 Lambda 的名稱、handler 與「沒有 Function URL」（`tests/unit/infra/` 目錄由 P41 建立）。 |
 | 測試 | `tests/unit/test_fixed_import_validate.py` | rating 嚴格整數、`f_` 前綴、必填欄位、`ts` 缺值與必填。 |
 | 測試 | `tests/integration/test_fixed_import.py` | moto 下的寫入、退役拒絕、重送去重、續跑與 handler 逐筆分派。 |
 
@@ -73,7 +108,9 @@ ImportResult(status="saved", object_id="f_12", message="已保存 f_12；來源�
 
 ```text
 Phase 02：IngressError(message: str, fields: tuple[str, ...])、PermanentError、parse_iso、to_iso、now_utc
-Phase 02：DEFAULT_PROJECT_ID = "demo"、load_settings(env) -> Settings（從 training_kb.config import，00A D-34）
+Phase 02：DEFAULT_PROJECT_ID = "demo"、load_settings(env=None) -> Settings（從 training_kb.config import，00A D-34）
+Phase 13：stable_user_from_import(value: str) -> str（training_kb.source_ids；格式不合丟 IngressError(fields=("user",))）
+Phase 31：_parsed_ts(payload) -> datetime（ingress.py 內部；ts 必須 aware ISO-8601 整秒，naive／格式錯／帶微秒一律 IngressError(("ts",))）
 Phase 03：TutorialStatus.ACTIVE / TutorialStatus.RETIRED（StrEnum 成員大寫、值小寫）
 Phase 04：Feedback(id, tutorial_version, rating, category, comment, user, ts)、TutorialView(tutorial_version, user, ts)
 Phase 05：feedback_pk、version_pk、view_pk(tutorial_version, user, ts)、parse_pk
@@ -81,9 +118,12 @@ Phase 06／07：Repository.get_meta(pk, model, *, consistent=True)、put_meta(en
 Phase 10：OperationCoordinator.accept(AcceptOperation) -> Acceptance、complete(operation_id, *, now)、OperationKind
 Phase 26：assert_accepts_feedback(tutorial: Tutorial) -> None（retired 時丟 IngressError(fields=("tutorial_version",))）
 Phase 31：missing_nonempty_strings(payload, keys) -> tuple[str, ...]（必填非空字串檢查，不另寫一份）
-Phase 30／32／37：normalize_then_accept(*, domain, adapter, event_type, headers, payload, deadline) -> Acceptance
-                 六個參數全 keyword-only（00A D-60）；operation_id_for(kind, canonical_id) -> str
+Phase 30／32／37：normalize_then_accept(*, domain, adapter, event_type, headers, payload, deadline) -> list[Acceptance]
+                 六個參數全 keyword-only（00A D-60）；**回 list**（D-73，現況核對 2026-09-14：原寫 Acceptance）
+                 operation_id_for(kind: OperationKind, canonical_id: str) -> str
 Phase 41：infra/training_kb_stack.py 的 TrainingKbStack（本 Phase 在同一支 stack 加一支 Lambda，00A D-58）
+Phase 41：pipelines/common.py 的 build_deps(settings: Settings) -> Deps（owner 是 P41，W1 才建立）
+Phase 29／38：Deps(operations, now, repository=None, writer=None, settings=None) 與 need_repository()／need_writer()／need_settings()
 ```
 
 ### Produces
@@ -129,12 +169,13 @@ OperationCoordinator.accept
                       | 否 --> 續跑：補寫物件，仍記同一 operation
 ```
 
-- **rating 必須是嚴格整數。** `bool` 是 `int` 的子類別，`isinstance(True, int)` 為真，所以用 `type(value) is int`。Pydantic v2 轉換表把 `int` 欄位收到 `bool` 標成 strict 模式不允許，但 Phase 03 的 `StrictModel` 只設 `extra="forbid"`、`frozen=True`，入口必須自己擋；`"4"` 與 `3.5` 同樣拒絕。
+- **rating 必須是嚴格整數。** `bool` 是 `int` 的子類別，`isinstance(True, int)` 為真，所以用 `type(value) is int`；`"4"` 與 `3.5` 同樣拒絕。（**現況核對 2026-09-14：原寫「Phase 03 的 `StrictModel` 只設 `extra="forbid"`、`frozen=True`，入口必須自己擋」，實際上 `Feedback` 模型已有 `rating_is_strict_int`（`mode="before"`）自己擋掉 `bool` 與 1..5 範圍。** 入口仍要自己判斷，但理由是**要吐 `IngressError(fields=("rating",))` 而不是 pydantic `ValidationError`**——00A §6.8 規定接入層一律把 `ValidationError` 收斂成 `IngressError`。`Feedback` 另有 `carries_signal` 驗證器：rating／category／comment 全空會被拒絕，本 Phase 要求 rating 必填所以一定滿足。）
 - **`Feedback.ts` 缺值用匯入時間並註明。** 設計 §7.1 允許補值，成功訊息必須寫明「非使用者實際提交時間」；`TutorialView.ts` 必填，不得補成「先瀏覽」的證據。
+- **`ts` 一律是 aware ISO-8601 整秒。**（現況核對 2026-09-14）00A §3.5 要求全套時間字串只有一種形狀；`view_pk` 內部呼叫 `to_iso`，遇到微秒會丟 `PermanentError`。所以兩個 `validate_*` 都**重用 `ingress.py` 既有的 `_parsed_ts(payload)`**（naive／格式錯／帶微秒都已經丟 `IngressError(("ts",))`），不要只用 `parse_iso`。`validate_feedback` 因為 `ts` 可缺值，只在 `payload.get("ts") is not None` 時才呼叫它。
 - **退役只擋 Feedback，而且判斷來自 Phase 26。** 設計 §8.4：退役版本拒絕新回饋、既有回饋仍可查閱；退役教學的歷史頁仍會被讀，所以 View 照收。判斷一律呼叫 [Phase 26](./26-Phase26-教學退役與後繼導向.md) 的 `assert_accepts_feedback(tutorial)`，**不得自己再寫一次 `status` 比較**；它丟的 `IngressError` 的 `fields` 就是 `("tutorial_version",)`，接住後直接轉成 `rejected`，不必比對訊息字串。要寫 fixture 時 enum 成員名是大寫的 `TutorialStatus.RETIRED`（值才是小寫 `"retired"`）。
 - **重送與續跑不同。** 設計 §14.1／§14.2 要求「取得既有結果或沿用未完成邏輯操作」：`accept` 回 duplicate 只代表這個 `operation_id` 被接受過，目標物件不存在時要補寫。這是 00A D-45 明文允許的**合法補寫**，與 [Phase 10](./10-Phase10-O2操作紀錄與永久去重契約.md) §6 的續跑分支是同一條契約，不算重複處理。
 - **`Feedback` 必填 `id, tutorial_version, rating, user`**，取自設計 §7.1 接入表；Phase 04 的模型把 `rating` 宣告為 `int | None` 以容納既有資料，本階段入口更嚴格（00A D-12「模型寬、入口嚴」），被接受的回饋都同時滿足 Phase 04 的不變條件。
-- **使用者 ID 只用一種形狀。** Demo 與本文件範例一律 `u_01`；真實 GitHub 來源是 `u_gh-<id>`（Phase 13）。兩者共存但**同一批資料內不得混用**，也不建對照表（00A D-47）。本 Phase 只檢查 `user` 是非空字串，不驗證前綴，也不得自己造 ID。
+- **使用者 ID 只用一種形狀。** Demo 與本文件範例一律 `u_01`；真實 GitHub 來源是 `u_gh-<id>`（Phase 13）。兩者共存但**同一批資料內不得混用**，也不建對照表（00A D-47）。本 Phase 不驗證前綴，也不得自己造 ID。（**現況核對 2026-09-14，本計畫選擇**：原寫「只檢查 `user` 是非空字串」；改成直接重用 Phase 13 的 `source_ids.stable_user_from_import(user)`——它只做格式檢查 `^[a-z0-9_-]{2,64}$`，缺值時丟的正是 `IngressError(fields=("user",))`，`u_01` 與 `u_gh-90210` 都通過。這樣 `COL` Rule 9 直接由既有函式滿足，不另寫一份判斷（R10）。`stable_user_from_import` 目前只被 `adapters.py` 的手動 batch parser 呼叫，加這個呼叫點不影響任何 O6 的 `xfail`。）
 
 ## 7. TDD Tasks
 
@@ -182,16 +223,14 @@ def validate_feedback(payload: Mapping[str, object], *, now: datetime) -> Feedba
     rating = payload.get("rating")
     if type(rating) is not int or not 1 <= rating <= 5:
         bad.append("rating")
-    raw_ts, ts = payload.get("ts"), now
-    if isinstance(raw_ts, str):
-        try:
-            ts = parse_iso(raw_ts)
-        except ValueError:
+    ts = now
+    if payload.get("ts") is not None:            # 現況核對 2026-09-14：改用既有的 `_parsed_ts`
+        try:                                     # 它已經擋 naive、格式錯與**微秒**（00A §3.5）
+            ts = _parsed_ts(payload)
+        except IngressError:
             bad.append("ts")
-    elif raw_ts is not None:
-        bad.append("ts")
     values = {"tutorial_version": _text(payload, "tutorial_version", bad),
-              "user": _text(payload, "user", bad),
+              "user": _stable_user(payload, bad),   # Phase 13 的 stable_user_from_import
               "category": _optional_text(payload, "category", bad),
               "comment": _optional_text(payload, "comment", bad)}
     if bad:
@@ -201,7 +240,7 @@ def validate_feedback(payload: Mapping[str, object], *, now: datetime) -> Feedba
 
 - [ ] **Step 4：以同樣形狀補 `validate_view` 並跑完整檔案**
 
-`_text(payload, field, bad)` 取非空字串，缺值就把欄位名記入 `bad` 並回 `""`；`_optional_text` 只把空字串收斂成 `None`，非字串記入 `bad`。`VIEW_FIELDS` 固定為 `{"tutorial_version", "user", "ts", "project_id"}`，三個欄位一律走 `_text`，`ts` 另以 `parse_iso` 驗格式，**沒有**補值分支。再加四個案例：`id` 缺 `f_` 前綴、payload 多一個 `score` 欄位（`invalid_fields` 必須含 `"score"`）、`category` 與 `comment` 皆空但 `rating` 合法（必須成功）、View 的 `ts` 為 `"2026/08/02 09:00"`（必須 `("ts",)`）。跑 `uv run pytest tests/unit/test_fixed_import_validate.py -q` 應全綠。
+`_text(payload, field, bad)` 取非空字串，缺值就把欄位名記入 `bad` 並回 `""`；`_optional_text` 只把空字串收斂成 `None`，非字串記入 `bad`；`_stable_user(payload, bad)` 先 `_text` 再交給 Phase 13 的 `stable_user_from_import`，它丟 `IngressError` 就把 `"user"` 記入 `bad`（現況核對 2026-09-14）。`VIEW_FIELDS` 固定為 `{"tutorial_version", "user", "ts", "project_id"}`，`tutorial_version` 走 `_text`、`user` 走 `_stable_user`，`ts` 另以 **`_parsed_ts`** 驗格式（現況核對 2026-09-14：原寫 `parse_iso`，它放行微秒會讓 `view_pk` 丟 `PermanentError`），**沒有**補值分支。再加四個案例：`id` 缺 `f_` 前綴、payload 多一個 `score` 欄位（`invalid_fields` 必須含 `"score"`）、`category` 與 `comment` 皆空但 `rating` 合法（必須成功）、View 的 `ts` 為 `"2026/08/02 09:00"`（必須 `("ts",)`）。另加兩個現況核對補上的案例（2026-09-14）：View 的 `ts` 為 `"2026-08-02T09:00:00.500Z"`（帶微秒，必須 `("ts",)`，否則 `view_pk` 會在下游丟 `PermanentError`）、`user` 為 `"U_01"`（大寫不符 `stable_user_from_import` 的 `^[a-z0-9_-]{2,64}$`，必須 `("user",)`）。跑 `uv run pytest tests/unit/test_fixed_import_validate.py -q` 應全綠。
 
 - [ ] **Step 5：提交**
 
@@ -336,11 +375,18 @@ from training_kb.pipelines.common import Deps
 def test_handler_imports_every_item_and_starts_no_pipeline(active_repo, operations, monkeypatch):
     monkeypatch.setattr(import_, "_DEPS",
                         Deps(operations=operations, now=lambda: NOW, repository=active_repo))
+    # 現況核對 2026-09-14：`Repository` 沒有 `started_executions`。零啟動改成「任何要連 AWS
+    # 的接受路徑一被碰到就炸」——`ingress._build_wiring` 是 `PipelineStarter` 的唯一產地。
+    def boom(*args, **kwargs):
+        raise AssertionError("feedback／view 不得啟動任何 pipeline")
+    monkeypatch.setattr(ingress, "_build_wiring", boom)
+    monkeypatch.setattr(ingress, "_build_rote_deps", boom)
+    ingress._reset_wiring()
     items = [FEEDBACK, {**FEEDBACK, "id": "f_13"}, {**FEEDBACK, "rating": True}]
     body = import_.handler({"kind": "feedback", "source": "widget-download", "items": items}, None)
     assert [row["status"] for row in body["results"]] == ["saved", "saved", "rejected"]
     assert body["results"][2]["invalid_fields"] == ("rating",)
-    assert active_repo.started_executions == []      # Feedback 永遠不啟動 pipeline
+    assert active_repo.scan_entity("PROC") == []     # 整條路徑零 PROC 變動（ING Rule 31）
 
 
 @pytest.mark.parametrize("event", [{"kind": "tutorial", "items": []}, {"kind": "feedback"}])
@@ -416,16 +462,22 @@ def _import_one(kind, payload) -> ImportResult:
     missing = missing_nonempty_strings(payload, ("domain", "adapter", "event_type"))
     if missing:
         raise PermanentError(f"{kind} 匯入缺少來源欄位：{missing}")
-    acceptance = normalize_then_accept(              # 00A D-60：六個 keyword 參數
+    accepted = normalize_then_accept(                # 00A D-60：六個 keyword 參數
         domain=str(payload["domain"]), adapter=str(payload["adapter"]),
         event_type=str(payload["event_type"]),
         headers={name.lower(): value for name, value in (payload.get("headers") or {}).items()},
         payload=payload["payload"],
         deadline=monotonic() + IMPORT_DEADLINE_SECONDS)
-    return ImportResult("duplicate" if acceptance.status == "duplicate" else "saved",
-                        acceptance.record.canonical_id,
-                        f"{kind} 已交給 {acceptance.operation_id}", ())
+    # 現況核對 2026-09-14：`normalize_then_accept` 回 **list[Acceptance]**（D-73）。
+    # 一個 PR 可展開成 n 筆子 Release，各自一個 operation；這裡與 P30 的 handler 同口徑：
+    # `object_id` 取第一筆，訊息列出全部 operation ID，不丟掉其餘幾筆。
+    first = accepted[0]
+    status = "duplicate" if all(a.status == "duplicate" for a in accepted) else "saved"
+    ids = ", ".join(a.operation_id for a in accepted)
+    return ImportResult(status, first.record.canonical_id, f"{kind} 已交給 {ids}", ())
 ```
+
+**現況核對（2026-09-14）—— 型別註記**：`mypy` 是 strict 且 `files = ["src", "infra"]`，上面的片段是示意，實際要照 `handlers/github_webhook.py` 的寫法標註完整型別：`def handler(event: dict[str, Any], context: object) -> dict[str, object]`、`_DEPS: Deps | None = None`、`def _import_one(kind: str, payload: Mapping[str, object]) -> ImportResult`。`build_deps` 由 P41 在 W1 建立於 `pipelines/common.py`（若你在 W2 開工時它還不存在，那是 P41 未完成，回報 controller，不要自己在本 Phase 造一份）。
 
 `handler` 逐筆處理、逐筆回結果：一筆 `rejected` 不影響其他筆，這正是設計 §7.1「指出欄位、允許修正」（F51）的形狀。`ticket`／`release` 只是把原始事件交給 `normalize_then_accept`（那條路徑才有 Rote 與 `StartExecution`），本 Phase 不重寫也不改它的 deadline 語意——八秒是公開 webhook 的限制，受控匯入用自己的 `IMPORT_DEADLINE_SECONDS`。那六個 keyword 參數是 00A D-60 固定的：匯入檔的每一筆自己帶 `domain`／`adapter`／`event_type`／`headers`／`payload`（維護者匯出時就填好），**不從 payload 反推**，缺了就整筆 `PermanentError`。`_DEPS` 快取讓 Lambda 暖啟動不重建連線，測試直接 monkeypatch 它。
 
@@ -440,8 +492,10 @@ import_fn = lambda_.Function(
     timeout=Duration.seconds(300), environment=base_env)   # 對齊 IMPORT_DEADLINE_SECONDS
 table.grant_read_write_data(import_fn)
 bucket.grant_read_write(import_fn)
-machine.grant_start_execution(import_fn)      # ticket／release 分支要能啟動 pipeline
+machine.grant_start_execution(import_fn)      # ticket 分支要能啟動 ticket-analysis
 ```
+
+**現況核對（2026-09-14）**：`code=` 與 `environment=base_env` 一律**沿用 P41 那兩支 Lambda 的寫法**（相依 layer 或 bundling，COMMON.md R2），不要退回裸的 `Code.from_asset("src")`——那樣不會帶 `pydantic`／`jsonschema`。`machine` 在 P41 的 stack 裡只有 `training-kb-ticket-analysis` 一條；`release` 分支要的 `training-kb-release-update` 由 [Phase 52](./52-Phase52-Release-Update流程與RETIRE.md) 在 W3 才建立，所以**本 Phase 只授權 ticket-analysis**，release-update 的 `grant_start_execution(import_fn)` 由 P52 建 state machine 時一併補上（本計畫選擇，寫進報告「未做／建議」）。新增的資源全部放在 `# ---- Phase 42：training-kb-import ----` 註解區段裡，不動 P41 既有的程式（R3）。
 
 **不開 Function URL**：這支只給維護者用 boto3 `invoke` 呼叫，沒有公開入口就沒有驗簽需求（公開的只有 Phase 30 的 `training-kb-webhook`）。IAM 只到「table 讀寫、bucket 讀寫、`states:StartExecution`」三項，沒有 `bedrock:InvokeModel`——本 Phase 這條路徑不呼叫模型（[Phase 43](./43-Phase43-Feedback類別判定.md) 加留言分類時才會補上）。`timeout` 設 300 秒與 `IMPORT_DEADLINE_SECONDS` 對齊，數字改一邊就要改另一邊。
 
@@ -451,7 +505,7 @@ machine.grant_start_execution(import_fn)      # ticket／release 分支要能啟
 uv run pytest tests/integration/test_fixed_import.py tests/unit/infra/test_import_lambda.py -q
 ```
 
-再補一個 `{"kind": "view", "items": [VIEW, VIEW]}` 的案例：兩筆結果是 `saved`、`duplicate`，`list_views_of_version` 仍只有一筆。多出第三支 Lambda 之後，Phase 41 的 `test_stack_has_one_standard_machine_and_two_named_lambdas` 仍要綠：它已改成包含式斷言（那兩支仍在、handler 不變）。若你看到它因為「字典**等於**兩筆」而轉紅，改那個斷言，**不要**刪掉本 Phase 的資源讓它變綠。
+再補一個 `{"kind": "view", "items": [VIEW, VIEW]}` 的案例：兩筆結果是 `saved`、`duplicate`，`list_views_of_version` 仍只有一筆。多出第三支 Lambda 之後，Phase 41 的 `tests/unit/infra/test_ticket_asl.py::test_stack_has_one_standard_machine_and_two_named_lambdas` 仍要綠（**現況核對 2026-09-14**：原文只寫函式名，實際檔案是 `test_ticket_asl.py`；它已經是 `handlers[...]` 的包含式斷言，多一支 Lambda 不會轉紅）。若你看到它因為「字典**等於**兩筆」而轉紅，改那個斷言，**不要**刪掉本 Phase 的資源讓它變綠。另外，同波次的 P54 也會往同一支 stack 加 `training-kb-analytics`；若整套測試的紅燈來自 P54 進行中的檔案，用 `--ignore=` 排除並在報告寫明，不要去修別人的測試（R3.5）。
 
 - [ ] **Step 5：提交**
 
@@ -513,6 +567,7 @@ git commit -m "feat(ingress): 建立固定匯入的 Lambda 入口"
 - [ ] 同 ID／同三元組重送回 `duplicate`，已接受但未寫成的操作會續跑。
 - [ ] `src/training_kb/handlers/import_.py::handler` 存在且逐筆回結果，`kind` 不在四種內丟 `PermanentError`；`feedback`／`view` 分支零次 `StartExecution`。
 - [ ] `infra/training_kb_stack.py` 有 `training-kb-import` 這支 Lambda（handler `training_kb.handlers.import_.handler`、無 Function URL、IAM 只到 table／bucket／`states:StartExecution`），並有 `Template` 斷言。
-- [ ] `ticket`／`release` 分支呼叫 `normalize_then_accept` 的六個 keyword 參數（D-60），缺 `domain`／`adapter`／`event_type` 時整筆 `PermanentError`。
+- [ ] `ticket`／`release` 分支呼叫 `normalize_then_accept` 的六個 keyword 參數（D-60），並正確處理它回傳的 **`list[Acceptance]`**（D-73，現況核對 2026-09-14）；缺 `domain`／`adapter`／`event_type` 時整筆 `PermanentError`。
+- [ ] `ts` 走既有的 `_parsed_ts`（aware、整秒；微秒被拒），`user` 走 Phase 13 的 `stable_user_from_import`，兩者都沒有第二份實作（現況核對 2026-09-14）。
 - [ ] 整條路徑零模型呼叫、零 Step Functions 啟動、零 PROC 變更；收集 Rule 1、2、3、7、8、9、10 與接入 Rule 28、29 各有直接 assertion。
 - [ ] 未把 moto 綠燈說成 O2 永久去重或 O6 穩定使用者契約已通過。
