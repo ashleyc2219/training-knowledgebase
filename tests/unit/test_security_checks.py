@@ -376,3 +376,38 @@ def test_check_secrets_still_ignores_assignment_examples_in_docs(repo: Path) -> 
 
     assert result.status == "pass", result.findings
     assert "SECRET_ASSIGNMENT" in result.scope or "賦值" in result.scope
+
+
+# --- 修正波（final review C#6）：範圍內沒有修復版的 advisory -----------------
+
+
+def test_a_known_unfixable_advisory_is_not_run_not_a_bare_fail() -> None:
+    """Given 掃到的 advisory 全部都在已知表內，Then 降成 `not_run` 並附理由與連結。
+
+    PYSEC-2026-1845 的修復版是 pytest 9.0.3，落在 `pyproject.toml` 的 `pytest>=8,<9`
+    之外，`uv lock --upgrade-package pytest` 實跑不會改動 `uv.lock`。`not_run` 在
+    `run_all` 裡照樣算未通過（退出碼非 0），只是與「可以修卻沒修」分開記。
+    """
+    from infra.scripts.checks import _advisory_status
+
+    status, notes = _advisory_status(1, "pytest 8.4.2   PYSEC-2026-1845 9.0.3")
+
+    assert status == "not_run"
+    assert notes and "osv.dev" in notes[0]
+    assert run_all([CheckResult("dependency-scan", status, "scope", notes)]) == 1
+
+
+def test_any_unknown_advisory_keeps_the_scan_failing() -> None:
+    """Given 掃到一筆不在表內的 advisory，Then 狀態維持 `fail`（表只降不升）。"""
+    from infra.scripts.checks import _advisory_status
+
+    assert _advisory_status(1, "urllib3 1.0  GHSA-xxxx-yyyy-zzzz 2.0")[0] == "fail"
+    assert _advisory_status(1, "pytest 8.4.2 PYSEC-2026-1845\nfoo GHSA-a-b-c")[0] == "fail"
+    assert _advisory_status(1, "沒有任何編號的輸出")[0] == "fail"
+
+
+def test_a_clean_dependency_scan_is_still_a_pass() -> None:
+    from infra.scripts.checks import _advisory_status
+
+    assert _advisory_status(0, "No known vulnerabilities found")[0] == "pass"
+    assert _advisory_status(3, "No supported files found")[0] == "not_run"

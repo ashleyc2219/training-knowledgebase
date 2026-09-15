@@ -613,6 +613,45 @@ def render_scan_report(records: Sequence[ScanRecord], *, claim: str = "") -> str
     return "\n".join(lines) + "\n"
 
 
+ADVISORY_ID = re.compile(r"\b(?:PYSEC|GHSA|CVE)-[A-Za-z0-9.-]+\b")
+"""從掃描輸出裡抓出 advisory 編號；只用來判斷「這次抓到的是不是全部都是已知那幾筆」。"""
+
+KNOWN_UNFIXABLE_ADVISORIES: Mapping[str, str] = {
+    "PYSEC-2026-1845":
+        "pytest 8.4.2：修復版本 9.0.3 落在 `pyproject.toml` 的 `pytest>=8,<9` 之外，"
+        "`uv lock --upgrade-package pytest` 實跑不會改動 `uv.lock`（2026-09-15 核對）。"
+        "pytest 是 **dev 相依**，不進 Lambda layer，也不在任何執行期路徑上。"
+        "https://osv.dev/vulnerability/PYSEC-2026-1845",
+}
+"""**在目前版本範圍內沒有修復版可用**的已知 advisory，逐筆寫明理由與出處。
+
+修正波（final review C#6）。這張表**只把 `fail` 降成 `not_run`，不會把任何東西變成
+`pass`**：`not_run` 在 `run_all` 裡照樣算未通過、退出碼照樣非 0，只是把「掃到了、但這個
+版本範圍內沒有可升的版本」與「掃到了、可以修卻沒修」分開，讓報告看得出差別。
+
+加一筆進來要有實跑過的升級嘗試當根據；只要這次掃到**任何**不在表內的 advisory，狀態就
+維持 `fail`。
+"""
+
+
+def _advisory_status(exit_code: int, text: str) -> tuple[CheckStatus, tuple[str, ...]]:
+    """依退出碼與輸出判斷依賴掃描的狀態，並回傳要附在結果上的說明列。
+
+    退出碼 1（有發現）時，如果抓到的 advisory 編號**全部**都在
+    `KNOWN_UNFIXABLE_ADVISORIES` 裡，就降成 `not_run` 並附上每一筆的理由與連結；
+    有任何一筆不在表內就維持 `fail`。其餘退出碼照舊（0 -> pass、其他 -> not_run）。
+    """
+    if exit_code == 0:
+        return "pass", ()
+    if exit_code != 1:
+        return "not_run", ()
+    found = {match for match in ADVISORY_ID.findall(text)}
+    if not found or not found <= set(KNOWN_UNFIXABLE_ADVISORIES):
+        return "fail", ()
+    return "not_run", tuple(f"{key}：{KNOWN_UNFIXABLE_ADVISORIES[key]}"
+                            for key in sorted(found))
+
+
 def _run(command: Sequence[str]) -> tuple[int, str]:
     """跑一個外部命令，回 `(退出碼, stdout+stderr 的前 4000 字)`；找不到指令回 127。"""
     try:
@@ -643,15 +682,15 @@ def scan_dependencies() -> tuple[tuple[ScanRecord, ...], tuple[CheckResult, ...]
         covered=("dependencies",) if snyk_code in (0, 1) else (),
         not_covered=("code", "secrets") if snyk_code in (0, 1)
         else ("code", "dependencies", "secrets"))
-    snyk_status: CheckStatus = "pass" if snyk_code == 0 else (
-        "fail" if snyk_code == 1 else "not_run")
+    snyk_status, snyk_notes = _advisory_status(snyk_code, snyk_text)
     auth_note = ("`snyk config get api` 有取到 token（值不印）" if authenticated
                  else "`snyk config get api` 取不到 token（未認證）")
     results = [CheckResult(
         "snyk", snyk_status,
         f"`snyk test`（CLI {version}）；Snyk Code 與 Snyk Secrets 是另外兩項能力；{auth_note}",
         (f"退出碼 {snyk_code}：{_exit_meaning(snyk_code)}",)
-        + tuple(line for line in snyk_text.strip().splitlines() if line.strip())[:5])]
+        + tuple(line for line in snyk_text.strip().splitlines() if line.strip())[:5]
+        + snyk_notes)]
 
     alt_command = ["uv", "run", "--with", "pip-audit", "pip-audit"]
     alt_code, alt_text = _run(alt_command)
@@ -666,13 +705,13 @@ def scan_dependencies() -> tuple[tuple[ScanRecord, ...], tuple[CheckResult, ...]
         covered=("dependencies",) if alt_code in (0, 1) else (),
         not_covered=("code", "secrets") if alt_code in (0, 1)
         else ("code", "dependencies", "secrets"))
-    alt_status: CheckStatus = "pass" if alt_code == 0 else (
-        "fail" if alt_code == 1 else "not_run")
+    alt_status, advisory_notes = _advisory_status(alt_code, alt_text)
     results.append(CheckResult(
         "dependency-scan（非 Snyk）", alt_status,
         f"`{' '.join(alt_command)}`；只涵蓋 dependencies，**不是** Snyk",
         (f"退出碼 {alt_code}",)
-        + tuple(line for line in alt_text.strip().splitlines() if line.strip())[-5:]))
+        + tuple(line for line in alt_text.strip().splitlines() if line.strip())[-5:]
+        + advisory_notes))
     raw = (f"$ snyk test\n{snyk_text[:1500]}\n\n"
            f"$ {' '.join(alt_command)}\n{alt_text[:1500]}")
     return (snyk, alternative), tuple(results), raw
