@@ -37,7 +37,7 @@ from training_kb.errors import (
     PermanentError,
     TransientError,
 )
-from training_kb.keys import feedback_pk, operation_ref, version_pk
+from training_kb.keys import feedback_pk, operation_ref, parse_pk, version_pk, view_pk
 from training_kb.models import (
     Feedback,
     Release,
@@ -612,6 +612,8 @@ FEEDBACK_ID_PREFIX = "f_"
 _MISSING_VERSION = "版本不存在於圖譜"
 _RETIRED_TUTORIAL = "此教學已退役，不再接受新回饋"
 _DUPLICATE_FEEDBACK = "相同 Feedback ID 已匯入，不再計一筆有效回饋"
+_DUPLICATE_VIEW = "相同的版本、使用者與時間已匯入過，不再計一筆瀏覽"
+_SAVED_VIEW = "已保存瀏覽紀錄"
 
 
 @dataclass(frozen=True)
@@ -833,3 +835,31 @@ def import_feedback(payload: Mapping[str, object], *, repository: Repository,
     operations.complete(operation_id, now=now)
     ts = now if feedback.ts is None else feedback.ts   # 模型放寬才可能 None；入口一定補過
     return ImportResult("saved", feedback.id, _saved_message(payload, feedback.id, ts), ())
+
+
+def import_view(payload: Mapping[str, object], *, repository: Repository,
+                operations: OperationCoordinator, now: datetime | None = None) -> ImportResult:
+    """固定匯入一筆瀏覽紀錄：欄位 → 版本存在 → 三元組去重 → 寫 metadata。
+
+    **不查退役**：退役教學的歷史頁仍會被讀，瀏覽數是「重開票率」的分母，一起擋掉會讓
+    指標失真（設計 §8.4）。**不建 `VIEWED` 邊**（設計 §9.2），去重完全靠 `view_pk`
+    的 SHA-256；`canonical_id` 取它 `#` 後面那 64 個 hex，`operation_id` 才不會超長。
+    `now` 是可選的**接受時間**（缺值用 `now_utc()`），與事件時間 `view.ts` 是兩件事：
+    前者屬於操作紀錄，後者是使用者真的看到教學的時刻。
+    """
+    accepted_at = now_utc() if now is None else now
+    try:
+        view = validate_view(payload)
+    except IngressError as error:
+        return _rejected(error.message, error.fields)
+    if repository.get_version(view.tutorial_version) is None:
+        return _rejected(_MISSING_VERSION, ("tutorial_version",))
+    pk = view_pk(view.tutorial_version, view.user, view.ts)
+    operation_id, duplicated = _dedupe(payload, kind="view", canonical_id=parse_pk(pk)[1],
+                                       pk=pk, model=TutorialView, repository=repository,
+                                       operations=operations, now=accepted_at)
+    if duplicated:
+        return ImportResult("duplicate", pk, _DUPLICATE_VIEW, ())
+    repository.put_meta(view, create_only=True)
+    operations.complete(operation_id, now=accepted_at)
+    return ImportResult("saved", pk, _SAVED_VIEW, ())

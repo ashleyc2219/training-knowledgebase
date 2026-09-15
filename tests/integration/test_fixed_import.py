@@ -26,7 +26,12 @@ import pytest
 from training_kb import ingress
 from training_kb.clock import to_iso
 from training_kb.config import DEFAULT_PROJECT_ID
-from training_kb.ingress import import_feedback, operation_id_for, validate_view
+from training_kb.ingress import (
+    import_feedback,
+    import_view,
+    operation_id_for,
+    validate_view,
+)
 from training_kb.keys import feedback_pk, parse_pk, version_pk, view_pk
 from training_kb.models import Tutorial, TutorialStatus, TutorialVersion
 from training_kb.operations import AcceptOperation, OperationCoordinator
@@ -227,3 +232,126 @@ def test_a_saved_feedback_closes_its_operation(
     assert record is not None
     assert (record.status, record.kind, record.canonical_id) == ("done", "feedback", "f_12")
     assert record.project_id == DEFAULT_PROJECT_ID
+
+
+# --- Task 3：View 去重與未完成操作續跑 ------------------------------------------
+
+
+def test_same_view_triple_is_deduplicated(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 同一組（版本、使用者、時間）送兩次／When 匯入／Then 第二次 `duplicate`。"""
+    first = import_view(VIEW, repository=active_repo, operations=operations, now=NOW)
+    second = import_view(VIEW, repository=active_repo, operations=operations, now=NOW)
+    assert (first.status, second.status) == ("saved", "duplicate")
+    assert second.object_id == first.object_id
+    assert len(active_repo.list_views_of_version(V1)) == 1
+
+
+def test_the_view_primary_key_is_the_sha256_of_the_triple(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 一筆瀏覽紀錄／When 匯入／Then `object_id` 就是 `view_pk`（設計 §9.1）。"""
+    result = import_view(VIEW, repository=active_repo, operations=operations, now=NOW)
+    expected = view_pk(V1, "u_01", datetime(2026, 8, 2, 9, 0, tzinfo=UTC))
+    assert result.object_id == expected
+    assert parse_pk(expected)[0] == "VIEW" and len(parse_pk(expected)[1]) == 64
+
+
+def test_a_different_ts_from_the_same_user_counts_again(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 同一人同一版但時間不同／When 匯入／Then 兩筆都 `saved`（去重的是三元組）。"""
+    later = {**VIEW, "ts": "2026-08-02T10:00:00Z"}
+    statuses = [import_view(payload, repository=active_repo, operations=operations,
+                            now=NOW).status for payload in (VIEW, later)]
+    assert statuses == ["saved", "saved"]
+    assert len(active_repo.list_views_of_version(V1)) == 2
+
+
+def test_views_never_create_a_viewed_edge(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 匯入一筆瀏覽紀錄／When 看那個 PK 底下的列／Then 只有 `META`（設計 §9.2）。"""
+    result = import_view(VIEW, repository=active_repo, operations=operations, now=NOW)
+    assert result.object_id is not None
+    assert [str(row["SK"]) for row in active_repo.query_pk(result.object_id)] == ["META"]
+
+
+def test_accepted_but_unwritten_view_operation_is_resumed(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 操作已接受但 item 還沒寫成／When 重送／Then 續跑補寫，最後仍只有一筆（D-45）。"""
+    operations.accept(accept_request_for(VIEW))     # 模擬寫 item 之前就中斷
+    resumed = import_view(VIEW, repository=active_repo, operations=operations, now=NOW)
+    assert resumed.status == "saved"
+    assert len(active_repo.list_views_of_version(V1)) == 1
+
+
+def test_accepted_but_unwritten_feedback_operation_is_resumed(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 回饋的 operation 已接受、FEEDBACK item 還沒寫／When 重送／Then 補寫成 `saved`。"""
+    operations.accept(AcceptOperation(
+        operation_id=operation_id_for("feedback", "f_12"), kind="feedback",
+        canonical_id="f_12", project_id=DEFAULT_PROJECT_ID, now=NOW))
+    resumed = import_feedback(FEEDBACK, repository=active_repo, operations=operations, now=NOW)
+    assert resumed.status == "saved"
+    assert [item.id for item in active_repo.list_feedback_of_version(V1)] == ["f_12"]
+
+
+def test_retired_tutorial_rejects_feedback_but_still_accepts_views(
+        retired_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 教學已退役／When 各匯入一筆／Then 回饋 `rejected`、瀏覽仍 `saved`（設計 §8.4）。
+
+    瀏覽數是「重開票率」的分母，退役後一起擋掉會讓指標失真，所以 `import_view`
+    刻意**不**查教學狀態。
+    """
+    rejected = import_feedback(FEEDBACK, repository=retired_repo, operations=operations, now=NOW)
+    accepted = import_view(VIEW, repository=retired_repo, operations=operations, now=NOW)
+    assert (rejected.status, rejected.invalid_fields) == ("rejected", ("tutorial_version",))
+    assert accepted.status == "saved"
+    assert len(retired_repo.list_views_of_version(V1)) == 1
+
+
+def test_a_view_of_an_unpublished_version_is_saved(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 指向 `published_at=None` 的 `@v3`／When 匯入／Then `saved`（驗收矩陣第一列）。"""
+    result = import_view({**VIEW, "tutorial_version": V3}, repository=active_repo,
+                         operations=operations, now=NOW)
+    assert result.status == "saved"
+    assert len(active_repo.list_views_of_version(V3)) == 1
+
+
+@pytest.mark.parametrize(("change", "fields"), [
+    ({"ts": None}, ("ts",)),
+    ({"tutorial_version": "no-such@v9"}, ("tutorial_version",)),
+    ({"user": "U_01"}, ("user",)),
+])
+def test_a_bad_view_is_rejected_and_writes_nothing(
+        active_repo: Repository, operations: OperationCoordinator,
+        change: dict[str, Any], fields: tuple[str, ...]) -> None:
+    """Given 缺 `ts`／版本不存在／`user` 不合格式／When 匯入／Then `rejected` 且圖譜零變動。"""
+    payload = {**VIEW, **change}
+    if change.get("ts") is None and "ts" in change:
+        payload.pop("ts")
+    before = every_key(active_repo)
+    result = import_view(payload, repository=active_repo, operations=operations, now=NOW)
+    assert (result.status, result.object_id, result.invalid_fields) == ("rejected", None, fields)
+    assert every_key(active_repo) == before
+
+
+def test_import_view_accepts_without_an_explicit_now(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 呼叫端沒給 `now`／When 匯入／Then 用 `now_utc()` 當接受時間，事件時間不受影響。"""
+    result = import_view(VIEW, repository=active_repo, operations=operations)
+    assert result.status == "saved"
+    stored = active_repo.list_views_of_version(V1)
+    assert [view.ts for view in stored] == [datetime(2026, 8, 2, 9, 0, tzinfo=UTC)]
+    record = operations.load(operation_id_for("view", parse_pk(str(result.object_id))[1]))
+    assert record is not None and record.status == "done"
+    assert record.accepted_at is not None and record.accepted_at.microsecond == 0
+
+
+def test_saving_views_leaves_no_proc_and_no_new_version(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 匯入兩筆瀏覽紀錄／When 掃描／Then 零 `PROC#`、`VERSION#` 數量不變（Rule 31、8）。"""
+    versions_before = {str(row["PK"]) for row in active_repo.scan_entity("VERSION")}
+    import_view(VIEW, repository=active_repo, operations=operations, now=NOW)
+    import_view({**VIEW, "user": "u_02"}, repository=active_repo, operations=operations, now=NOW)
+    assert active_repo.scan_entity("PROC") == []
+    assert {str(row["PK"]) for row in active_repo.scan_entity("VERSION")} == versions_before
