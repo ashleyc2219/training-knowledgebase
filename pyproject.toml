@@ -18,6 +18,11 @@ dev = [
     "aws-cdk-lib>=2,<3",
     "constructs>=10,<11",
     "types-jsonschema>=4,<5",
+    # Phase 58：`demo/dashboard.py` 的本機 Demo 控制台（`streamlit run demo/dashboard.py`）。
+    # 只有 dashboard 這一支 import 它，`demo/view_model.py` 一律不 import（分工守門見
+    # `tests/unit/test_demo_dashboard_guard.py`），所以 `uv run pytest -W error` 不會吃到
+    # streamlit 及其相依帶進來的第三方 warning。
+    "streamlit>=1.40,<2",
 ]
 
 [tool.setuptools.packages.find]
