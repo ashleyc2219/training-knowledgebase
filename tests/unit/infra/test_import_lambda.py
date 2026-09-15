@@ -37,7 +37,6 @@ from infra.training_kb_stack import (  # noqa: E402
     CONTENT_BUCKET_CONTEXT,
     IMPORT_FUNCTION,
     IMPORT_HANDLER,
-    LAYER_PATH,
     TICKET_ANALYSIS_MACHINE,
     TrainingKbStack,
 )
@@ -48,10 +47,13 @@ IMPORT_ROLE_PREFIX = "ImportFunctionServiceRole"
 
 
 @pytest.fixture
-def template(monkeypatch: pytest.MonkeyPatch) -> Template:
-    """與 `test_ticket_asl.py` 同一種合成方式（純字串名稱接既有 table／bucket）。"""
+def template(monkeypatch: pytest.MonkeyPatch, fake_layer: pathlib.Path) -> Template:
+    """與 `test_ticket_asl.py` 同一種合成方式（純字串名稱接既有 table／bucket）。
+
+    `fake_layer` 來自 `tests/unit/infra/conftest.py`：layer 守門走 monkeypatch 的
+    `tmp_path`，**不在工作樹 `mkdir`**，乾淨 clone 上也合成得出來。
+    """
     monkeypatch.setenv(SECRET_ENV, "unit-test-secret")
-    (LAYER_PATH / "python").mkdir(parents=True, exist_ok=True)
     app = cdk.App(context={CONTENT_BUCKET_CONTEXT: BUCKET})
     stack = TrainingKbStack(app, "TrainingKbApp",
                             env=cdk.Environment(account=ACCOUNT, region=REGION))
@@ -119,19 +121,22 @@ def test_only_the_webhook_has_a_function_url(template: Template) -> None:
     assert "WebhookFunction" in target and "ImportFunction" not in target
 
 
-def test_the_import_role_can_start_only_ticket_analysis(template: Template) -> None:
-    """Given 匯入角色／When 找 `states:StartExecution`／Then 只授權 ticket-analysis。
+def test_the_import_role_can_start_exactly_the_two_named_machines(template: Template) -> None:
+    """Given 匯入角色／When 找 `states:StartExecution`／Then 兩條具名 ARN，沒有萬用字元。
 
-    `release` 分支要啟動的 `training-kb-release-update` 在 Phase 52 才建立，那時由 P52
-    補 `grant_start_execution(import_fn)`；現在授權一條不存在的 state machine 沒有意義。
+    ARN 由**名稱**組出來（`Stack.format_arn`），不是 `machine.grant_start_execution(...)`：
+    `training-kb-release-update` 要到 Phase 52 才有 construct，而 IAM 允許引用尚不存在的
+    資源。這樣 P52 建那條 state machine 時不必回頭碰這支 Lambda（controller 2026-09-14）。
+    `training-kb-feedback-review`（P48）不在清單裡：固定匯入不啟動它。
     """
     starts = [row for row in import_statements(template)
               if any(action.startswith("states:Start") for action in actions(row))]
     assert len(starts) == 1
-    # 資源是同一支 stack 內 state machine 的 `Ref`（logical id），不是名稱字串；
-    # 那條 state machine 的 `StateMachineName` 就是 `training-kb-ticket-analysis`。
     resource = json.dumps(starts[0]["Resource"])
-    assert "TicketAnalysis" in resource and "release-update" not in resource
+    for name in (TICKET_ANALYSIS_MACHINE, "training-kb-release-update"):
+        assert f":stateMachine:{name}" in resource, name
+    assert "feedback-review" not in resource
+    assert "*" not in resource
     template.has_resource_properties("AWS::StepFunctions::StateMachine", {
         "StateMachineName": TICKET_ANALYSIS_MACHINE})
     template.has_resource_properties("AWS::IAM::Policy", {

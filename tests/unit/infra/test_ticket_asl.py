@@ -117,18 +117,8 @@ BUCKET = "training-kb-content-example"
 ACCOUNT, REGION = "111122223333", "us-east-1"
 
 
-@pytest.fixture
-def fake_layer(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> pathlib.Path:
-    """把 layer 路徑指到 `tmp_path` 下一份**看起來裝好了**的目錄。
-
-    **不在工作樹裡 `mkdir`**：真的在 `build/lambda-layer/python` 造一個空目錄，會讓
-    「清過 build/ 之後跑一次 pytest」就足以讓部署守門通過，然後部署出一支空 layer
-    （第一次 invoke 才 `Runtime.ImportModuleError`）——Phase 41 review 必修 2。
-    """
-    for marker in MARKERS:
-        (tmp_path / "python" / marker).mkdir(parents=True)
-    monkeypatch.setattr(stack_module, "LAYER_PATH", tmp_path)
-    return tmp_path
+# `fake_layer` 移到 tests/unit/infra/conftest.py（Phase 42 代改，controller 2026-09-14）：
+# 三支 infra 測試共用同一份，不要各留一份會分岔的副本。
 
 
 @pytest.fixture

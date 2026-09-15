@@ -25,7 +25,6 @@ from aws_cdk.assertions import Template  # noqa: E402
 from infra.training_kb_stack import (  # noqa: E402
     ANALYTICS_FUNCTION,
     CONTENT_BUCKET_CONTEXT,
-    LAYER_PATH,
     TrainingKbStack,
 )
 
@@ -35,9 +34,11 @@ ANALYTICS_HANDLER = "training_kb.handlers.analytics.handler"
 
 
 @pytest.fixture
-def template(monkeypatch: pytest.MonkeyPatch) -> "Template":
+def template(monkeypatch: pytest.MonkeyPatch, fake_layer: pathlib.Path) -> "Template":
+    # Phase 42 代改（controller 2026-09-14 核准的 R3.6 例外）：原本在工作樹
+    # `mkdir(build/lambda-layer/python)`，`is_built()` 收緊之後在乾淨 clone 上會
+    # FileNotFoundError。改用 tests/unit/infra/conftest.py 的共用 `fake_layer`。
     monkeypatch.setenv(SECRET_ENV, "unit-test-secret")
-    (LAYER_PATH / "python").mkdir(parents=True, exist_ok=True)
     app = cdk.App(context={CONTENT_BUCKET_CONTEXT: BUCKET})
     stack = TrainingKbStack(app, "TrainingKbApp",
                             env=cdk.Environment(account=ACCOUNT, region=REGION))

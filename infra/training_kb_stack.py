@@ -17,7 +17,7 @@ import os
 import pathlib
 from typing import Any
 
-from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
+from aws_cdk import ArnFormat, CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
@@ -37,6 +37,7 @@ from training_kb.handlers.import_ import IMPORT_DEADLINE_SECONDS
 from training_kb.keys import OPERATIONS_PREFIX
 from training_kb.pipeline_starter import STATE_MACHINE_NAMES
 from training_kb.pipelines.asl import ASL_LOCAL_PATH
+from training_kb.pipelines.common import PipelineName
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE_PATH = PROJECT_ROOT / "src"
@@ -155,6 +156,9 @@ IMPORT_PREFIXES: tuple[str, ...] = (OPERATIONS_PREFIX,)
 `tutorials/`／`site/`：它既不寫教學也不發布。
 """
 
+IMPORT_MACHINES: tuple[PipelineName, ...] = ("ticket-analysis", "release-update")
+"""匯入 Lambda 可以啟動的兩條 pipeline；`feedback-review`（P48）不在內，固定匯入不啟動它。"""
+
 IMPORT_DDB_ACTIONS = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
                       "dynamodb:Scan"]
 """四個動作，逐一對得上程式：
@@ -265,14 +269,14 @@ class TrainingKbStack(Stack):
         #
         # 不開 Function URL（維護者用 boto3 invoke）、不給 `bedrock:InvokeModel`
         # （本 Phase 零模型呼叫）、不給 `dynamodb:DeleteItem`、不給 GSI。
-        # `states:StartExecution` 只授權當下真的存在的 `training-kb-ticket-analysis`：
-        # `release` 分支要的 `training-kb-release-update` 由 Phase 52 建 state machine 時
-        # 一併補 `grant_start_execution(self.import_function)`（本計畫選擇，報告有記）。
+        # `states:StartExecution` 見 `_import_machine_arns`：**用名稱組 ARN**，一次授權
+        # `ticket-analysis` 與 P52 之後才建立的 `release-update`（controller 2026-09-14）。
         self.import_function = self._function(
             "ImportFunction", IMPORT_FUNCTION, IMPORT_HANDLER, IMPORT_TIMEOUT, base_env)
         self._grant_data(self.import_function, table, bucket, prefixes=IMPORT_PREFIXES,
                          actions=IMPORT_DDB_ACTIONS, with_index=False)
-        self.ticket_analysis.grant_start_execution(self.import_function)
+        self.import_function.add_to_role_policy(iam.PolicyStatement(
+            actions=["states:StartExecution"], resources=self._import_machine_arns()))
         CfnOutput(self, "ImportFunctionName", value=self.import_function.function_name)
         # ---- Phase 42 結束 ----
 
@@ -345,6 +349,21 @@ class TrainingKbStack(Stack):
         function.add_to_role_policy(iam.PolicyStatement(
             actions=["s3:ListBucket"], resources=[bucket.bucket_arn],
             conditions={"StringLike": {"s3:prefix": [f"{prefix}*" for prefix in prefixes]}}))
+
+    # ---- Phase 42 ----
+    def _import_machine_arns(self) -> list[str]:
+        """匯入 Lambda 可以啟動的兩條 state machine ARN，由**名稱**組出來（00A §3.5）。
+
+        不用 `machine.grant_start_execution(...)`：`training-kb-release-update` 要到
+        [Phase 52] 才有 construct，而 IAM 允許引用尚不存在的資源。用名稱組 ARN 之後
+        P52 建它的時候不必回頭碰這支 Lambda（controller 2026-09-14 裁決）。
+        `feedback-review`（P48）不在清單裡：固定匯入不啟動它。
+        """
+        return [self.format_arn(service="states", resource="stateMachine",
+                                resource_name=STATE_MACHINE_NAMES[pipeline],
+                                arn_format=ArnFormat.COLON_RESOURCE_NAME)
+                for pipeline in IMPORT_MACHINES]
+    # ---- Phase 42 結束 ----
 
     def _grant_delete_edges(self, function: lambda_.Function, table: dynamodb.ITable) -> None:
         """缺口 2（D-79）：唯一一條 `dynamodb:DeleteItem`，資源只有這張表本體。
