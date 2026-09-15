@@ -345,3 +345,34 @@ def test_scan_records_round_trip_through_json() -> None:
                         scope="依賴", exit_code=2, covered=(), not_covered=("secrets",))
     payload = json.loads(json.dumps(record.__dict__))
     assert payload["exit_code"] == 2 and payload["covered"] == []
+
+
+# --- 修正波（final review C#4）：docs/ 也要掃高精準度樣式 --------------------
+
+
+def test_check_secrets_scans_docs_for_high_precision_patterns(repo: Path) -> None:
+    """Given `docs/` 的追蹤檔裡有 AKIA 樣式／Then 是 finding（只印檔案與行號）。
+
+    `docs/plan/report/**` 正是每一份機器產生的成品落地的地方（ARN、HTTP 回應、
+    掃描原文），把整個 `docs/` 排除等於讓最可能貼上金鑰的目錄完全不受檢查
+    （final review C#4）。三個高精準度樣式（AKIA／`gh?_`／PRIVATE KEY）幾乎不會
+    誤判，所以它們照掃；會誤判的只有 `SECRET_ASSIGNMENT`（文件裡的 `KEY=值` 範例），
+    那一條才維持排除。
+    """
+    leak = "AKIA" + "ABCDEFGHIJKLMNOP"
+    (repo / "docs" / "report.md").write_text(f"輸出：{leak}\n", encoding="utf-8")
+    _git(repo, "add", "docs/report.md")
+
+    result = check_secrets(repo)
+
+    assert result.status == "fail"
+    assert any("docs/report.md:1" in item for item in result.findings)
+    assert not any(leak in item for item in result.findings)
+
+
+def test_check_secrets_still_ignores_assignment_examples_in_docs(repo: Path) -> None:
+    """Given `docs/` 的 `KEY=值` 範例，Then 仍然不是 finding（只有那一條規則排除）。"""
+    result = check_secrets(repo)
+
+    assert result.status == "pass", result.findings
+    assert "SECRET_ASSIGNMENT" in result.scope or "賦值" in result.scope

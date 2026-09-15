@@ -99,13 +99,24 @@ PLACEHOLDER = re.compile(
 """空值與明顯佔位字都不是 finding；「這個鍵在範圍內完全沒出現」也不是 finding。"""
 
 SCAN_EXCLUDED_PREFIXES = ("docs/", ".superpowers/")
-"""`docs/plan/unfinish-claude/` 這種**文件範例**掃進去只會製造假陽性，還會把疑似值印進
-報告。排除清單逐字寫進 `CheckResult.scope`，讓人看得出來沒掃什麼（本計畫選擇）。"""
+"""**只有 `SECRET_ASSIGNMENT` 那一條規則**排除這些前綴（修正波：final review C#4）。
+
+`docs/plan/unfinish-claude/` 這種文件範例會寫「鍵名＝值」當說明，整份掃進去只會製造
+假陽性，還會把疑似值印進報告——所以那一條規則照舊跳過這些前綴。
+
+但三個**高精準度**樣式（AKIA／`gh?_`／PRIVATE KEY）現在對 `docs/` 照掃：
+`docs/plan/report/**` 正是每一份機器產生的成品落地的地方（ARN、HTTP 回應、掃描原文），
+把整個 `docs/` 排除等於讓最可能貼上金鑰的目錄完全不受檢查。這三個樣式幾乎不會誤判。
+
+排除清單逐字寫進 `CheckResult.scope`，讓人看得出來哪一條規則沒掃什麼（本計畫選擇）。
+"""
 
 SECRETS_SCOPE = (
-    "`git ls-files` 的追蹤檔，排除 " + "／".join(f"`{p}`" for p in SCAN_EXCLUDED_PREFIXES)
-    + f"；樣式＝AKIA／gh?_／PRIVATE KEY 三種 ＋ `{WEBHOOK_SECRET_ENV}` 的非佔位值；"
-    + "另外核對 `git check-ignore .env`。命中只印檔案與行號，不印命中的字串。")
+    "`git ls-files` 的**全部**追蹤檔一律掃 AKIA／gh?_／PRIVATE KEY 三種樣式；"
+    + f"`{WEBHOOK_SECRET_ENV}` 的非佔位值（SECRET_ASSIGNMENT 賦值規則）另外排除 "
+    + "／".join(f"`{p}`" for p in SCAN_EXCLUDED_PREFIXES)
+    + "（文件會寫鍵名＝值當範例）；另外核對 `git check-ignore .env`。"
+    + "命中只印檔案與行號，不印命中的字串。")
 
 _BINARY_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".gz", ".whl", ".woff", ".woff2"})
@@ -117,13 +128,19 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def tracked_files(root: Path) -> tuple[str, ...]:
-    """`git ls-files` 的追蹤檔，扣掉 `SCAN_EXCLUDED_PREFIXES`。"""
+    """`git ls-files` 的**全部**追蹤檔（修正波：不再在這裡先扣掉排除前綴）。
+
+    排除只套用在 `SECRET_ASSIGNMENT` 那一條規則上，由 `_assignment_scanned` 決定。
+    """
     listed = _git(root, "ls-files")
     if listed.returncode != 0:
         return ()
-    return tuple(
-        line for line in listed.stdout.splitlines()
-        if line and not line.startswith(SCAN_EXCLUDED_PREFIXES))
+    return tuple(line for line in listed.stdout.splitlines() if line)
+
+
+def _assignment_scanned(relative: str) -> bool:
+    """這個檔要不要套用 `SECRET_ASSIGNMENT`（會誤判的那一條）；見 `SCAN_EXCLUDED_PREFIXES`。"""
+    return not relative.startswith(SCAN_EXCLUDED_PREFIXES)
 
 
 def check_secrets(root: Path) -> CheckResult:
@@ -145,6 +162,8 @@ def check_secrets(root: Path) -> CheckResult:
             for label, pattern in SECRET_PATTERNS:
                 if pattern.search(line):
                     findings.append(f"{relative}:{number} 命中 {label}")
+            if not _assignment_scanned(relative):
+                continue
             match = SECRET_ASSIGNMENT.search(line)
             if match is not None and PLACEHOLDER.fullmatch(match.group(1)) is None:
                 findings.append(f"{relative}:{number} {WEBHOOK_SECRET_ENV} 帶非佔位值")
@@ -1037,7 +1056,7 @@ GATE_OVERRIDES: Mapping[str, str] = {
     "MET#5": "not_run:O6 4 列待核定 — docs/plan/report/o6-mapping.md",
     "S1": "not_run:O6 三個手動來源未核定 — docs/plan/report/o6-mapping.md",
     "S5": "not_run:O6 未核定 github.com/pull_request — docs/plan/report/o6-mapping.md",
-    # O7 = 未完成（demo/seed/approvals/ 三份的維護者欄位全空）。
+    # O7 = 未完成（demo/seed/approvals/ 三份的維護者欄位全空）。八列。
     "V4": "not_run:O7 未核定（missing_approvals=R007-B1／R012-B1／R012-B2）"
           " — docs/plan/report/phases/2026-09-14-Phase56-REP.md",
     "RUN#1": "not_run:O7 未核定（「經確認」那一半缺席）"
@@ -1045,6 +1064,15 @@ GATE_OVERRIDES: Mapping[str, str] = {
     "VAL#3": "not_run:O7 未核定 — docs/plan/report/phases/2026-09-14-Phase56-REP.md",
     "VAL#6": "not_run:O7 未核定 — docs/plan/report/phases/2026-09-14-Phase56-REP.md",
     "S7": "not_run:O7 未核定 — docs/plan/report/phases/2026-09-14-Phase56-REP.md",
+    # 修正波（final review C#5）：Demo 的三列原本用測試 nodeid 記成 pass，但它們展示的
+    # 都是 `demo/seed/` 的種子資料，而那批種子的維護者核定（O7）是空的——程式重算成功
+    # 不等於核定。收斂成 not_run，與上面五列同一個理由、同一份報告。
+    "MET#10": "not_run:O7 未核定（Demo 指標用的種子未簽名）"
+              " — docs/plan/report/phases/2026-09-14-Phase56-REP.md",
+    "MET#11": "not_run:O7 未核定（Demo 重開票 proxy 用的種子未簽名）"
+              " — docs/plan/report/phases/2026-09-14-Phase56-REP.md",
+    "MET#12": "not_run:O7 未核定（並排展示用的種子未簽名）"
+              " — docs/plan/report/phases/2026-09-14-Phase56-REP.md",
     # O4 = P54 首驗完成但仍未核定；O1 = provisionally accepted（D-71），不記 pass。
     "TIC#3": "not_run:O4 首驗完成但未核定 — docs/plan/report/phases/2026-09-14-Phase54-REP.md",
     "MET#3": "not_run:O4 首驗完成但未核定 — docs/plan/report/phases/2026-09-14-Phase54-REP.md",
