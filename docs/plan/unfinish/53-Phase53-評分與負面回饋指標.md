@@ -2,6 +2,35 @@
 
 > **給實作者：** 依 checkbox 逐步執行；每個 Task 先建立失敗測試，再寫最小實作。執行時使用 `superpowers:executing-plans` 或同等逐項流程。
 
+> **現況核對（2026-09-14，Phase 41–60 批次 W0）：**
+>
+> **（a）已存在、可直接用**
+> - `src/training_kb/analytics/__init__.py` **已由 Phase 40 先建**成最小空殼（只有 docstring、明寫「不 re-export 任何名稱」）。00A §3.2 記「owner 仍是 P53，套件入口真正要放什麼由 P53 決定」，所以本 Phase 對這支檔是**修改**而不是新增。
+> - `src/training_kb/models.py::Feedback`：`rating_is_strict_int`（`mode="before"`，`type(value) is not int` 擋掉 `bool`，範圍 1–5）與 `carries_signal`（rating／category／comment 至少一項）都已生效，本 Phase 不重做。
+> - `src/training_kb/repository.py::Repository.list_feedback_of_version(version_id) -> list[Feedback]` 已實作（依 `id` 升序；`by_target` GSI 三重過濾；**邊存在但基表讀不到時丟 `PermanentError`**，不會安靜跳過）。
+> - `src/training_kb/config.py::Thresholds.weak_average = 3.5` **已經存在**，Phase 44 的門檻欄位不必再加。
+> - `tests/unit/conftest.py` 目前只有 `RecordingWriter`／`FIXED_EMBEDDING`／`fake_writer`。00A §3.3 記這支 conftest 的修改者只有 **P55**，本 Phase **不得動它**；`test_rating_metrics.py` 的 helper 一律寫在測試檔內。
+>
+> **（b）因上一批裁決／現況而修正的點**
+> 1. §4「新增 `analytics/__init__.py`」→ **改成「修改」**（現況核對 2026-09-14：原寫「新增」，該檔已由 P40 建立；00A §3.2 與 D-26 的 owner 欄仍記 P53）。
+> 2. **本計畫選擇（owner 裁決）：`analytics/__init__.py` 維持 docstring-only、不 re-export 任何名稱**，消費端一律用子模組路徑（`from training_kb.analytics.ratings import average_rating`）。三個理由：(i) 與既有 `src/training_kb/pipelines/__init__.py` 的 house style 一致（該檔逐字寫「這裡不做 re-export…只留一條 import 路徑」）；(ii) 本文件與 Phase 54／55／56／58 的**所有**測試片段本來就只用子模組路徑，沒有一處 `from training_kb.analytics import ...`；(iii) 本 Phase 與 Phase 54 同一實作波（W1），兩邊都寫「改 `__init__.py`」會直接撞 COMMON R3 的同檔併行。依這條裁決，**P53 與 P54 都不需要修改這支檔**。
+> 3. §5 Consumes 的 `approved_categories(repository)`、`DEFAULT_FEEDBACK_CATEGORIES`、`PENDING_CATEGORY`（Phase 43）**目前尚未實作**（`grep -rn "approved_categories" src/` 無結果）——Phase 43 與本 Phase 同屬 41–60 這一批。本 Phase 的 `negative_feedback_ids` 只吃 `frozenset[str]`，測試自己寫 `APPROVED = frozenset({"找不到按鈕", "缺少資訊"})`，**不 import Phase 43 的任何名稱**，所以 Phase 43 未落地不阻擋本 Phase。
+> 4. §6 寫「Phase 44 排在本 Phase 之前…它的 module-private `_average` 自己寫了同一套公式」——**現況核對 2026-09-14：Phase 44 同屬 41–60 這一批、尚未實作**（`grep -rn "def _average\|def is_weak" src/` 無結果）。D-44 的實質要求不變（兩處分母都是**有評分**的筆數），但「P53 完成後改由 P44 呼叫 `average_rating`」在本批屬**同批內協調**：若 P44 先落地就留本地同算法副本、由 controller 安排收斂；若本 Phase 先落地，P44 直接 `from training_kb.analytics.ratings import average_rating`。本 Phase 不去改 Phase 44 的檔案。
+> 5. §7 各 Task Step 5 的 `git commit -m "..."` 片段**沒有帶 trailer**；實作時一律補上 COMMON R8 的兩行 trailer，且 `git add` 只加自己的檔案路徑（不 `git add -A`）。
+>
+> **（c）gate 現況對本 Phase 的影響**（COMMON.md §2）
+> - **O5 BLOCKED**（`docs/plan/report/o5-20260915T030245Z.md`）：本 Phase 是純函式、不呼叫任何模型，**無影響**。
+> - **O3 FAIL**（`docs/plan/report/o3-20260914t181109z.md`）、**O2 PASS**：與本 Phase 無關。
+> - **O7 未到、O4 未到**：§全域限制原有敘述正確，維持；本 Phase 只能說「自含 fixture 可重算」。
+> - **O6 待核定**：本 Phase 不碰來源核定，無影響。
+>
+> **（d）適用的 controller 裁決（COMMON.md §3）**
+> - **R3（同波同檔）**：與 Phase 54 同波；依 (b)2 兩邊都不動 `analytics/__init__.py`，本 Phase 只新建 `analytics/ratings.py` 與 `tests/unit/test_rating_metrics.py`，沒有共用檔。
+> - **R6**：逐 Task 先紅燈再綠燈，報告要附 RED／GREEN 的指令與輸出。
+> - **R7**：報告寫 `docs/plan/report/phases/2026-09-14-Phase53-REP.md`。
+> - **R9**：不派 subagent。
+> - 全套 gate 指令：`uv run pytest tests -q -W error`（**不得有 warning**）、`uv run ruff check src tests infra`、`uv run ruff format --check src tests infra`、`uv run mypy`（strict，`files = ["src", "infra"]`——`ratings.py` 的每個函式都要有完整型別註記，測試檔不在 mypy 範圍內）。
+
 **目標：** 由原始 Feedback 重算每版平均評分、跨版等權平均與負面回饋 ID 集合，讓設計 §11.2 的 2.875、4.4、8、2 完全可由資料重現。
 
 **架構：** Analytics 是獨立 Lambda 的責任，不是第四條教學 pipeline。本 Phase 只做**純函式**：輸入 `list[Feedback]` 與核定類別集合，輸出數值與 ID 集合；讀取由 Phase 08 的 `list_feedback_of_version` 負責，寫入規則狀態由 Phase 55 負責。
@@ -69,7 +98,7 @@ negative_feedback_ids(v2, APPROVED) -> {"f_101","f_102"}           長度 2
 
 | 動作 | 路徑 | 責任 |
 |---|---|---|
-| 新增 | `src/training_kb/analytics/__init__.py` | 建立 `analytics` 套件入口並匯出本 Phase 的四個名稱（00A D-26：這個檔在本 Phase 之前沒有任何 Phase 建立，owner 是本 Phase）。 |
+| 修改 | `src/training_kb/analytics/__init__.py` | 套件入口，**已由 Phase 40 先建**（現況核對 2026-09-14：原寫「新增…並匯出本 Phase 的四個名稱」；00A §3.2 的 owner 仍是本 Phase）。**本計畫選擇：維持 docstring-only、不 re-export**，消費端一律 `from training_kb.analytics.ratings import ...`（與 `pipelines/__init__.py` 同一套 house style）。實務上本 Phase 通常**完全不必改這支檔**。 |
 | 新增 | `src/training_kb/analytics/ratings.py` | `average_rating`、`cross_version_average`、`negative_feedback_ids`、`format_average`。 |
 | 測試 | `tests/unit/test_rating_metrics.py` | 八筆／十筆重算、空資料、待分類與去重。 |
 
@@ -85,6 +114,8 @@ approved_categories(repository: Repository) -> frozenset[str]   # Phase 43，讀
 DEFAULT_FEEDBACK_CATEGORIES: frozenset[str]                     # Phase 43，{找不到按鈕, 缺少資訊}
 PENDING_CATEGORY: str                                           # Phase 43，"待分類"
 ```
+
+（現況核對 2026-09-14：Phase 43 的這三個名稱**尚未實作**，與本 Phase 同屬 41–60 這一批。本 Phase 的函式只吃 `frozenset[str]`，測試自備 `APPROVED = frozenset({"找不到按鈕", "缺少資訊"})`，**不 import Phase 43**，所以 Phase 43 未落地不阻擋本 Phase。`Repository.list_feedback_of_version` 已實作，行為補充：邊存在但基表讀不到時丟 `PermanentError`，不會安靜跳過。）
 
 `Feedback` 模型層已擋掉 `bool` 與 1..5 以外的 `rating`（Phase 04 的 `rating_is_strict_int`），也要求每筆至少帶 rating、category、comment 其中一項（`carries_signal`）。本 Phase 不重做這兩層驗證，但測試 fixture 必須守得住，否則連物件都建不起來。
 
@@ -130,7 +161,9 @@ average_rating                     negative_feedback_ids
 
 顯示用 `decimal.Decimal` 加 `ROUND_HALF_UP`：2.875 剛好落在 2.8 與 2.9 中間，不同策略會得到不同結果，而設計 §11.2 要求顯示 **2.9**，所以策略必須被測試釘住。`rating` 的 `bool` 已由 [Phase 04](./04-Phase04-十個邏輯實體模型.md) 的模型層拒絕（`True` 是 `int` 子類別，不擋會變成 1 分），本 Phase 只加一筆案例確認模型層真的擋住。
 
-**與 Phase 44 的平均必須是同一套算法（00A 第 8 節 D-44）。** Phase 44 排在本 Phase 之前，當時還不能 import `analytics.ratings`，所以它的 module-private `_average` 自己寫了同一套公式：分母是**有評分**的筆數，`rating is None` 不進分子也不進分母，沒有任何評分回 `None`。**本 Phase 完成後，Phase 44 的 `_average` 應改為直接呼叫 `average_rating`**，避免兩份實作各自演化；在改完之前，任何一邊調整分母都要同時改另一邊，否則 Phase 44 判定用的平均與這裡顯示的平均會分岔。
+**與 Phase 44 的平均必須是同一套算法（00A 第 8 節 D-44）。** 兩處的分母都必須是**有評分**的筆數，`rating is None` 不進分子也不進分母，沒有任何評分回 `None`。
+
+（現況核對 2026-09-14：原文寫「Phase 44 排在本 Phase 之前…它的 module-private `_average` 自己寫了同一套公式」。實際上 **Phase 44 與本 Phase 同屬 41–60 這一批、目前尚未實作**（`grep -rn "def _average" src/` 無結果），`src/training_kb/config.py::Thresholds.weak_average = 3.5` 則已經存在。D-44 的實質要求不變，落地順序改為同批內協調：本 Phase 先落地時，Phase 44 直接 `from training_kb.analytics.ratings import average_rating`；Phase 44 先落地時留本地同算法副本，收斂由 controller 安排。**本 Phase 一律不去改 Phase 44 的檔案**，只在報告寫下這筆後續工作。）
 
 ## 7. TDD Tasks
 
@@ -403,6 +436,6 @@ Rule 原文逐字取自 `.feature` 原檔；primary／相關的歸屬依 [00B �
 - [ ] 無有效評分回傳 `None`，顯示「尚無評分」，沒有任何路徑產生 0.0。
 - [ ] 跨版平均先每版再等權，並有測試證明不等於加權結果。
 - [ ] 顯示四捨五入策略被測試釘住，門檻比較仍使用未四捨五入的值。
-- [ ] 與 Phase 44 的平均分母一致（D-44），且已記下「Phase 44 改呼叫 `average_rating`」這筆後續工作。
+- [ ] 與 Phase 44 的平均分母一致（D-44），且已在報告記下「Phase 44 改呼叫 `average_rating`」這筆**同批內**後續工作（現況核對 2026-09-14：Phase 44 尚未實作，本 Phase 不代改）。
 - [ ] 本 Phase 未寫入任何 DynamoDB item、未呼叫模型、未改變規則狀態。
 - [ ] 沒有把自含 fixture 的綠燈說成 Demo 種子已核定或 O7 已通過。
