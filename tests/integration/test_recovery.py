@@ -576,13 +576,16 @@ def aws_world(monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
         os.environ.get("TKB_TABLE_NAME", "training_kb"))
     bucket = boto3.resource("s3", region_name=AWS_REGION).Bucket(bucket_name)
     built = World(Repository(table, bucket))
+    # `site/index.html` 是**共用**的公開物件（P57 已經發布過一份）：seed 會覆寫它，
+    # 所以先原樣存起來，清理時逐字寫回去，演練不留痕跡在別人的頁面上。
+    saved_index = built.repository.get_object(f"{PUBLIC}index.html")
     monkeypatch.delenv("TKB_FAULT", raising=False)
     monkeypatch.setenv("TKB_ENV", "demo")
     yield built
-    _cleanup(built, table, bucket)
+    _cleanup(built, table, bucket, saved_index)
 
 
-def _cleanup(world: World, table: Any, bucket: Any) -> None:
+def _cleanup(world: World, table: Any, bucket: Any, saved_index: bytes | None) -> None:
     """清掉本次演練 seed 的 `p59-` item 與物件；刪不掉的由報告列出來交人工處理。"""
     for entity in ("TUTORIAL", "VERSION", "FEATURE", "STEP", "RULE", "OPS"):
         for item in world.repository.scan_entity(entity, meta_only=False):
@@ -591,6 +594,11 @@ def _cleanup(world: World, table: Any, bucket: Any) -> None:
     for summary in bucket.objects.all():
         if AWS_PREFIX in summary.key:
             summary.delete()
+    if saved_index is not None:
+        world.repository.put_object(f"{PUBLIC}index.html", saved_index,
+                                    "text/html; charset=utf-8", if_none_match=False)
+    else:
+        bucket.Object(f"{PUBLIC}index.html").delete()
 
 
 @pytest.mark.aws
