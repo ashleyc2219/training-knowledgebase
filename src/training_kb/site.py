@@ -29,8 +29,8 @@ render_site_index     站台索引    只列 current_version 非空的 Tutorial
 
 from html import escape
 
-from training_kb.content import RETIRED_NOTICE, parse_version_id
-from training_kb.errors import PublishError
+from training_kb.content import PUBLIC_SITE_PREFIX, RETIRED_NOTICE, parse_version_id
+from training_kb.errors import PermanentError, PublishError
 from training_kb.models import (
     Tutorial,
     TutorialContent,
@@ -38,6 +38,23 @@ from training_kb.models import (
     TutorialStep,
     TutorialVersion,
 )
+
+SITE_PREFIX = PUBLIC_SITE_PREFIX
+"""公開前綴；**是 Phase 22 `PUBLIC_SITE_PREFIX` 的別名**，值必須相同（00A §6.7），
+所以這裡直接指過去而不是再抄一次 `"site/"`。它只用來組**資產路徑**與給呼叫端看，
+四個公開 key 一律由 `training_kb.publishing` 的 helper 產生（D-54、00A §3.4）。"""
+
+ASSET_KEYS = (f"{SITE_PREFIX}assets/style.css", f"{SITE_PREFIX}assets/widget.js")
+"""兩個站台資產的公開 key（含 `site/` 前綴，與頁面 key 不同層）。頁面引用它們時用的是
+瀏覽器路徑 `<asset_prefix>/style.css`，預設 `/site/assets/style.css`——同一份檔案的兩種
+寫法：key 給 `put_object`，路徑給瀏覽器。"""
+
+NO_PREVIOUS_TEXT = "第一版，沒有前一版可比較"
+"""v1 的差異區塊固定文案（設計 §8.2）。v1 沒有 `.diff` 可比，顯示空連結比不顯示更糟。"""
+
+NOT_SENT_TEXT = "檔案已產生，尚未送出"
+"""widget 的唯一狀態文案。**任何「已送出」「感謝回饋」的措辭都禁止**：widget 只在瀏覽器
+本機產生檔案，要進系統得由維護者走 Phase 42 的固定匯入路徑（設計 §13）。"""
 
 RETIRED_PLACEHOLDER = RETIRED_NOTICE
 """Phase 24 用過的舊名，現在只是 Phase 26 `RETIRED_NOTICE` 的別名（00A §6.6 的 owner 是
@@ -51,6 +68,21 @@ Phase 57 都不變（00A §6.7），手上只有被退役的那一篇 `Tutorial`
 
 _SECTIONS = ("Problem", "Prerequisites", "Steps", "Expected Outcome")
 """版本頁固定的四個 `<h2>`；標題自己是 `<h1>`，所以五段裡只有四段有 `<h2>`。"""
+
+_WIDGET_HEADING = "這篇有幫助嗎？"
+_UNSELECTED_CATEGORY = "未選擇"
+_RATINGS = (1, 2, 3, 4, 5)
+"""評分只有 1–5 的整數（收集教學回饋.feature Rule 3）；頁面不提供其他值，匯入端再驗一次。"""
+
+
+def escape_text(value: str) -> str:
+    """HTML 輸出的唯一轉義（同時轉 `&`、`<`、`>`、`"`、`'`）。
+
+    與 Phase 22 的 `escape_markdown` **不是同一層、不得互換**：那個是給 Markdown 全文用的。
+    屬性值也走這一個函式（`quote=True` 是 `html.escape` 的預設），所以
+    `data-category="缺少資訊"` 這種屬性不會被使用者文字撐開。
+    """
+    return escape(value, quote=True)
 
 
 def _items(values: list[str]) -> str:
@@ -96,6 +128,117 @@ def _version_number(version_id: str) -> str:
     return f"v{parse_version_id(version_id)[1]}"
 
 
+# --- Phase 57：版本選擇、差異連結、橫幅與 widget ------------------------------
+
+
+def _page_href(version_id: str, suffix: str) -> str:
+    """同目錄的相對檔名：`v<n>.html`／`v<n>.diff.txt`（D-78）。
+
+    **這不是 S3 key**：公開 key 由 `training_kb.publishing` 的四個 helper 產生（D-54），
+    而 `site` 不得 import `publishing`（`publishing` 已經 import 本模組，反向會循環）。
+    版本頁、公開 diff 與教學索引都公開在 `site/tutorials/<slug>/` 這同一層，所以瀏覽器層
+    只需要檔名；後繼教學差一層目錄，由 `_successor_line` 輸出 `../<slug>/index.html`。
+    """
+    return f"{_version_number(version_id)}{suffix}"
+
+
+def _diff_block(version: TutorialVersion) -> str:
+    """與前一版的差異連結；v1 顯示 `NO_PREVIOUS_TEXT`（設計 §8.2）。
+
+    版號大於 1 卻沒有 `supersedes` 代表資料不完整，丟 `PermanentError`（00A §6.7）而**不是**
+    靜默顯示成第一版：靜默的話讀者會以為這篇沒有歷史，而重試同一份輸入也不會變好。
+    """
+    _, number = parse_version_id(version.version_id)
+    if version.supersedes is None:
+        if number != 1:
+            raise PermanentError(f"{version.version_id} 缺少 supersedes")
+        return f'<p class="diff-note">{escape_text(NO_PREVIOUS_TEXT)}</p>'
+    _, previous = parse_version_id(version.supersedes)
+    return (f'<p class="diff-note">'
+            f'<a href="{_page_href(version.version_id, ".diff.txt")}">'
+            f"查看與 v{previous} 的差異</a></p>")
+
+
+def _version_switch(tutorial: Tutorial, version: TutorialVersion) -> str:
+    """版本選擇列：上一版、本頁（必要時標「目前版本」）、版本紀錄頁。
+
+    **不列 `v1..vN`**：設計 §8.1 允許永久失敗留下版號缺口，用版號推算清單會產生死連結。
+    完整清單只在版本紀錄頁（`index.html`），那一頁的內容來自 DynamoDB 的實際版本列。
+    """
+    parts = []
+    if version.supersedes is not None:
+        parts.append(f'<a href="{_page_href(version.supersedes, ".html")}">'
+                     f"上一版 {_version_number(version.supersedes)}</a>")
+    current = "（目前版本）" if version.version_id == tutorial.current_version else ""
+    parts.append(f'<span class="current">本頁 {_version_number(version.version_id)}'
+                 f"{current}</span>")
+    parts.append('<a href="index.html">查看版本紀錄</a>')
+    return f'<nav class="version-switch">{"｜".join(parts)}</nav>'
+
+
+def _banner(notice: str, batch: str) -> str:
+    """合成資料橫幅；兩個欄位都空（`SiteRenderer()` 的預設）時整段不輸出。
+
+    O7 未到（P56 首驗），所以這裡只照抄呼叫端給的批次名稱，**不得**印成「已核定」。
+    """
+    if not notice and not batch:
+        return ""
+    labels = [escape_text(notice)] if notice else []
+    if batch:
+        labels.append(f"批次：{escape_text(batch)}")
+    return f'<p class="banner">{"｜".join(labels)}</p>'
+
+
+def _asset_links(asset_prefix: str) -> str:
+    """樣式與腳本；兩支都在同一個 bucket 的 `site/assets/`（`ASSET_KEYS`），不引 CDN。"""
+    prefix = escape_text(asset_prefix.rstrip("/"))
+    return (f'<link rel="stylesheet" href="{prefix}/style.css">'
+            f'<script src="{prefix}/widget.js" defer></script>')
+
+
+def _widget_block(tutorial: Tutorial, version: TutorialVersion,
+                  categories: tuple[str, ...], notice: str) -> str:
+    """回饋與瀏覽紀錄的下載區；退役教學整段不輸出（設計 §8.4、§13）。
+
+    **這裡沒有任何送出行為**：按鈕由 `demo/site_assets/widget.js` 在瀏覽器本機產生檔案，
+    狀態文字固定是 `NOT_SENT_TEXT`，要進系統得由維護者走 Phase 42 的固定匯入路徑。
+    類別清單由呼叫端注入（Phase 43 的 `approved_categories`），本模組不維護任何類別字面值。
+    """
+    if tutorial.status == TutorialStatus.RETIRED:
+        return ""
+    ratings = "".join(
+        f'<button type="button" class="rating" data-rating="{value}">{value}</button>'
+        for value in _RATINGS
+    )
+    chips = "".join(
+        f'<button type="button" class="category" data-category="{escape_text(name)}">'
+        f"{escape_text(name)}</button>"
+        for name in categories
+    )
+    chips += ('<button type="button" class="category" data-category="">'
+              f"{_UNSELECTED_CATEGORY}</button>")
+    return (
+        f'<section id="tkb-widget" class="widget"'
+        f' data-slug="{escape_text(tutorial.slug)}"'
+        f' data-version-id="{escape_text(version.version_id)}"'
+        f' data-notice="{escape_text(notice)}" data-retired="false">'
+        f"<h2>{_WIDGET_HEADING}</h2>"
+        f'<p class="ratings">{ratings}</p>'
+        f'<p class="categories">{chips}</p>'
+        f'<p><label for="tkb-comment">留言</label>'
+        f'<textarea id="tkb-comment" rows="3"></textarea></p>'
+        f'<p><label for="tkb-user">你的穩定使用者 ID（必填）</label>'
+        f'<input id="tkb-user" type="text" autocomplete="off"></p>'
+        f'<p class="actions">'
+        f'<button type="button" id="tkb-download">下載回饋檔案，交由維護者匯入</button>'
+        f'<button type="button" id="tkb-view">下載瀏覽紀錄</button></p>'
+        f'<p class="not-sent">本頁不會送出任何資料：按下下載只會在你的電腦產生檔案，'
+        f"狀態一律是「{escape_text(NOT_SENT_TEXT)}」，需要維護者匯入才會進系統。</p>"
+        f'<p class="status">狀態：<span id="tkb-status">尚未產生檔案</span></p>'
+        f"</section>"
+    )
+
+
 class SiteRenderer:
     """最小公開頁 renderer。
 
@@ -120,22 +263,33 @@ class SiteRenderer:
         的 `content.steps`）逐字相同：兩邊分岔代表寫入沒寫完或有人改過其中一邊，這時輸出
         半對的頁面比停下來危險得多（設計 §8.2）。核對只比 `(number, text)`——`type` 與
         `feature_id` 不進公開頁，拿它們比對會把「不影響公開內容的差異」誤判成不同步。
+
+        **Phase 57 在同一個簽名上多輸出四樣東西**（00A §6.7 明訂簽名不變）：`data-retired`
+        機器可讀標記、合成資料橫幅、版本選擇與差異連結、以及回饋／瀏覽紀錄下載區。
+        `version.reason` 仍然一個字都不進頁面（`release:<id>` 是上游識別碼，設計 §13 私有）。
         """
         saved = [(step.number, step.text) for step in steps]
         public = [(draft.number, draft.text) for draft in content.steps]
         if saved != public:
             raise PublishError(f"{version.version_id} 的已保存步驟與公開內容不同步")
         published = "true" if version.published_at is not None else "false"
+        retired = "true" if tutorial.status == TutorialStatus.RETIRED else "false"
         page = (
-            f'<article data-published="{published}" data-slug="{escape(tutorial.slug)}"'
+            f'<article data-published="{published}" data-retired="{retired}"'
+            f' data-slug="{escape(tutorial.slug)}"'
             f' data-version-id="{escape(version.version_id)}">'
+            f"{_asset_links(self.asset_prefix)}"
+            f"{_banner(self.notice, self.batch)}"
             f"<h1>{escape(content.title)}</h1>"
             f'<p class="version">{escape(version.version_id)}</p>'
+            f"{_version_switch(tutorial, version)}"
+            f"{_diff_block(version)}"
             f"<h2>{_SECTIONS[0]}</h2><p>{escape(content.problem)}</p>"
             f"<h2>{_SECTIONS[1]}</h2><ul>{_items(content.prerequisites)}</ul>"
             f"<h2>{_SECTIONS[2]}</h2>"
             f"<ol>{_items([step.text for step in steps])}</ol>"
             f"<h2>{_SECTIONS[3]}</h2><p>{escape(content.expected_outcome)}</p>"
+            f"{_widget_block(tutorial, version, self.categories, self.notice)}"
         )
         return page + _retired_block(tutorial) + "</article>"
 

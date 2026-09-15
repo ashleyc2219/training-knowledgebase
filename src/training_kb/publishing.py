@@ -28,8 +28,8 @@ commit:   自己先跑一次 inspect；ok? -- 否 --> PublishError，不進交�
 **三個公開 key helper 歸本模組**（D-54）：`site_key`／`tutorial_index_key`／`site_index_key`
 回的都**不含** `site/` 前綴。公開物件 = `site/` + 相對 key，私有 staging =
 `operations/<operation_id>/site/<相對 key>`。Phase 25／26／57 一律 import 這三個，不自己接
-字串；只有公開 diff 的 `site_diff_key(version_id)` 歸 Phase 57，而且必須與本檔 module-private
-的 `_diff_copy_key(version_id)` 回同一個字串。
+字串；只有公開 diff 的 `site_diff_key(version_id)` 歸 Phase 57，它也在本檔（Phase 24 先以
+module-private 的 `_diff_copy_key` 落地，Phase 57 改成公開名稱，同一個函式、同一份字串）。
 
 **多篇整批（Phase 25）走同一組 `prepare`／`inspect`／`commit`，單篇就是 N=1 特例**：
 
@@ -164,8 +164,14 @@ def site_index_key() -> str:
     return "index.html"
 
 
-def _diff_copy_key(version_id: str) -> str:
-    """公開 diff 副本的相對 key；Phase 57 的 `site_diff_key` 回同一個字串。"""
+def site_diff_key(version_id: str) -> str:
+    """公開 diff 副本的相對 key：`tutorials/<slug>/v<n>.diff.txt`（**不含** `site/` 前綴）。
+
+    Phase 24 先以模組私有的 `_diff_copy_key` 落地，Phase 57 依 00A §6.7／D-54 把它改成公開
+    名稱：**一份字串兩個用途**（`Publisher` 拿它算 key、教學站拿同一個版號組相對 href），
+    不在 `site.py` 另寫一份。owner 是 P57，但落點與另外三個 helper 一樣在本模組
+    （`site` 不得 import `publishing`，反向 import 會循環）。
+    """
     return site_key(version_id).removesuffix(".html") + ".diff.txt"
 
 
@@ -298,7 +304,7 @@ def build_commit_transaction(prepared: PreparedPublish, *, repository: Repositor
 def _public_pairs(version_id: str) -> tuple[tuple[str, str], tuple[str, str]]:
     """一篇要公開的兩個物件：**版本頁先、公開 diff 副本後**（D-54），各帶自己的 content type。"""
     return ((site_key(version_id), SITE_PAGE_CONTENT_TYPE),
-            (_diff_copy_key(version_id), DIFF_CONTENT_TYPE))
+            (site_diff_key(version_id), DIFF_CONTENT_TYPE))
 
 
 def public_site_keys(version_ids: tuple[str, ...]) -> tuple[str, ...]:
@@ -439,7 +445,7 @@ class Publisher:
             raise PublishError(f"{version_id} 缺少私有 diff")
         return (self._stage(operation_id, site_key(version_id),
                             page.encode("utf-8"), SITE_PAGE_CONTENT_TYPE),
-                self._stage(operation_id, _diff_copy_key(version_id),
+                self._stage(operation_id, site_diff_key(version_id),
                             diff, DIFF_CONTENT_TYPE))
 
     def _stage(self, operation_id: str, relative: str, body: bytes,
