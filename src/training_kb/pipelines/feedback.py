@@ -43,7 +43,8 @@ from training_kb.models import (
     TutorialContent,
     TutorialStatus,
 )
-from training_kb.operations import OperationCoordinator, OperationRecord
+from training_kb.operations import AcceptOperation, OperationCoordinator, OperationRecord
+from training_kb.pipelines.common import Deps, JSONValue, PipelineName
 from training_kb.repository import Repository, item_to_model
 from training_kb.rules import applied_rule_ids, render_rules_block, rules_for_content
 from training_kb.writing.client import Writer
@@ -719,3 +720,153 @@ def prepare_refine(diagnosis: DiagnosisResult, *, repo: Repository, writer: Writ
                           evidence_fingerprint(diagnosis.version_id, category, feedback_ids))
     finally:
         operations.release_lease(scope, operation_id)
+
+
+# ---- Phase 48 ----
+# Feedback Review 排程流程：五個 Task 的組裝、本機整條序列與共用 Lambda 的直接入口。
+# 本段只做 orchestration：業務判斷全部呼叫上面 Phase 44–47 的既有函式，不改它們的邏輯、
+# 不改名、不重排。不新增第四條 pipeline（Demo 手動觸發共用同一個 state machine）、
+# 不寫 `RULE.status`（只有 Phase 55 能寫）、不做部分發布（F49）。
+
+FEEDBACK_REVIEW_PIPELINE: PipelineName = "feedback-review"
+"""本條 pipeline 的名稱；`run_sequence` 與 ASL 的 `Parameters.pipeline` 都用它。"""
+
+REVIEW_MODES: tuple[ReviewMode, ...] = ("formal", "demo")
+"""ASL input 只有 `mode` 這一個必要欄位，合法值就是 `ReviewMode` 的兩個（設計 §19.2 F20）。"""
+
+
+def _review_mode(state: Mapping[str, Any]) -> ReviewMode:
+    """讀 `state["mode"]`；未知的值一律 `PermanentError`（不重試、不默默退回 formal）。
+
+    退回 formal 會讓一次 demo 觸發用正式門檻挑出一批不該改的教學，錯得看不出來；
+    丟 `PermanentError` 則直接進 ASL 的 Catch，整次執行停在 `PipelineFailed`。
+    回傳值逐一比對 `REVIEW_MODES` 而不是 `cast`，型別收斂由比對本身保證。
+    """
+    mode = str(state.get("mode") or "formal")
+    for candidate in REVIEW_MODES:
+        if mode == candidate:
+            return candidate
+    raise PermanentError(f"未知的 review mode：{mode!r}（只接受 {'／'.join(REVIEW_MODES)}）")
+
+
+def _ids(values: Iterable[str]) -> list[JSONValue]:
+    """把 ID 清單轉成 ASL state 放得下的 `list[JSONValue]`。
+
+    `list[str]` **不是** `list[JSONValue]` 的子型別（list 是不變的），直接塞進 state 會被
+    型別檢查擋下來；這裡只做一次轉型，不在每個 Task 各寫一份 `cast`。
+    """
+    return [value for value in values]
+
+
+def _listed(value: JSONValue) -> list[str]:
+    """把 state 裡的 ID 清單讀回 `list[str]`；不是 list 就當成空清單。"""
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _review_targets(repository: Repository) -> list[str]:
+    """本次要檢視的版本 ID：active Tutorial 的 current，而且該版已發布（設計 §7.5）。
+
+    retired、`current_version is None`、`published_at is None` 一律跳過；輸出依 ID 升序，
+    同一批資料重跑得到逐字相同的 `target_version_ids`。這裡**只列 ID**：弱教學判斷與
+    candidate 判斷都在 `EvaluateTargets`（00A §7 明講不拆成兩個 Task）。
+    """
+    found: list[str] = []
+    for item in repository.scan_entity("TUTORIAL"):
+        tutorial = item_to_model(item, Tutorial)
+        if tutorial.status is not TutorialStatus.ACTIVE or tutorial.current_version is None:
+            continue
+        version = repository.get_version(tutorial.current_version)
+        if version is not None and version.published_at is not None:
+            found.append(version.version_id)
+    return sorted(found)
+
+
+def review_operation_id(state: Mapping[str, Any], deps: Deps) -> str:
+    """當日 review 的 `operation_id`；`feedback-review` 沒有外部事件，由專案＋日期決定。
+
+    canonical id 逐字是 `f"{project_id}-{UTC 日期}"`——**用連字號、不用 `#`**（00A D-61），
+    所以 `operation_id` 就是 `op-feedback-review-demo-2026-09-13`，`execution_name` 可以
+    原樣沿用而不必走 SHA-256 截取（`#` 會觸發截取，同一天的名稱就認不出來）。
+
+    同一天重送會落在同一筆 operation 紀錄，`accept` 回 `duplicate`（O2 已 PASS，P11）。
+    state 已經帶 `operation_id`（`EvaluateTargets` 之後的每一個 Task）就原樣沿用。
+    """
+    project_id = str(state.get("project_id") or deps.need_settings().project_id)
+    canonical = f"{project_id}-{deps.now().date().isoformat()}"
+    return str(state.get("operation_id")
+               or operation_id_for("feedback-review", canonical))
+
+
+def task_list_targets(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """`ListTargets`：接受當日 operation，列出本次要檢視的版本 ID。
+
+    `mode` 先驗證再做任何讀取，未知的 mode 連表都不掃（§8 驗收矩陣的 Boundary 那一列）。
+    """
+    mode = _review_mode(state)
+    now = deps.now()
+    project_id = str(state.get("project_id") or deps.need_settings().project_id)
+    operation_id = review_operation_id(state, deps)
+    deps.operations.accept(AcceptOperation(
+        operation_id=operation_id, kind="feedback-review", project_id=project_id,
+        canonical_id=f"{project_id}-{now.date().isoformat()}", now=now))
+    return {"operation_id": operation_id, "project_id": project_id, "mode": mode,
+            "target_version_ids": _ids(_review_targets(deps.need_repository()))}
+
+
+def task_evaluate_targets(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
+    """`EvaluateTargets`：同一個 Task 裡跑 candidate 與 REFINE **兩條獨立分支**。
+
+    兩條分支寫在同一個迴圈但**沒有共用條件**：candidate 只看 `candidate_groups` 的
+    「同版同類 >= 5」，REFINE 只看 `select_weak_targets` 的三條件 AND，所以「平均 5.0 但
+    同類五筆」仍會提規則（設計 F26），「弱教學但診斷沒命中」仍不會建版（F24）。
+
+    **每個弱教學 target 都有自己的子 operation（00A D-59）**：`allocate_version` 以
+    `operation_id` 當唯一鍵、`OperationRecord.version_id` 只有一個值，兩篇共用當日的
+    review operation 會互相搶同一個版號。所以先用 `refine_operation_id(...)` `accept`
+    一筆子 operation，再把它當成 `diagnose_weak`／`prepare_refine` 的 `operation_id`。
+
+    逐篇的「沒有改動」理由**不進 state**（00A §7 只有八個欄位）：寫進私有
+    `operations/<op>/review-no-change.json`，`CommitBatch` 再把它併進 `review-result.json`。
+    """
+    repository, writer = deps.need_repository(), deps.need_writer()
+    operation_id = str(state["operation_id"])
+    # P43 併入後改成 `approved_categories(repository)`（00A §6.9）；與 `select_weak_targets`
+    # 目前用的是同一個常數，兩條分支的核定類別表不會分岔。
+    approved = DEFAULT_FEEDBACK_CATEGORIES
+    weak = {target.version_id: target
+            for target in select_weak_targets(repository=repository, mode=_review_mode(state),
+                                              now=deps.now(),
+                                              thresholds=deps.need_settings().thresholds)}
+    rule_ids: list[str] = []
+    prepared: list[str] = []
+    reasons: dict[str, str] = {}
+    for version_id in _listed(state.get("target_version_ids")):
+        found: list[str] = []
+        for group in candidate_groups(repository.list_feedback_of_version(version_id), approved):
+            found.append(propose_candidate(group, writer=writer, repo=repository,
+                                           operation_id=operation_id,
+                                           rule_id=candidate_rule_id(group)).rule_id)
+        target, plan = weak.get(version_id), None
+        if target is not None:
+            refine_id = refine_operation_id(target.version_id, target.category,
+                                            target.feedback_ids)
+            deps.operations.accept(AcceptOperation(
+                operation_id=refine_id, kind="feedback",
+                canonical_id=evidence_fingerprint(target.version_id, target.category,
+                                                  target.feedback_ids),
+                project_id=str(state["project_id"]), now=deps.now()))
+            plan = prepare_refine(diagnose_weak(target, repo=repository, writer=writer,
+                                                operation_id=refine_id),
+                                  repo=repository, writer=writer, operations=deps.operations,
+                                  operation_id=refine_id)
+            if plan is not None:
+                prepared.append(plan.version_id)
+        rule_ids.extend(found)
+        if not found and plan is None:
+            reasons[version_id] = ("不是弱教學" if target is None
+                                   else "診斷沒有可改步驟，或沒有新證據")
+    repository.put_object(f"operations/{operation_id}/review-no-change.json",
+                          json.dumps(reasons, ensure_ascii=False).encode("utf-8"),
+                          "application/json", if_none_match=False)
+    return {**state, "candidate_rule_ids": _ids(sorted(rule_ids)),
+            "prepared_version_ids": _ids(sorted(prepared))}
