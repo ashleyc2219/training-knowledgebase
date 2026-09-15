@@ -28,7 +28,6 @@ from training_kb.keys import META, operation_ref, ticket_pk, tutorial_pk
 from training_kb.models import Ticket, Tutorial, TutorialStatus, TutorialVersion
 from training_kb.operations import OperationRecord
 from training_kb.pipelines import common
-from training_kb.pipelines import ticket as ticket_pipeline
 from training_kb.pipelines.common import (
     Deps,
     build_deps,
@@ -362,8 +361,13 @@ def test_failure_inside_a_task_is_recorded_and_reraised(local_deps: Deps) -> Non
 
 @pytest.fixture
 def wired(local_deps: Deps, monkeypatch: pytest.MonkeyPatch) -> Deps:
-    """把 `ticket_analysis_handler` 的模組層相依換成本機替身，不連 AWS。"""
-    monkeypatch.setattr(ticket_pipeline, "_DEPS", local_deps)
+    """把 `ticket_analysis_handler` 的相依換成本機替身，不連 AWS。
+
+    修正波（final review A#4／B#3）把容器層級的快取從三個 pipeline 模組搬進
+    `common.deps_for`，接線點因此是 `common._DEPS_BY_PIPELINE` 的一格；
+    `monkeypatch.setitem` 會在測試結束時還原。
+    """
+    monkeypatch.setitem(common._DEPS_BY_PIPELINE, "ticket-analysis", local_deps)
     monkeypatch.delenv("TKB_FAULT_TASK", raising=False)
     monkeypatch.delenv("TKB_ENV", raising=False)
     return local_deps

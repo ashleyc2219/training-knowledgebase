@@ -613,9 +613,12 @@ def test_handler_rejects_unknown_task() -> None:
 def test_handler_runs_exactly_one_task(review_deps: ReviewWorld,
                                        monkeypatch: pytest.MonkeyPatch) -> None:
     """Given 雲端逐個 Task 呼叫，Then handler 只跑 `event["task"]` 那一個，不跑整條序列。"""
-    from training_kb.pipelines import feedback as feedback_module
+    from training_kb.pipelines import common as pipelines_common
 
-    monkeypatch.setattr(feedback_module, "_DEPS", review_deps.deps)
+    # 修正波：相依快取搬到 `common.deps_for`（final review A#4／B#3），
+    # 測試的接線點也跟著換成那張表的一格。
+    monkeypatch.setitem(pipelines_common._DEPS_BY_PIPELINE, "feedback-review",
+                        review_deps.deps)
     state = feedback_review_handler({"pipeline": "feedback-review", "task": "list_targets",
                                      "state": {"mode": "formal"}}, None)
     assert state["target_version_ids"] == ["b@v1", "c@v1", "d@v1"]

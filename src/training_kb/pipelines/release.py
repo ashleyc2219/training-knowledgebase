@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from training_kb.analytics.status_writer import load_validated_at
 from training_kb.clock import now_utc, to_iso
-from training_kb.config import Thresholds, load_settings
+from training_kb.config import Thresholds
 from training_kb.content import (
     VersionPlan,
     allocate_version,
@@ -56,7 +56,7 @@ from training_kb.pipelines.common import (
     Deps,
     JSONValue,
     TaskFn,
-    build_deps,
+    deps_for,
     run_sequence,
     task_name,
 )
@@ -990,8 +990,9 @@ def run_release_update(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSO
 _TASK_BY_NAME: dict[str, TaskFn] = {task_name(task): task for task in RELEASE_UPDATE_TASKS}
 """ASL `Parameters.task` -> Task 函式；名稱由 `task_name` 導出，不另打一份字串表。"""
 
-_DEPS: Deps | None = None
-"""Lambda 容器層級的相依快取：同一個容器只組一次 boto3 client 與 `BedrockWriter`。"""
+# 相依快取由 `common.deps_for(...)` 一手持有（修正波：final review A#4／B#3）——
+# 分派層 `pipeline_task_handler` 要用同一份 `Deps` 才記得了 ledger，所以本模組不再
+# 自己 `global _DEPS`。
 
 
 def release_update_handler(event: dict[str, Any], context: object) -> dict[str, JSONValue]:
@@ -1001,11 +1002,8 @@ def release_update_handler(event: dict[str, Any], context: object) -> dict[str, 
     抓到（設計 §14.2）。相依在第一次 invoke 時才組（模組 import 時不碰網路），之後同一個
     容器沿用；環境變數類的執行期開關**不跟著快取**（見 `common.maybe_fail_task`）。
     """
-    global _DEPS
     task = _TASK_BY_NAME.get(str(event.get("task")))
     if task is None:
         raise PermanentError(f"release-update 沒有名為 {event.get('task')!r} 的 task")
-    if _DEPS is None:
-        _DEPS = build_deps(load_settings())
     state = event.get("state")
-    return task(dict(state) if isinstance(state, dict) else {}, _DEPS)
+    return task(dict(state) if isinstance(state, dict) else {}, deps_for("release-update"))

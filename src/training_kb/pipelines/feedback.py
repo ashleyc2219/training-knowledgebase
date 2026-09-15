@@ -8,7 +8,6 @@ controller 2026-09-14 預建空殼：讓同一波次的 Phase 只用 Edit 追加
 
 import hashlib
 import json
-import os
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -18,7 +17,7 @@ from typing import Any, Literal
 from training_kb.analytics.ratings import average_rating
 from training_kb.analytics.status_writer import load_validated_at
 from training_kb.clock import parse_iso, to_iso
-from training_kb.config import Thresholds, load_settings
+from training_kb.config import Thresholds
 from training_kb.content import (
     allocate_version,
     create_version,
@@ -52,7 +51,7 @@ from training_kb.pipelines.common import (
     JSONValue,
     PipelineName,
     TaskFn,
-    build_deps,
+    deps_for,
     run_sequence,
     task_name,
 )
@@ -1095,8 +1094,9 @@ FEEDBACK_REVIEW_TASKS: tuple[TaskFn, ...] = (task_list_targets, task_evaluate_ta
 _TASK_BY_NAME: dict[str, TaskFn] = {task_name(task): task for task in FEEDBACK_REVIEW_TASKS}
 """ASL `Parameters.task` -> Task 函式；名稱由 `task_name` 導出，不另打一份字串表。"""
 
-_DEPS: Deps | None = None
-"""Lambda 容器層級的相依快取：同一個容器只組一次 boto3 client 與 `BedrockWriter`。"""
+# 相依快取由 `common.deps_for(...)` 一手持有（修正波：final review A#4／B#3）——
+# 分派層 `pipeline_task_handler` 要用同一份 `Deps` 才記得了 ledger，所以本模組不再
+# 自己 `global _DEPS`。
 
 
 def run_feedback_review(state: dict[str, JSONValue], deps: Deps) -> dict[str, JSONValue]:
@@ -1117,11 +1117,9 @@ def feedback_review_handler(event: dict[str, Any], context: object) -> dict[str,
     不 try／except：`TransientError` 要讓 ASL 的 Retry 抓到，`PermanentError` 要讓 Catch
     抓到（設計 §14.2）。相依在第一次 invoke 時才組，之後同一個容器沿用。
     """
-    global _DEPS
     task = _TASK_BY_NAME.get(str(event.get("task")))
     if task is None:
         raise PermanentError(f"feedback-review 沒有名為 {event.get('task')!r} 的 task")
-    if _DEPS is None:
-        _DEPS = build_deps(load_settings(os.environ))
     state = event.get("state")
-    return task(dict(state) if isinstance(state, dict) else {}, _DEPS)
+    return task(dict(state) if isinstance(state, dict) else {},
+                deps_for(FEEDBACK_REVIEW_PIPELINE))

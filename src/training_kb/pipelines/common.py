@@ -6,6 +6,7 @@
 讓 Step Functions 的 `Catch` 導向 `PipelineFailed`，整次執行不建版、不發布。
 """
 
+import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ import boto3
 
 from training_kb import faults
 from training_kb.clock import now_utc
-from training_kb.config import Settings
+from training_kb.config import Settings, load_settings
 from training_kb.errors import PermanentError, TransientError
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import Repository
@@ -41,6 +42,8 @@ TaskFn = Callable[[dict[str, JSONValue], "Deps"], dict[str, JSONValue]]
 
 PIPELINE_NAMES: tuple[str, ...] = get_args(PipelineName)
 """`PipelineName` 的三個值；白名單由型別導出，不另外手打一份字串清單。"""
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -143,11 +146,30 @@ def maybe_fail_task(pipeline: str, task: str, env: Mapping[str, str] | None = No
 
     每次 invoke 都重讀環境變數，**不做模組層快取**：雲端是用
     `aws lambda update-function-configuration` 在兩次執行之間開關它的。
+
+    正式環境的判斷走 `faults.is_production`（修正波：final review C#3）——原本這裡是
+    `== faults.PRODUCTION` 的精確比對，`TKB_ENV=" Prod"` 會漏擋，而同一支檔的
+    `faults.active_fault` 早就做了 `.strip().lower()`，兩個開關對「什麼是正式環境」
+    必須是同一個答案。
+
+    **打錯的 `TKB_FAULT_TASK` 一律 `PermanentError`**（同一個修正波）：靜靜當成「沒有注入」
+    會讓一次復原演練白跑，事後也看不出是開關沒生效還是流程真的沒失敗——與
+    `faults.active_fault` 對打錯切點名的處理一致。可以檢查的是**形狀**
+    （恰好一個 `:`、兩邊都非空）與 pipeline 名稱在 `PIPELINE_NAMES` 內；task 名稱屬於
+    各 pipeline 模組的 `_TASK_BY_NAME`，本模組不 import 它們（會循環），所以不在這裡驗。
     """
     values: Mapping[str, str] = os.environ if env is None else env
-    if values.get(faults.ENV_NAME_ENV) == faults.PRODUCTION:
+    if faults.is_production(values):
         return
-    if values.get(FAULT_TASK_ENV, "") == f"{pipeline}:{task}":
+    wanted = values.get(FAULT_TASK_ENV, "")
+    if not wanted:
+        return
+    if wanted.count(":") != 1 or not all(part for part in wanted.split(":")):
+        raise PermanentError(f"{FAULT_TASK_ENV} 不是 <pipeline>:<task> 的形狀：{wanted!r}")
+    target_pipeline, _, target_task = wanted.partition(":")
+    if target_pipeline not in PIPELINE_NAMES:
+        raise PermanentError(f"{FAULT_TASK_ENV} 指到未知的 pipeline：{target_pipeline!r}")
+    if wanted == f"{pipeline}:{task}":
         raise TransientError(f"注入 Task 故障：{pipeline}:{task}")
 
 
@@ -172,30 +194,101 @@ def build_deps(settings: Settings) -> Deps:
                 repository=repository, writer=writer, settings=settings)
 
 
+_DEPS_BY_PIPELINE: dict[str, Deps] = {}
+"""三條 pipeline 的容器層級相依快取；`deps_for` 是**唯一**的讀寫入口。
+
+原本三個 pipeline 模組各自 `global _DEPS`，`pipeline_task_handler` 因此拿不到
+`OperationCoordinator`——雲端逐 Task 失敗時沒有人呼叫 `operations.fail(...)`，`OPS#`
+永遠停在 `accepted`（final review A#4／B#3）。把快取收進本模組之後，分派層與三個
+`*_handler` 看到的是**同一個** `Deps`，記帳與執行不會用到兩份相依。
+"""
+
+
+def deps_for(pipeline: str) -> Deps:
+    """這條 pipeline 的相依；第一次呼叫才組（模組 import 時不碰網路），之後同容器沿用。
+
+    三條 pipeline 統一走 `load_settings(os.environ)`（修正波：原本 feedback 帶
+    `os.environ`、ticket／release 不帶，兩者等價但讀起來像有差別）。
+
+    **不吞 `build_deps` 的失敗**：組不起來就代表這個執行環境根本沒有 coordinator，
+    例外原樣往外丟給 ASL 的 Catch，不在這裡換成別的型別。
+    """
+    deps = _DEPS_BY_PIPELINE.get(pipeline)
+    if deps is None:
+        deps = build_deps(load_settings(os.environ))
+        _DEPS_BY_PIPELINE[pipeline] = deps
+    return deps
+
+
+def _state_operation_id(event: Mapping[str, Any]) -> str | None:
+    """`event["state"]["operation_id"]`；缺了或型別不對就回 `None`（代表不記帳）。
+
+    ASL 每個 Task 都是 `state.$: $`＋Task 回傳 `{**state, ...}`，所以第一個 Task
+    （`ListTargets`／`LocateFeature`／`EnsureEmbedding`）之後這個欄位一定在。
+    """
+    state = event.get("state")
+    operation_id = state.get("operation_id") if isinstance(state, Mapping) else None
+    return operation_id if isinstance(operation_id, str) and operation_id else None
+
+
+def _record_task_failure(pipeline: str, event: Mapping[str, Any], error: Exception) -> None:
+    """把一個 Task 的失敗記進 ledger；記不成就只留一行 log，**原例外照樣往外丟**。
+
+    只用**已經組好**的相依（`_DEPS_BY_PIPELINE`）：`build_deps` 自己失敗時根本沒有
+    coordinator 可寫，硬組一份只會把原例外換成「缺 TKB_AWS_REGION」之類看不出原因的
+    第二個錯誤（final review C 的 soundness caveat）。
+
+    `except Exception` 之後**不再往外丟**是刻意的：ASL 的 `Retry`／`Catch` 比對的是
+    Lambda runtime 回報的**類別名字串**，把 `TransientError` 換成記帳時冒出來的
+    `CoordinationError` 會讓第一條 retrier 比不中，等於用記帳改壞了重試語意。
+    """
+    operation_id = _state_operation_id(event)
+    deps = _DEPS_BY_PIPELINE.get(pipeline)
+    if operation_id is None or deps is None:
+        return
+    try:
+        deps.operations.fail(operation_id, str(error), isinstance(error, TransientError),
+                             now=deps.now())
+    except Exception as failure:      # noqa: BLE001 - 記帳失敗不得改寫往外丟的 errorType
+        _log.warning("operations.fail 失敗（%s）：%s: %s",
+                     operation_id, type(failure).__name__, failure)
+
+
 def pipeline_task_handler(event: dict[str, Any], context: object) -> dict[str, JSONValue]:
     """共用 Lambda `training-kb-pipeline-task` 的唯一入口（00A D-24）。
 
     依 `event["pipeline"]` 找到那條 pipeline 的直接入口，**只跑 `event["task"]` 那一個
     Task**：整條序列由 Step Functions 的 ASL 串，不是由這裡的迴圈串。
 
-    這一層與 `*_handler` 都**不 try／except**：`TransientError` 要讓 ASL 的 Retry 抓到，
-    `PermanentError` 要讓 Catch 抓到。三種「接不起來」的情況一律轉 `PermanentError`，
-    因為它們都是部署或程式錯誤，重試不會變好：pipeline 名稱不在白名單、模組不存在、
-    模組在但 handler 屬性還沒寫（controller 預建的空殼就是這一種，丟 `AttributeError`
-    的話 `errorType` 會變成看不出原因的名字）。
+    三種「接不起來」的情況一律轉 `PermanentError`，因為它們都是部署或程式錯誤，重試不會
+    變好：pipeline 名稱不在白名單、模組不存在、模組在但 handler 屬性還沒寫（controller
+    預建的空殼就是這一種，丟 `AttributeError` 的話 `errorType` 會變成看不出原因的名字）。
+
+    **失敗一律先記 ledger 再原樣往外丟**（修正波：final review A#4／B#3）：這是
+    `run_sequence` 早就有的行為，雲端逐 Task 分派卻漏了，所以同一次失敗在本機看得到
+    `OPS#` 轉 `failed`、在雲端卻永遠停在 `accepted`。記錄 ≠ 攔截：`raise` 沒有引數，
+    往外丟的是**原例外**，`TransientError` 仍然走 ASL 的 Retry、`PermanentError` 仍然
+    走 Catch，`*_handler` 那一層照舊不 try／except。
+
+    `maybe_fail_task` 也移進被包住的區域：注入的故障與真實故障在 ledger 上要同形狀，
+    否則一次演練會留下「執行失敗但 ledger 乾淨」的假象。
     """
     pipeline = str(event.get("pipeline"))
     target = _PIPELINE_HANDLERS.get(pipeline)
     if target is None:
         raise PermanentError(f"未知的 pipeline：{event.get('pipeline')!r}")
-    maybe_fail_task(pipeline, str(event.get("task")))
-    module_name, _, attribute = target.partition(":")
     try:
-        module = import_module(module_name)
-    except ModuleNotFoundError as error:      # 模組整支不存在
-        raise PermanentError(f"{module_name} 尚未建立") from error
-    handler = getattr(module, attribute, None)
-    if handler is None:                       # 模組在、handler 還沒寫（P48／P52 未實作）
-        raise PermanentError(f"{module_name} 還沒有 {attribute}")
-    result: dict[str, JSONValue] = handler(event, context)
+        maybe_fail_task(pipeline, str(event.get("task")))
+        module_name, _, attribute = target.partition(":")
+        try:
+            module = import_module(module_name)
+        except ModuleNotFoundError as error:      # 模組整支不存在
+            raise PermanentError(f"{module_name} 尚未建立") from error
+        handler = getattr(module, attribute, None)
+        if handler is None:                       # 模組在、handler 還沒寫
+            raise PermanentError(f"{module_name} 還沒有 {attribute}")
+        result: dict[str, JSONValue] = handler(event, context)
+    except Exception as error:                    # 記錄後原樣往外丟，重試交給 ASL
+        _record_task_failure(pipeline, event, error)
+        raise
     return result
