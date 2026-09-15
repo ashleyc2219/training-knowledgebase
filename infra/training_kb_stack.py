@@ -23,6 +23,7 @@ from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_scheduler as scheduler
 from aws_cdk import aws_stepfunctions as sfn
 from constructs import Construct
 
@@ -187,6 +188,30 @@ RELEASE_ASL_PATH = PROJECT_ROOT / ASL_LOCAL_PATH.format(pipeline="release-update
 # ---- Phase 52 結束 ----
 
 
+# ---- Phase 48 ----（D-23、D-49：第三條 state machine 共用同一支 Lambda，不建第三個函式）
+
+REVIEW_MACHINE = STATE_MACHINE_NAMES["feedback-review"]
+REVIEW_ASL_PATH = PROJECT_ROOT / ASL_LOCAL_PATH.format(pipeline="feedback-review", number=1)
+"""`training-kb-feedback-review` 的名稱與定義檔；名稱唯一來源仍是 `STATE_MACHINE_NAMES`。"""
+
+REVIEW_SCHEDULE_NAME = f"{REVIEW_MACHINE}-daily"
+REVIEW_SCHEDULE_EXPRESSION = "cron(30 0 * * ? *)"
+REVIEW_SCHEDULE_TIMEZONE = "UTC"
+"""每日 UTC 00:30（設計 §14.3、`REV` Rule 1）。
+
+EventBridge Scheduler 的 cron 是**六個欄位**（分 時 日 月 週 年），與 EventBridge Rules 的
+五欄位寫法不同；時區明寫 `UTC`，不依賴帳號預設值。
+"""
+
+REVIEW_SCHEDULE_INPUT = '{"mode": "formal"}'
+"""排程的固定 input（00A §7：input 只有 `mode`，`project_id` 可選，**沒有** `scheduled_for`）。
+
+Demo 手動觸發用**同一條** state machine 改傳 `{"mode": "demo"}`，不另建第四條 pipeline。
+"""
+
+# ---- Phase 48 結束 ----
+
+
 class TrainingKbStack(Stack):
     """流程 stack；`self.deps_layer` 供 Phase 42／48／52／54 沿用（不各自再做 layer）。"""
 
@@ -278,16 +303,34 @@ class TrainingKbStack(Stack):
         #
         # 不開 Function URL（維護者用 boto3 invoke）、不給 `bedrock:InvokeModel`
         # （本 Phase 零模型呼叫）、不給 `dynamodb:DeleteItem`、不給 GSI。
-        # `states:StartExecution` 見 `_import_machine_arns`：**用名稱組 ARN**，一次授權
-        # `ticket-analysis` 與 P52 之後才建立的 `release-update`（controller 2026-09-14）。
+        # `states:*` 見 `_import_machine_arns`／`_import_execution_arns`：**用名稱組 ARN**，
+        # 一次授權 `ticket-analysis` 與 P52 之後才建立的 `release-update`（controller
+        # 2026-09-14）。`DescribeExecution` 是 `BotoPipelineStarter._reuse` 在
+        # `ExecutionAlreadyExists` 時要查既有執行用的，範圍只到那兩條的 execution ARN。
         self.import_function = self._function(
             "ImportFunction", IMPORT_FUNCTION, IMPORT_HANDLER, IMPORT_TIMEOUT, base_env)
         self._grant_data(self.import_function, table, bucket, prefixes=IMPORT_PREFIXES,
                          actions=IMPORT_DDB_ACTIONS, with_index=False)
         self.import_function.add_to_role_policy(iam.PolicyStatement(
             actions=["states:StartExecution"], resources=self._import_machine_arns()))
+        self.import_function.add_to_role_policy(iam.PolicyStatement(
+            actions=["states:DescribeExecution"], resources=self._import_execution_arns()))
         CfnOutput(self, "ImportFunctionName", value=self.import_function.function_name)
         # ---- Phase 42 結束 ----
+
+        # ---- Phase 43 ----（匯入 Lambda 開始分類留言；**只加這一條權限，不新增環境變數**）
+        #
+        # Phase 43 的 `classify_feedback_category` 在「未勾選類別且留言非空」時會呼叫一次
+        # `Writer.generate_json`，所以 P42 建的這支 Lambda 需要 `bedrock:InvokeModel`；
+        # 沒有它，雲端第一次分類就是 `AccessDeniedException`。寫法與範圍與 P41 給
+        # `task_function`／`webhook_function` 的那一條完全相同：**只列已核定用途的模型 ARN**，
+        # 不用萬用字元。O5 BLOCKED 期間已核定的只有 embedding 模型，生成模型的 ARN 要等
+        # `TKB_GENERATION_MODEL_ID` 有實測值之後才加（00A §3.5，不得填猜測值）。
+        self.import_function.add_to_role_policy(iam.PolicyStatement(
+            actions=["bedrock:InvokeModel"],
+            resources=[f"arn:aws:bedrock:{self.region}::foundation-model/"
+                       f"{DEFAULT_EMBEDDING_MODEL_ID}"]))
+        # ---- Phase 43 結束 ----
 
         # ---- Phase 52 ----（D-23、D-49；只用既有的 `self.task_function`，不建第二個 Lambda）
         #
@@ -325,6 +368,54 @@ class TrainingKbStack(Stack):
         CfnOutput(self, "ReleaseUpdateLogGroup",
                   value=self.release_update_logs.log_group_name)
         # ---- Phase 52 結束 ----
+
+        # ---- Phase 48 ----（D-23、D-49；只用既有的 `self.task_function`，不建第三個 Lambda）
+        #
+        # 五個 Task 的 `Resource` 都是同一支共用函式的**直接 ARN**（沒有
+        # `arn:aws:states:::lambda:invoke` 信封，所以 ASL 裡也沒有 `Payload` 外層），
+        # 由 `Parameters.pipeline`／`Parameters.task` 分派到
+        # `training_kb.pipelines.feedback:feedback_review_handler`。
+        #
+        # **不給 webhook `grant_start_execution`**：`feedback-review` 沒有外部事件入口，
+        # 它只由 EventBridge Scheduler（或維護者手動）啟動，所以也不需要 webhook 的
+        # `DescribeExecution`（P32 的續跑判斷只認 `ticket`／`release` 兩種 canonical 事件）。
+        self.feedback_review_logs = logs.LogGroup(
+            self, "FeedbackReviewLogs",
+            log_group_name=f"/aws/vendedlogs/states/{REVIEW_MACHINE}",
+            retention=logs.RetentionDays.THREE_MONTHS, removal_policy=RemovalPolicy.DESTROY)
+        self.feedback_review = sfn.StateMachine(
+            self, "FeedbackReview", state_machine_name=REVIEW_MACHINE,
+            state_machine_type=sfn.StateMachineType.STANDARD,
+            definition_body=sfn.DefinitionBody.from_file(str(REVIEW_ASL_PATH)),
+            definition_substitutions={
+                "PipelineTaskFunctionArn": self.task_function.function_arn},
+            logs=sfn.LogOptions(destination=self.feedback_review_logs,
+                                level=sfn.LogLevel.ALL),
+            timeout=Duration.hours(1))
+        self.task_function.grant_invoke(self.feedback_review)
+        # Scheduler 需要自己的角色（它不是 Lambda，沒有執行角色可借），而且**只給**這一條
+        # state machine 的 `states:StartExecution`：`grant_start_execution` 產出的資源就是
+        # 這條 machine 的 ARN，不是 `*`。
+        self.review_scheduler_role = iam.Role(
+            self, "ReviewSchedulerRole",
+            assumed_by=iam.ServicePrincipal("scheduler.amazonaws.com"))
+        self.feedback_review.grant_start_execution(self.review_scheduler_role)
+        # `flexible_time_window` 必填；設 `OFF` 才準點觸發（開著會在窗口內隨機延後）。
+        self.daily_review = scheduler.CfnSchedule(
+            self, "DailyFeedbackReview", name=REVIEW_SCHEDULE_NAME,
+            schedule_expression=REVIEW_SCHEDULE_EXPRESSION,
+            schedule_expression_timezone=REVIEW_SCHEDULE_TIMEZONE,
+            flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(mode="OFF"),
+            target=scheduler.CfnSchedule.TargetProperty(
+                arn=self.feedback_review.state_machine_arn,
+                role_arn=self.review_scheduler_role.role_arn,
+                input=REVIEW_SCHEDULE_INPUT))
+        CfnOutput(self, "FeedbackReviewStateMachineArn",
+                  value=self.feedback_review.state_machine_arn)
+        CfnOutput(self, "FeedbackReviewLogGroup",
+                  value=self.feedback_review_logs.log_group_name)
+        CfnOutput(self, "FeedbackReviewScheduleName", value=REVIEW_SCHEDULE_NAME)
+        # ---- Phase 48 結束 ----
 
     # --- 私有 helper -----------------------------------------------------------
 
@@ -407,6 +498,20 @@ class TrainingKbStack(Stack):
         """
         return [self.format_arn(service="states", resource="stateMachine",
                                 resource_name=STATE_MACHINE_NAMES[pipeline],
+                                arn_format=ArnFormat.COLON_RESOURCE_NAME)
+                for pipeline in IMPORT_MACHINES]
+
+    def _import_execution_arns(self) -> list[str]:
+        """同兩條 pipeline 的 **execution** ARN（`<machine>:*`）。
+
+        `ticket`／`release` 分支走 `normalize_then_accept` -> `BotoPipelineStarter.start`，
+        它在 `ExecutionAlreadyExists` 時會 `DescribeExecution` 把既有執行撿回來（續跑），
+        沒有這條授權那一路會變成 `AccessDeniedException`。形狀與 P41 的
+        `_grant_execution_lookup` 相同；**不加** `sts:GetCallerIdentity`——匯入這支的
+        ARN 推導拿得到帳號（`_build_wiring` 會用，但那是 webhook 那支的路徑）。
+        """
+        return [self.format_arn(service="states", resource="execution",
+                                resource_name=f"{STATE_MACHINE_NAMES[pipeline]}:*",
                                 arn_format=ArnFormat.COLON_RESOURCE_NAME)
                 for pipeline in IMPORT_MACHINES]
     # ---- Phase 42 結束 ----

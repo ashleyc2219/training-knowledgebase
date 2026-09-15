@@ -31,7 +31,11 @@ from training_kb.errors import (
     PermanentError,
     TransientError,
 )
-from training_kb.ingress import DEFAULT_FEEDBACK_CATEGORIES, operation_id_for
+from training_kb.ingress import (
+    DEFAULT_FEEDBACK_CATEGORIES,
+    approved_categories,
+    operation_id_for,
+)
 from training_kb.keys import operation_ref, rule_pk
 from training_kb.models import (
     AuthoringRule,
@@ -176,9 +180,9 @@ def select_weak_targets(*, repository: Repository, mode: ReviewMode, now: dateti
     與操作 id 就不再是決定性的。
     """
     limits = thresholds or Thresholds()
-    # P43 併入後改成 `approved_categories(repository)`（00A §6.9）：那支會讀
-    # `CONFIG#feedback_categories`，讀不到時回的就是這個初始兩類的常數。
-    approved = DEFAULT_FEEDBACK_CATEGORIES
+    # Phase 43 已併入：讀 `CONFIG#feedback_categories`，讀不到或形狀不合法時，
+    # `approved_categories` 自己退回 `DEFAULT_FEEDBACK_CATEGORIES`（初始兩類）。
+    approved = approved_categories(repository)
     targets: list[WeakTarget] = []
     for item in repository.scan_entity("TUTORIAL", consistent=True):  # meta_only 預設 True
         tutorial = item_to_model(item, Tutorial)

@@ -36,7 +36,7 @@ from training_kb.ingress import (
     validate_view,
 )
 from training_kb.keys import feedback_pk, parse_pk, version_pk, view_pk
-from training_kb.models import Tutorial, TutorialStatus, TutorialVersion
+from training_kb.models import Feedback, Tutorial, TutorialStatus, TutorialVersion
 from training_kb.operations import (
     Acceptance,
     AcceptOperation,
@@ -480,3 +480,168 @@ def test_the_ticket_branch_needs_its_own_source_fields(wired_handler: Repository
 def test_a_batch_of_zero_items_is_accepted(wired_handler: Repository) -> None:
     """Given 空的 `items`／When 呼叫 handler／Then 回空結果，不是錯誤（維護者匯出空檔）。"""
     assert import_.handler({"kind": "feedback", "items": []}, None)["results"] == []
+
+
+# --- Phase 43：匯入時判定並保存回饋類別 ------------------------------------------
+#
+# **O5 BLOCKED**：這裡用本檔自己的 `FakeWriter`，綠燈只代表**決策邏輯**與**呼叫次數**
+# 正確，**不代表** Bedrock 可用。`calls` 刻意用 **dict** 記錄，形狀與
+# `tests/unit/conftest.py::RecordingWriter` 相容（整合測試看不到那支 conftest，00A 要求
+# 兩份形狀一致，否則呼叫次數的斷言會分岔）。
+
+CLASSIFIED: dict[str, Any] = {**FEEDBACK, "id": "f_50", "rating": 2,
+                              "comment": "第三步的按鈕在哪一頁？"}
+"""未勾選類別、留言非空——決策表第 4 列，唯一會呼叫模型的那一列。"""
+
+
+class FakeWriter:
+    """本檔的假 `Writer`：只實作 `generate_json`，`calls` 與 `RecordingWriter` 同形（dict）。"""
+
+    def __init__(self, reply: Mapping[str, object]) -> None:
+        self.reply = dict(reply)
+        self.calls: list[dict[str, Any]] = []
+        self.request_attempts = 0
+
+    def generate_json(self, system: str, user: str, schema: Mapping[str, Any], *,
+                      operation_id: str, node: str) -> dict[str, Any]:
+        self.request_attempts += 1
+        self.calls.append({"kind": "generation", "operation_id": operation_id, "node": node,
+                           "system": system, "user": user, "schema": dict(schema)})
+        return dict(self.reply)
+
+
+def saved_feedback(repository: Repository, feedback_id: str) -> Feedback:
+    """讀回剛寫進去的那一筆；讀不到就讓測試當場失敗，不要回 `None` 往下傳。"""
+    stored = repository.get_meta(feedback_pk(feedback_id), Feedback)
+    assert stored is not None, feedback_id
+    return stored
+
+
+def test_import_saves_settled_category_and_resend_calls_no_model(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 未勾選但有留言／When 匯入兩次／Then 存模型值，第二次 `duplicate` 且仍只呼叫一次。
+
+    分類接在**永久去重之後**：放到 `accept` 之前的話，每次重送都會多一次 Bedrock 呼叫
+    （`COL` Rule 6 的停止點）。
+    """
+    writer = FakeWriter({"category": "找不到按鈕"})
+    first = import_feedback(CLASSIFIED, repository=active_repo, operations=operations,
+                            now=NOW, writer=writer)
+    again = import_feedback(CLASSIFIED, repository=active_repo, operations=operations,
+                            now=NOW, writer=writer)
+    assert (first.status, again.status) == ("saved", "duplicate")
+    assert saved_feedback(active_repo, "f_50").category == "找不到按鈕"
+    assert writer.request_attempts == 1
+    assert writer.calls[0]["operation_id"] == operation_id_for("feedback", "f_50")
+    assert writer.calls[0]["node"] == "classify_comment"
+
+
+def test_a_checked_category_is_saved_verbatim_without_the_model(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 勾選了核定類別／When 匯入／Then 原樣保存，模型呼叫數 0（`COL` Rule 4）。"""
+    writer = FakeWriter({"category": "缺少資訊"})
+    payload = {**CLASSIFIED, "id": "f_12", "category": "找不到按鈕"}
+    result = import_feedback(payload, repository=active_repo, operations=operations,
+                             now=NOW, writer=writer)
+    assert result.status == "saved"
+    assert saved_feedback(active_repo, "f_12").category == "找不到按鈕"
+    assert writer.request_attempts == 0
+
+
+def test_an_unapproved_checked_category_is_stored_as_pending(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 勾選「介面太醜」／When 匯入／Then 存 `待分類`，不呼叫模型、不擴充核定表。"""
+    writer = FakeWriter({"category": "找不到按鈕"})
+    payload = {**CLASSIFIED, "id": "f_52", "category": "介面太醜"}
+    import_feedback(payload, repository=active_repo, operations=operations, now=NOW,
+                    writer=writer)
+    assert saved_feedback(active_repo, "f_52").category == "待分類"
+    assert writer.request_attempts == 0
+    assert active_repo.get_meta_item("CONFIG#feedback_categories") is None
+
+
+def test_an_unapproved_model_answer_is_stored_as_pending(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 模型回「操作太慢」／When 匯入／Then 存 `待分類`，而且沒有第二次 request。"""
+    writer = FakeWriter({"category": "操作太慢"})
+    import_feedback({**CLASSIFIED, "id": "f_53"}, repository=active_repo,
+                    operations=operations, now=NOW, writer=writer)
+    assert saved_feedback(active_repo, "f_53").category == "待分類"
+    assert writer.request_attempts == 1
+
+
+@pytest.mark.parametrize("comment", [None, "   "])
+def test_a_rating_only_feedback_keeps_no_category_and_calls_no_model(
+        active_repo: Repository, operations: OperationCoordinator,
+        comment: str | None) -> None:
+    """Given 只有評分（留言缺或全空白）／When 匯入／Then `category is None`，呼叫數 0。"""
+    writer = FakeWriter({"category": "找不到按鈕"})
+    payload = {**CLASSIFIED, "id": "f_51", "rating": 5, "comment": comment}
+    result = import_feedback(payload, repository=active_repo, operations=operations,
+                             now=NOW, writer=writer)
+    assert result.status == "saved"
+    assert saved_feedback(active_repo, "f_51").category is None
+    assert writer.request_attempts == 0
+
+
+def test_the_configured_category_table_is_used_and_never_written(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 維護者匯入了三類／When 匯入一筆留言／Then 用設定值，且設定 item 逐字不變。"""
+    active_repo.put_meta_item("CONFIG#feedback_categories",
+                              {"categories": ["找不到按鈕", "缺少資訊", "步驟順序錯誤"]})
+    before = active_repo.get_meta_item("CONFIG#feedback_categories")
+    writer = FakeWriter({"category": "步驟順序錯誤"})
+    import_feedback({**CLASSIFIED, "id": "f_54"}, repository=active_repo,
+                    operations=operations, now=NOW, writer=writer)
+    assert saved_feedback(active_repo, "f_54").category == "步驟順序錯誤"
+    assert "步驟順序錯誤" in writer.calls[0]["user"]
+    assert active_repo.get_meta_item("CONFIG#feedback_categories") == before
+
+
+def test_a_resumed_feedback_is_classified_once_because_nothing_was_saved(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 操作已接受但 FEEDBACK item 還沒寫／When 重送／Then 補寫時分類**一次**（D-45）。
+
+    模型輸出從未保存過，所以續跑重算一次符合設計 §14.2「已保存的輸出才重用」。
+    """
+    operations.accept(AcceptOperation(
+        operation_id=operation_id_for("feedback", "f_50"), kind="feedback",
+        canonical_id="f_50", project_id=DEFAULT_PROJECT_ID, now=NOW))
+    writer = FakeWriter({"category": "缺少資訊"})
+    resumed = import_feedback(CLASSIFIED, repository=active_repo, operations=operations,
+                              now=NOW, writer=writer)
+    assert resumed.status == "saved"
+    assert saved_feedback(active_repo, "f_50").category == "缺少資訊"
+    assert writer.request_attempts == 1
+
+
+def test_without_a_writer_the_import_only_settles_the_checked_value(
+        active_repo: Repository, operations: OperationCoordinator) -> None:
+    """Given 沒有接 writer（P42 單獨執行）／When 匯入／Then 勾選值照收斂、留言不分類。
+
+    `writer=None` **不是** O5 BLOCKED 的替代方案，只是 P42 的既有行為。
+    """
+    import_feedback({**CLASSIFIED, "id": "f_55", "category": "介面太醜"},
+                    repository=active_repo, operations=operations, now=NOW)
+    import_feedback({**CLASSIFIED, "id": "f_56"}, repository=active_repo,
+                    operations=operations, now=NOW)
+    assert saved_feedback(active_repo, "f_55").category == "待分類"
+    assert saved_feedback(active_repo, "f_56").category is None
+
+
+def test_the_handler_hands_its_writer_to_the_feedback_import(
+        active_repo: Repository, operations: OperationCoordinator,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given `Deps.writer` 已接線／When 走 Lambda 入口／Then 留言真的被分類（雲端才會分類）。
+
+    這一條守的是 `_import_one` 有沒有把 `writer` 傳下去：沒傳的話 CDK 上的
+    `bedrock:InvokeModel` 就白加了，雲端的匯入 Lambda 永遠不分類留言。
+    """
+    writer = FakeWriter({"category": "缺少資訊"})
+    monkeypatch.setattr(import_, "_DEPS", Deps(operations=operations, now=lambda: NOW,
+                                               repository=active_repo, writer=writer))
+    body = import_.handler({"kind": "feedback", "items": [CLASSIFIED]}, None)
+    results = body["results"]
+    assert isinstance(results, list) and results[0]["status"] == "saved"
+    assert saved_feedback(active_repo, "f_50").category == "缺少資訊"
+    assert writer.request_attempts == 1

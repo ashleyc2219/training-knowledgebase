@@ -50,6 +50,12 @@ class FakeRepository:
             pk: dict(attrs) for pk, attrs in (items or {}).items()}
         self.reads: list[str] = []
         self.writes: list[str] = []
+        self.tutorials: list[dict[str, Any]] = []
+
+    def scan_entity(self, entity: str, *, meta_only: bool = True,
+                    consistent: bool = False) -> list[dict[str, Any]]:
+        """只給 `select_weak_targets` 的接線測試用；沒有教學可掃就沒有弱教學。"""
+        return list(self.tutorials) if entity == "TUTORIAL" else []
 
     def get_meta_item(self, pk: str) -> dict[str, Any] | None:
         self.reads.append(pk)
@@ -268,3 +274,38 @@ def test_a_checked_category_never_reaches_the_writer(fake_writer: "RecordingWrit
                                       writer=fake_writer,
                                       operation_id=OPERATION) == "找不到按鈕"
     assert fake_writer.calls == [] and fake_writer.request_attempts == 0
+
+
+# --- Task 3 的跨 Phase 接線（controller 2026-09-14 核准的兩處小改）-------------------
+#
+# 這兩條守的是「P44／P54 原本暫用的退路，現在真的接到 Phase 43 的核定表」。匯入路徑本身的
+# 接線（`import_feedback(..., writer=...)`、handler 傳 `_DEPS.writer`）在
+# `tests/integration/test_fixed_import.py` 的 Phase 43 區段。
+
+
+def test_select_weak_targets_now_reads_the_approved_table(
+        configured_repo: FakeRepository) -> None:
+    """Given P44 的弱教學選取／When 執行一次／Then 它去讀了 `CONFIG#feedback_categories`。
+
+    P44 落地時暫用 `DEFAULT_FEEDBACK_CATEGORIES`（程式裡有註解標記），Phase 43 併入後改成
+    `approved_categories(repository)`。沒有教學可掃，所以結果是 `()`；這裡要的證據是那次讀取。
+    """
+    from training_kb.pipelines.feedback import select_weak_targets
+
+    configured_repo.tutorials = []
+    assert select_weak_targets(repository=configured_repo, mode="formal", now=NOW) == ()
+    assert FEEDBACK_CATEGORIES_PK in configured_repo.reads
+
+
+def test_the_analytics_handler_resolves_the_real_approved_table(
+        configured_repo: FakeRepository, empty_repo: FakeRepository) -> None:
+    """Given P54 的 `_approved_categories`／When Phase 43 已落地／Then 拿到核定表而不是空集合。
+
+    那支用 `importlib` 延後解析 `training_kb.ingress.approved_categories`（Phase 43 未落地
+    時退回**空集合**，是看得出來的降級）。本 Phase 落地後它必須拿到真的那一份，否則
+    `negative_feedback_ids` 會少認「類別命中」那一半。這條路徑在 P54 當時沒有測試。
+    """
+    from training_kb.handlers.analytics import _approved_categories
+
+    assert _approved_categories(configured_repo) == frozenset(CONFIGURED)
+    assert _approved_categories(empty_repo) == DEFAULT_FEEDBACK_CATEGORIES

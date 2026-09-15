@@ -670,6 +670,25 @@ def classify_feedback_category(feedback: Feedback, *, approved: frozenset[str],
     return _settle(answer if isinstance(answer, str) else None, approved) or PENDING_CATEGORY
 
 
+def _resolve_category(feedback: Feedback, *, repository: Repository, writer: Writer | None,
+                      operation_id: str) -> Feedback:
+    """`import_feedback` 的接線點：回一個 `category` 已判定好的**新** `Feedback`。
+
+    `Feedback` 是 frozen，所以用 `model_copy(update=...)`——它在 Pydantic v2 **不重跑
+    validator**，把 `category` 設成 `None` 因此不會踩到 `carries_signal`（`validate_feedback`
+    已經保證 `rating` 是 1..5，不變條件本來就成立）。不要改成 `Feedback(**{...})` 重建。
+
+    `writer is None` 走 Phase 42 單獨執行時的行為：只把勾選值收斂，完全不呼叫模型。
+    """
+    approved = approved_categories(repository)
+    if writer is None:
+        category = _settle(feedback.category, approved)
+    else:
+        category = classify_feedback_category(feedback, approved=approved, writer=writer,
+                                              operation_id=operation_id)
+    return feedback.model_copy(update={"category": category})
+
+
 # ---- Phase 42 ----------------------------------------------------------------
 # Feedback／View 的固定匯入（設計 §5、§7.1、§9.1、§9.2）：只有程式判斷的一條路徑，
 # 沒有 adapter 選擇、沒有模型、沒有 Rote。**不建 `RawEvent`、不啟動 Step Functions、
@@ -861,19 +880,39 @@ def _assert_open(tutorial: Tutorial) -> ImportResult | None:
 def _dedupe[MetaT: StrictModel](
         payload: Mapping[str, object], *, kind: OperationKind, canonical_id: str,
         pk: str, model: type[MetaT], repository: Repository,
-        operations: OperationCoordinator, now: datetime) -> tuple[str, bool]:
-    """向操作紀錄登記這一筆匯入，回 `(operation_id, 是不是真的重複)`。
+        operations: OperationCoordinator, now: datetime) -> tuple[str, MetaT | None]:
+    """向操作紀錄登記這一筆匯入，回 `(operation_id, 已經寫好的物件)`。
+
+    第二個值是 `None` 就代表**本次要寫**（第一次，或 ledger 已接受但物件還沒寫成的續跑）；
+    不是 `None` 就是真的重送，而且那個值是**表裡的現況**，不是這次 payload 解出來的物件。
+    重送的收尾動作（補邊、關 operation）一律以表裡的現況為準，免得同一個 ID 被改成指向
+    別的版本時多長出一條邊。
 
     **`accept` 回 duplicate 不等於物件已經存在**（00A D-45、設計 §14.1／§14.2）：上一次
-    可能在寫 item 之前就中斷了。所以再讀一次目標物件，兩個條件同時成立才算重複；
-    只有 ledger 有紀錄、物件卻不在，是**續跑**，本次要補寫，不是重複處理。
+    可能在寫 item 之前就中斷了。所以兩個條件都要成立才算重送；只有 ledger 有紀錄、
+    物件卻不在，是**續跑**，本次要補寫，不是重複處理。
     """
     operation_id = operation_id_for(kind, canonical_id)
     acceptance = operations.accept(AcceptOperation(
         operation_id=operation_id, kind=kind, canonical_id=canonical_id,
         project_id=_project_id(payload), now=now))
-    written = repository.get_meta(pk, model) is not None
-    return operation_id, acceptance.status == "duplicate" and written
+    if acceptance.status != "duplicate":
+        return operation_id, None
+    return operation_id, repository.get_meta(pk, model)
+
+
+def _complete_feedback(feedback: Feedback, *, repository: Repository,
+                       operations: OperationCoordinator, operation_id: str,
+                       now: datetime) -> None:
+    """寫 metadata **之後**的兩個收尾動作；第一次與重送走的是同一條，所以必須冪等。
+
+    `put_edge` 的鍵固定是 `FEEDBACK#<id>` ＋ `REFERS_TO#VERSION#<version_id>`，重寫一次
+    只是同鍵覆寫，不會多一筆；`complete` 把 operation 設成 `done`，已經 done 再設一次
+    仍然 done。版本一律取自傳進來的 `feedback`（重送時是表裡的現況）。
+    """
+    repository.put_edge(feedback_pk(feedback.id), "REFERS_TO",
+                        version_pk(feedback.tutorial_version))
+    operations.complete(operation_id, now=now)
 
 
 def _saved_message(payload: Mapping[str, object], feedback_id: str, ts: datetime) -> str:
@@ -885,16 +924,18 @@ def _saved_message(payload: Mapping[str, object], feedback_id: str, ts: datetime
 
 
 def import_feedback(payload: Mapping[str, object], *, repository: Repository,
-                    operations: OperationCoordinator, now: datetime) -> ImportResult:
-    """固定匯入一筆回饋：欄位 → 版本與退役 → 永久去重 → 寫 metadata 與 `REFERS_TO` 邊。
+                    operations: OperationCoordinator, now: datetime,
+                    writer: Writer | None = None) -> ImportResult:
+    """固定匯入一筆回饋：欄位 → 版本與退役 → 永久去重 → 判定類別 → 寫 metadata 與邊。
 
     **不觸發任何後續**（`ING` Rule 29、`COL` Rule 8）：不啟動 Step Functions、不更新 PROC、
-    不建立教學版本，也不呼叫模型。邊一律指向**提交時指定的那一版**（`COL` Rule 7），
-    不改綁 `Tutorial.current_version`。
+    不建立教學版本。邊一律指向**提交時指定的那一版**（`COL` Rule 7），不改綁
+    `Tutorial.current_version`。
 
-    Phase 43 會在這裡追加一個有預設值的 `writer: Writer | None = None` 做 `category`
-    判定（00A 第 915 列）。參數全是 keyword-only，所以那次追加不會動到任何呼叫端；
-    本 Phase 零模型呼叫，先不宣告那個參數。
+    `writer` 是 Phase 43 追加的**有預設值** keyword（00A 第 915 列），所以 Phase 42 的呼叫端
+    不受影響；`None` 代表「只收斂勾選值、不做留言分類」，那是 Phase 42 單獨執行時的行為，
+    **不是** O5 BLOCKED 的替代方案。分類固定發生在 `_dedupe` **之後**、`put_meta` 之前：
+    放到 `accept` 之前的話每次重送都會多一次 Bedrock 呼叫（`COL` Rule 6）。
     """
     try:
         feedback = validate_feedback(payload, now=now)
@@ -910,14 +951,23 @@ def import_feedback(payload: Mapping[str, object], *, repository: Repository,
     if closed is not None:
         return closed
     pk = feedback_pk(feedback.id)
-    operation_id, duplicated = _dedupe(payload, kind="feedback", canonical_id=feedback.id,
-                                       pk=pk, model=Feedback, repository=repository,
-                                       operations=operations, now=now)
-    if duplicated:
-        return ImportResult("duplicate", feedback.id, _DUPLICATE_FEEDBACK, ())
+    operation_id, existing = _dedupe(payload, kind="feedback", canonical_id=feedback.id,
+                                     pk=pk, model=Feedback, repository=repository,
+                                     operations=operations, now=now)
+    if existing is not None:
+        # **重送要冪等收尾，不能只是短路回 duplicate**（review 修正回合 1 的 Critical）：
+        # 一筆回饋是「metadata item ＋ REFERS_TO 邊」兩筆寫入，中間斷掉（或 `put_edge`
+        # 丟 `TransientError`）會留下「item 在、邊不在、ledger 停在 accepted」的狀態。
+        # `list_feedback_of_version` 只走 `by_target` GSI，沒有邊就永遠看不到這筆回饋。
+        # `put_edge` 是同鍵覆寫、`complete` 是把 status 設成 done，兩者重做都安全。
+        _complete_feedback(existing, repository=repository, operations=operations,
+                           operation_id=operation_id, now=now)
+        return ImportResult("duplicate", existing.id, _DUPLICATE_FEEDBACK, ())
+    feedback = _resolve_category(feedback, repository=repository, writer=writer,
+                                 operation_id=operation_id)
     repository.put_meta(feedback, create_only=True)
-    repository.put_edge(pk, "REFERS_TO", version_pk(feedback.tutorial_version))
-    operations.complete(operation_id, now=now)
+    _complete_feedback(feedback, repository=repository, operations=operations,
+                       operation_id=operation_id, now=now)
     ts = now if feedback.ts is None else feedback.ts   # 模型放寬才可能 None；入口一定補過
     return ImportResult("saved", feedback.id, _saved_message(payload, feedback.id, ts), ())
 
@@ -940,10 +990,13 @@ def import_view(payload: Mapping[str, object], *, repository: Repository,
     if repository.get_version(view.tutorial_version) is None:
         return _rejected(_MISSING_VERSION, ("tutorial_version",))
     pk = view_pk(view.tutorial_version, view.user, view.ts)
-    operation_id, duplicated = _dedupe(payload, kind="view", canonical_id=parse_pk(pk)[1],
-                                       pk=pk, model=TutorialView, repository=repository,
-                                       operations=operations, now=accepted_at)
-    if duplicated:
+    operation_id, existing = _dedupe(payload, kind="view", canonical_id=parse_pk(pk)[1],
+                                     pk=pk, model=TutorialView, repository=repository,
+                                     operations=operations, now=accepted_at)
+    if existing is not None:
+        # 同 `import_feedback` 的冪等收尾：View 沒有邊，但 `put_meta` 與 `complete` 之間
+        # 一樣斷得掉，斷了就會留下一筆永遠停在 accepted 的 operation。
+        operations.complete(operation_id, now=accepted_at)
         return ImportResult("duplicate", pk, _DUPLICATE_VIEW, ())
     repository.put_meta(view, create_only=True)
     operations.complete(operation_id, now=accepted_at)

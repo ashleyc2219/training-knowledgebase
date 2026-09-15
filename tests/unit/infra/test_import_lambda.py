@@ -8,9 +8,14 @@
 ```text
 名稱與 handler   training-kb-import / training_kb.handlers.import_.handler
 沒有公開入口     全 stack 只有 Phase 30 的 webhook 有 AWS::Lambda::Url
-最小 IAM         table／bucket 讀寫 ＋ ticket-analysis 的 states:StartExecution
-沒有的東西       bedrock:InvokeModel、dynamodb:DeleteItem、release-update 的授權
+最小 IAM         table（GetItem/PutItem/UpdateItem/Scan、不含索引）＋ S3 operations/*
+                 ＋ ticket-analysis 與 release-update 兩條具名 ARN 的
+                 states:StartExecution／states:DescribeExecution
+沒有的東西       dynamodb:DeleteItem、site/*、GSI、sts:GetCallerIdentity、萬用字元動作
 ```
+
+Phase 43 在檔尾追加了自己的區段（匯入路徑開始分類留言，所以多一條 `bedrock:InvokeModel`）；
+上面「沒有的東西」原本列的 `bedrock:InvokeModel` 因此改成由 Phase 43 的兩條測試界定範圍。
 """
 
 import json
@@ -170,13 +175,85 @@ def test_the_import_role_cannot_touch_the_public_site(template: Template) -> Non
                if prefix != OPERATIONS_PREFIX)
 
 
-def test_the_import_role_gets_no_model_and_no_delete(template: Template) -> None:
-    """Given 匯入角色／When 檢查禁止清單／Then 沒有 bedrock、沒有 DeleteItem、沒有萬用字元。
+def test_the_import_role_can_describe_only_those_two_machines_executions(
+        template: Template) -> None:
+    """Given 匯入角色／When 找 `states:DescribeExecution`／Then 只到那兩條的 execution ARN。
 
-    這條路徑零模型呼叫（`category` 的模型判定在 Phase 43 才加），也不刪任何邊
-    （D-79 的唯一一條 `DeleteItem` 只屬於 pipeline task function）。
+    `ticket`／`release` 分支走 `BotoPipelineStarter.start`，它在 `ExecutionAlreadyExists`
+    時會 `DescribeExecution` 把既有執行撿回來（續跑）；少了這條授權那一路會變成
+    `AccessDeniedException`（review 修正回合 1 的 Minor 4）。
+    """
+    describes = [row for row in import_statements(template)
+                 if "states:DescribeExecution" in actions(row)]
+    assert len(describes) == 1
+    # 資源是 `Fn::Join`（`aws` partition 是 pseudo parameter），所以比對序列化後的字串。
+    resources = describes[0]["Resource"]
+    assert len(resources) == 2
+    for arn, name in zip(resources, (TICKET_ANALYSIS_MACHINE, "training-kb-release-update"),
+                         strict=True):
+        assert f":execution:{name}:*" in json.dumps(arn), name
+
+
+def test_the_import_role_gets_no_caller_identity(template: Template) -> None:
+    """Given 匯入角色／When 檢查禁止清單／Then 沒有 `sts:GetCallerIdentity`。
+
+    ARN 推導那條是 webhook 那支 Lambda 的路徑（P41 的 `_grant_execution_lookup`）；
+    匯入這支用不到，就不給（review 修正回合 1 的 Minor 4）。
     """
     granted = {action for row in import_statements(template) for action in actions(row)}
-    assert not any(action.startswith("bedrock:") for action in granted)
+    assert "sts:GetCallerIdentity" not in granted
+
+
+def test_the_import_role_gets_no_model_and_no_delete(template: Template) -> None:
+    """Given 匯入角色／When 檢查禁止清單／Then 沒有 DeleteItem、沒有萬用字元、模型只有一個動作。
+
+    這支 Lambda 不刪任何邊（D-79 的唯一一條 `DeleteItem` 只屬於 pipeline task function）。
+
+    **現況核對（2026-09-14，Phase 43）：** 原本這裡斷言「一個 `bedrock:` 動作都沒有」，
+    理由是「這條路徑零模型呼叫（`category` 的模型判定在 Phase 43 才加）」。Phase 43 已經
+    把留言分類接上匯入路徑，所以改成「唯一被允許的模型動作是 `bedrock:InvokeModel`」，
+    範圍與資源由 `test_import_lambda_can_invoke_only_the_approved_generation_model` 守。
+    紅燈源自 Phase 43 改的共用檔，由 Phase 43 負責修（COMMON.md R3.5）。
+    """
+    granted = {action for row in import_statements(template) for action in actions(row)}
+    assert {action for action in granted if action.startswith("bedrock:")} == {
+        "bedrock:InvokeModel"}
     assert "dynamodb:DeleteItem" not in granted
     assert not any(action.endswith(":*") for action in granted)
+
+
+# --- Phase 43：匯入 Lambda 開始分類留言 ------------------------------------------
+#
+# 追加一條 IAM 斷言（本計畫選擇 2026-09-14：沿用 P42 建立的這支檔，00A §3.3 沒有給
+# Phase 43 專屬的 infra 測試檔名）。上面 P42 的
+# `test_the_import_role_gets_no_model_and_no_delete` 原本斷言「沒有任何 bedrock 動作」，
+# 本 Phase 讓匯入路徑開始呼叫模型，所以那條改成「只有 `bedrock:InvokeModel` 一個動作、
+# 資源仍然只有已核定的模型 ARN」——紅燈源自本 Phase 改的共用檔，由本 Phase 負責（R3.5）。
+
+
+def test_import_lambda_can_invoke_only_the_approved_generation_model(template: Template) -> None:
+    """Given 匯入角色／When 找 bedrock 授權／Then 恰好一條 `InvokeModel`，資源是具名模型 ARN。
+
+    Phase 43 的 `classify_feedback_category` 在未勾選且留言非空時會呼叫一次
+    `Writer.generate_json`；沒有這條權限，雲端第一次分類就 `AccessDeniedException`。
+
+    **O5 BLOCKED**：`TKB_GENERATION_MODEL_ID` 仍不得填猜測值，所以已核定的模型 ARN
+    目前只有 embedding 那一個（與 P41 給 `task_fn`／`webhook_fn` 的寫法、範圍完全相同）。
+    這條測試守的是「有授權、且不是萬用字元」，不是「生成模型已核定」。
+    """
+    bedrock = [row for row in import_statements(template)
+               if any(action.startswith("bedrock:") for action in actions(row))]
+    assert len(bedrock) == 1
+    assert actions(bedrock[0]) == ["bedrock:InvokeModel"]
+    resource = json.dumps(bedrock[0]["Resource"])
+    assert ":foundation-model/" in resource and "*" not in resource
+    template.has_resource_properties("AWS::IAM::Policy", {
+        "PolicyDocument": Match.object_like({"Statement": Match.array_with([
+            Match.object_like({"Action": "bedrock:InvokeModel"})])})})
+
+
+def test_the_import_lambda_still_has_no_new_environment_variables(template: Template) -> None:
+    """Given Phase 43 的改動／When 看環境變數／Then 一個都沒有新增（O5 BLOCKED）。"""
+    variables = import_function(template)["Environment"]["Variables"]
+    assert "TKB_GENERATION_MODEL_ID" not in variables
+    assert not any(name.startswith("TKB_FEEDBACK") for name in variables)
