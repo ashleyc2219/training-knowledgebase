@@ -565,3 +565,9 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
     if not accepted:
         raise PermanentError(f"{domain}/{event_type} 正規化沒有產出任何 canonical 物件")
     return accepted
+
+
+# ---- Phase 43（owner）：回饋類別核定表的預設值（00A §6.8）。 ----
+# controller 2026-09-14 預先宣告，讓 W1／W2 併行的 P44／P53／P54／P57 可直接 import；
+# `PENDING_CATEGORY`／`approved_categories`／`classify_feedback_category` 仍由 Phase 43 補齊。
+DEFAULT_FEEDBACK_CATEGORIES: frozenset[str] = frozenset({"找不到按鈕", "缺少資訊"})
