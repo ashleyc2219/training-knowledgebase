@@ -217,7 +217,7 @@ Retry[0] 命中 -> 等 1 秒、再等 2 秒；Retry[1] 只接 Lambda 服務層�
 
 ### Task 1：兩條獨立分支與 state 契約
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # tests/unit/test_feedback_review_flow.py
@@ -269,11 +269,11 @@ def test_each_weak_target_gets_its_own_refine_operation(review_deps):
 
 `review_deps` 是本檔的 fixture：用 Phase 44–47 既有的假 `Repository`／`Writer` 組出 `Deps(operations=FakeOperations(), now=lambda: NOW, repository=..., writer=..., settings=load_settings({}))`，資料就是上面註解的五篇教學；`FakeOperations.accepted_ids` 是測試鉤子，依接受順序記下每一個 `accept` 進來的 `operation_id`。另外補一個 `test_refine_failure_keeps_candidate`：讓 `prepare_refine` 丟 `PermanentError`，斷言 c 的 candidate 仍已寫入且 `status` 是 `candidate`。
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `cannot import name 'FEEDBACK_REVIEW_TASKS' from 'training_kb.pipelines.feedback'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/pipelines/feedback.py（檔案由 Phase 44 建立，本階段追加 pipeline 組裝）
@@ -369,11 +369,11 @@ def task_evaluate_targets(state: dict, deps: Deps) -> dict:
 
 **每個弱教學 target 都有自己的子 operation（00A D-59）。** 「子 operation」就是在當日這筆 review operation 底下，為每一篇教學另外開一筆自己的 `OPS#` 紀錄。必須這樣做，是因為 `allocate_version` 以 `operation_id` 當唯一鍵、`OperationRecord.version_id` 只有一個值：兩篇教學共用當日的 `op-feedback-review-...` 會互相搶同一個版號。所以這裡先用 Phase 46 的 `refine_operation_id(...)`（證據指紋導出，形狀 `op-feedback-<64 位指紋>`）`accept` 一筆子 operation，再把它當成 `diagnose_weak` 與 `prepare_refine` 的 `operation_id`；`prepare_refine` 內部會再核對一次指紋，對不上就丟 `CoordinationError`。當日的 review `operation_id` 仍然是整批流程的主鍵（`review-no-change.json`、`publish-request.json`、`review-result.json` 都掛在它底下），candidate 分支也繼續用它。
 
-- [ ] **Step 4：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認綠燈**
+- [x] **Step 4：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認綠燈**
 
 預期五個測試全部 `passed`，且 `state` 的鍵集合恰好落在 00A 第 7 節那八個欄位內，沒有回饋留言或教學全文。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/unit/test_feedback_review_flow.py
@@ -382,7 +382,7 @@ git commit -m "feat(feedback): 組合每日回饋檢視的兩條獨立分支"
 
 ### Task 2：整批 prepare／inspect／commit 與 F49
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # 續寫 tests/unit/test_feedback_review_flow.py
@@ -423,11 +423,11 @@ def test_handler_rejects_unknown_task():
         feedback_review_handler({"task": "publish_everything", "state": {}}, None)
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認紅燈**
 
 預期 FAIL，訊號包含 `cannot import name 'run_feedback_review'`。
 
-- [ ] **Step 3：建立最小實作**
+- [x] **Step 3：建立最小實作**
 
 ```python
 # src/training_kb/pipelines/feedback.py（續）
@@ -519,11 +519,11 @@ def feedback_review_handler(event: dict, context: object) -> dict:
 
 三段式的分工來自 Phase 24／25：`prepare` 只寫私有 staging、`inspect` 只讀不寫、`commit` 用一筆交易切 `published_at` 與 `current_version` 後才寫 `site/`。**本 Phase 唯一多做的事是把它們拆成三個 Task**，這樣「第二篇檢查失敗」一定發生在任何公開前綴寫入之前。`handler` 不 try／except：`TransientError` 要讓 ASL 的 Retry 抓到，`PermanentError` 要讓 Catch 抓到。
 
-- [ ] **Step 4：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認綠燈**
+- [x] **Step 4：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認綠燈**
 
 預期全部 `passed`。再手動把 `task_commit_batch` 改成在迴圈裡逐篇 commit 重跑，`test_second_version_failing_inspection_publishes_nothing` 必須變紅；確認後改回來。
 
-- [ ] **Step 5：提交**
+- [x] **Step 5：提交**
 
 ```bash
 git add src/training_kb/pipelines/feedback.py tests/unit/test_feedback_review_flow.py
@@ -532,7 +532,7 @@ git commit -m "feat(feedback): 整批 prepare/inspect/commit 與零部分發布"
 
 ### Task 3：ASL、每日排程與雲端整批驗收
 
-- [ ] **Step 1：建立失敗測試**
+- [x] **Step 1：建立失敗測試**
 
 ```python
 # 續寫 tests/unit/test_feedback_review_flow.py
@@ -590,11 +590,11 @@ def test_stack_has_review_machine_and_exactly_one_daily_schedule():
                      "training-kb-import"}                                 # 00A D-23、D-58
 ```
 
-- [ ] **Step 2：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認紅燈**
+- [x] **Step 2：執行 `uv run pytest tests/unit/test_feedback_review_flow.py -q` 確認紅燈**
 
 預期 FAIL，訊號是 `FileNotFoundError: infra/stepfunctions/feedback-review/v1.json`。若改成 `cannot import name 'RETRY'`，代表 Phase 29 還停在單一 retrier，**先回頭改 Phase 29**，不要在本 Phase 自己補一份常數。
 
-- [ ] **Step 3：建立 ASL 與 CDK 資源**
+- [x] **Step 3：建立 ASL 與 CDK 資源**
 
 依第 6 節的節錄與對照表把五個 Task 逐字展開寫進 `infra/stepfunctions/feedback-review/v1.json`，再加上 `Succeeded`（Succeed）與 `PipelineFailed`（Fail）兩個終點；五個 Task 只有 `Parameters.task` 與 `Next` 不同，可直接用 `task_state(ARN, next_state)` 的輸出再補 `Parameters`，避免手抄出錯。
 
@@ -622,7 +622,7 @@ scheduler.CfnSchedule(
 
 `from aws_cdk import aws_scheduler as scheduler`。EventBridge Scheduler 的 cron 是**六個欄位**（分 時 日 月 週 年），`cron(30 0 * * ? *)` 就是每天 00:30；`schedule_expression_timezone="UTC"` 明寫時區，不依賴預設值；`flexible_time_window` 必填，設 `OFF` 才準點觸發。本 Phase **不新增任何 Lambda**：stack 裡的三支分別由 Phase 41（`training-kb-pipeline-task`、`training-kb-webhook`）與 Phase 42（`training-kb-import`）建立，state machine 才叫 `training-kb-feedback-review`（00A D-23、D-58）。[Phase 54](54-Phase54-重開票與呼叫規則指標.md) 之後會再加第四支 `training-kb-analytics`，屆時要把上面那個名稱集合補齊，否則這個測試會轉紅。**（現況核對 2026-09-14：這個等號斷言依賴 P42 已把 `training-kb-import` 加進 stack；P42 若尚未合併，先寫成 `names >= {"training-kb-pipeline-task", "training-kb-webhook"}` 並在報告註明差異，不要為了綠燈把 P42 的資源自己補進 stack。）**Demo 手動觸發用同一個 ARN 改傳 `{"mode": "demo"}`，**不另建第四條 pipeline**。
 
-- [ ] **Step 4：跑綠燈、存快照、部署並做雲端整批故障驗收**
+- [x] **Step 4：跑綠燈、存快照、部署並做雲端整批故障驗收**
 
 ```bash
 uv run pytest tests/unit/test_feedback_review_flow.py -q
@@ -645,7 +645,7 @@ TKB_FAULT=publish_before_transact TKB_RUN_AWS_INTEGRATION=1 \
 
 部署前先照 [Phase 41](41-Phase41-Ticket-Analysis雲端流程驗收.md) Task 3 的同一段腳本，用 `save_asl_snapshot(repository, "feedback-review", 1, ...)` 把**與部署完全相同的 bytes** 存成私有快照 `stepfunctions/feedback-review/v1.json`（設計 §9.3）；同一版重跑丟 `ObjectAlreadyExists` 是預期行為，改定義就升成 `v2.json`。**（現況核對 2026-09-14：要讓「相同 bytes」成立，本地 ASL 檔請直接用 `canonical_json(definition)` 的輸出落檔（`indent=2, sort_keys=True`），路徑用 `ASL_LOCAL_PATH.format(pipeline="feedback-review", number=1)`、快照 key 用 `ASL_SNAPSHOT_KEY`，測試不要手打字串；`save_asl_snapshot` 撞鍵時會先比 bytes，不同才丟 `PermanentError`。）** `cdk` 是 Node.js 套件，指令**不加** `uv run`，而且本機要寫成 `command npx aws-cdk@2 <子命令>` 並帶 `AWS_REGION=us-east-1`（00A §3.1、D-22 ＋ COMMON.md §1）；stack id 用 `TrainingKbApp`（D-43）。整合測試準備兩篇都會產生 `RefinePlan` 的資料，分別在 `TKB_FAULT=publish_before_transact` 與 `publish_after_transact_before_site`（Phase 59 的故障切點）各跑一次，每次都必須是 execution `FAILED`，而且兩篇的 `current_version`、`published_at` 與公開頁**同時**是舊值——出現「A 新、B 舊」就停止、保留 FAIL，不改 F49、不加 CloudFront 或公開讀取 API。移除故障後以**同一個** execution name 重送，預期沿用既有 staging 與版號，兩篇一起變成新狀態。CDK 環境未建立時先完成 Phase 01／09，不要把「目前跑不了」寫成通過，也不要把 `cdk synth` 成功當成部署成功。
 
-- [ ] **Step 5：保存證據後提交**
+- [x] **Step 5：保存證據後提交**
 
 ```bash
 git add infra/stepfunctions/feedback-review/v1.json infra/training_kb_stack.py tests/unit/test_feedback_review_flow.py tests/integration/test_feedback_review_state_machine.py
@@ -708,16 +708,69 @@ git commit -m "feat(infra): feedback-review ASL 與每日排程"
 
 ## 11. 完成清單
 
-- [ ] 五個 Task 的名稱、順序與 ASL state 名稱逐字對得上 00A 第 7 節。
-- [ ] Candidate 與 REFINE 兩條分支可獨立觸發，任一條失敗不改變另一條的判斷結果。
-- [ ] 每個 Task 的 `Retry`／`Catch` 直接來自 Phase 29 的 `RETRY`／`CATCH`，沒有 `TrainingKB.` 前綴、沒有第三份常數。
-- [ ] 所有 `Catch` 走到 `PipelineFailed`；ASL 沒有 `Map`，不存在逐篇發布路徑。
-- [ ] 多篇先全部 prepare／inspect，最後由 `Publisher.commit` 一次整批提交；失敗時零篇公開。
-- [ ] 同一天、同 operation 重送不重複提案、不重打模型、不配新版號。
-- [ ] 每個弱教學 target 都先 `accept` 一筆 `refine_operation_id` 子 operation 再交給 `prepare_refine`，兩篇不共用版號（D-59）；當日 review operation 的 canonical id 是 `f"{project_id}-{UTC 日期}"`（D-61）。
-- [ ] 每日 UTC 00:30 排程與手動入口共用同一個 state machine，input 固定 `{"mode": ...}`。
-- [ ] ASL 快照已寫到 `stepfunctions/feedback-review/v1.json`，bytes 與部署中的定義相同。
-- [ ] `REV` Rule 1 有直接 assertion；其餘引用的 Rule 都標明 primary 在哪一份。
-- [ ] 尚未部署或未跑 `@pytest.mark.aws` 測試前，文件與報告一律寫「預計／待驗證」；**O3 FAIL** 不得宣稱公開發布完成、不得放寬 F49；**O5 BLOCKED** 造成的 `Catch → PipelineFailed` 已保留 `errorType`／`cause` 原文當證據，沒有寫成 bug 或通過；**O2 PASS** 才可依賴的宣稱（重送去重）已註明來源。
-- [ ] 前置 P41（`infra/training_kb_stack.py`、`task_name`／`build_deps`／`pipeline_task_handler`、`training-kb-pipeline-task` 與相依 layer）確認已合併後才開工；Lambda 打包沿用 P41 那一套（R2）。
-- [ ] `pipelines/feedback.py` 與 `infra/training_kb_stack.py` 只用 Edit 追加 `# ---- Phase 48 ----` 自己的區段，沒有動 P41／P42／P44–P47 的程式。
+- [x] 五個 Task 的名稱、順序與 ASL state 名稱逐字對得上 00A 第 7 節。
+- [x] Candidate 與 REFINE 兩條分支可獨立觸發，任一條失敗不改變另一條的判斷結果。
+- [x] 每個 Task 的 `Retry`／`Catch` 直接來自 Phase 29 的 `RETRY`／`CATCH`，沒有 `TrainingKB.` 前綴、沒有第三份常數。
+- [x] 所有 `Catch` 走到 `PipelineFailed`；ASL 沒有 `Map`，不存在逐篇發布路徑。
+- [x] 多篇先全部 prepare／inspect，最後由 `Publisher.commit` 一次整批提交；失敗時零篇公開。
+- [x] 同一天、同 operation 重送不重複提案、不重打模型、不配新版號。
+- [x] 每個弱教學 target 都先 `accept` 一筆 `refine_operation_id` 子 operation 再交給 `prepare_refine`，兩篇不共用版號（D-59）；當日 review operation 的 canonical id 是 `f"{project_id}-{UTC 日期}"`（D-61）。
+- [x] 每日 UTC 00:30 排程與手動入口共用同一個 state machine，input 固定 `{"mode": ...}`。
+- [x] ASL 快照已寫到 `stepfunctions/feedback-review/v1.json`，bytes 與部署中的定義相同。
+- [x] `REV` Rule 1 有直接 assertion；其餘引用的 Rule 都標明 primary 在哪一份。
+- [x] 尚未部署或未跑 `@pytest.mark.aws` 測試前，文件與報告一律寫「預計／待驗證」；**O3 FAIL** 不得宣稱公開發布完成、不得放寬 F49；**O5 BLOCKED** 造成的 `Catch → PipelineFailed` 已保留 `errorType`／`cause` 原文當證據，沒有寫成 bug 或通過；**O2 PASS** 才可依賴的宣稱（重送去重）已註明來源。
+- [x] 前置 P41（`infra/training_kb_stack.py`、`task_name`／`build_deps`／`pipeline_task_handler`、`training-kb-pipeline-task` 與相依 layer）確認已合併後才開工；Lambda 打包沿用 P41 那一套（R2）。
+- [x] `pipelines/feedback.py` 與 `infra/training_kb_stack.py` 只用 Edit 追加 `# ---- Phase 48 ----` 自己的區段，沒有動 P41／P42／P44–P47 的程式。
+
+---
+
+## 12. 實作結果（2026-09-14）
+
+已完成並部署。state machine `arn:aws:states:us-east-1:123456789012:stateMachine:training-kb-feedback-review`、
+排程 `training-kb-feedback-review-daily`（`cron(30 0 * * ? *)`／`UTC`／`{"mode": "formal"}`）。
+完整證據與逐 Task 紅綠原文見 [`docs/plan/report/phases/2026-09-14-Phase48-REP.md`](../report/phases/2026-09-14-Phase48-REP.md)。
+
+### 本計畫選擇（2026-09-14）
+
+1. **`EvaluateTargets` 的核定類別用 `DEFAULT_FEEDBACK_CATEGORIES`**：§7 的片段寫
+   `approved_categories(repository)`，但 Phase 43 尚未合併（`ingress.py` 只有
+   `DEFAULT_FEEDBACK_CATEGORIES`，第 584 列註明 P43 會補）。改用同一個常數，與
+   `select_weak_targets` 目前用的是同一份表，兩條分支不會分岔；P43 合併後兩處一起改。
+2. **Task 1 的紅燈訊號是 `cannot import name 'FEEDBACK_REVIEW_PIPELINE'`**：§7 寫
+   `FEEDBACK_REVIEW_TASKS`，但那個名稱要等五個 Task 都存在才生得出來（Task 2）。Task 1 的
+   測試只 import 它真的交付的名稱，Task 2 的紅燈才是 `cannot import name
+   'FEEDBACK_REVIEW_TASKS'`（與 brief §4 的第 2 條一致）。
+3. **重送那條測試改斷言三件事**：§7 的 `test_resend_reuses_prepared_artifacts` 斷言兩次的
+   `publish_request_ref` 相同。第一次已經把 b@v2／c@v2 發布出去、`current_version` 因此前進，
+   第二次的目標變成沒有回饋的 b@v2／c@v2，`prepare_refine` 也會在 `_guard` 判定
+   `no_new_evidence`（F23）而回 `None`——第二次本來就**不該**再有 publish request。改成直接
+   斷言 §11 真正要守的「不重複提案、不重打模型、不配新版號」。
+4. **「第二篇檢查失敗」的切點用基底位移**：`InspectBatch` 的三類問題裡，只有「基底已位移」
+   是 `prepare` 會放過、只有 `inspect` 擋得住的，所以測試證的是「檢查失敗時零篇公開」，
+   不是「產物根本沒做出來」。動手腳的時機在 `EvaluateTargets` 與 `PrepareBatch` 之間
+   （雲端逐個 Task 呼叫，那正是真的會出現的空隙）。
+5. **Lambda 名稱集合改成包含關係**：`{"training-kb-pipeline-task", "training-kb-webhook",
+   "training-kb-analytics"} <= names`。`training-kb-import`（P42）與 P52 的資源同波次落地，
+   等號會讓別人一提交就把這個檔轉紅（controller 2026-09-14 裁決）。
+6. **雲端執行名稱帶時間戳**：`p48-<情境>-<epoch>` 而不是裸 `operation_id`，同一天重跑整合
+   測試才不會撞 `ExecutionAlreadyExists`。正式路徑的名稱仍由 `ingress.execution_name` 決定。
+7. **單元測試器材用 moto ＋真 `Repository`**：比照 `tests/unit/test_feedback_refine.py`（P46）
+   與 `tests/unit/test_publisher_single.py`（P24）。整條流程會走到 `create_version`／
+   `verify_version_complete`／`Publisher.prepare|inspect|commit`／`transact_write`，
+   手寫記憶體替身只會複製一份會漂移的 `Repository` 副本。
+
+### 未做／做不到（原因）
+
+- **§7 Task 3 Step 4 的 `TKB_FAULT=publish_before_transact`／`publish_after_transact_before_site`
+  兩次整合測試沒有做。** `faults.maybe_fail` 目前**沒有**被插進 `publishing.py`（`grep` 全案
+  只有 `faults.py` 自己定義它）——五個切點的插入點是 **Phase 59** 的 Task，本 Phase 不預先
+  插入別人的區段。同一組「多篇整批的可觀察切點」在 moto 上已經有 P25 的
+  `tests/integration/test_batch_publish_cutpoints.py`（協定 A），本 Phase 另在
+  `tests/unit/test_feedback_review_flow.py` 加了流程層的
+  `test_second_version_failing_inspection_publishes_nothing`。**O3 維持 FAIL，不放寬 F49。**
+- **真實 AWS 上沒有任何一次執行走到發布切點。** O5 BLOCKED 先擋在 `EvaluateTargets`
+  （`PermanentError: O5 尚未通過：generation_model_id 還沒有實測值`），所以「兩篇一起公開」
+  的雲端驗收到不了，**照實記錄、不宣稱通過**（§8.2 第 3 列）。
+- **每日 00:30 的實際觸發沒有等。** 排程用 `aws scheduler get-schedule` 存證
+  （`ENABLED`／`cron(30 0 * * ? *)`／`UTC`／`FlexibleTimeWindow OFF`／目標 ARN 與 input），
+  沒有等到隔天 00:30 看真的被觸發。
