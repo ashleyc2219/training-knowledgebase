@@ -132,3 +132,40 @@ def locate_feature(release: Release, *, repository: Repository, writer: Writer,
     return _normalized_match(features, keys) or _semantic_match(
         features, keys, writer=writer, operation_id=operation_id
     )
+
+
+# ---- Phase 50：步驟反查與 Safety Net（設計 §7.4、§10、F16／F17／F18） ----
+
+
+@dataclass(frozen=True)
+class StepHit:
+    """一個「要被改版的步驟」座標：哪一篇、哪一版、第幾步（00A §6.9 固定欄位順序）。
+
+    frozen 才進得了 `set`：呼叫端（Phase 52 的 `task_safety_net`）用
+    `set(direct) | set(net)` 把明確命中與補漏命中取聯集，補漏永遠不覆寫明確命中。
+    步驟編號一律叫 `number`（00A §3.3），不是 `index`，也不是候選清單的名次。
+    """
+
+    slug: str
+    version_id: str
+    number: int
+
+
+def find_release_hits(feature_id: str, *, repository: Repository) -> tuple[StepHit, ...]:
+    """目前已發布版本裡真的引用這個 Feature 的步驟座標，依 `(slug, number)` 升序。
+
+    反查本身是 Phase 27 的 `Repository.find_current_published_steps_referencing`：A 方向用
+    `by_target` GSI 取候選、B 方向用基表一致讀取核對，歷史版與未發布版都由它排除（F17）。
+    本函式只做**型別轉換與排序**，不得另寫一份 `query_by_target` 篩選（00A D-38）——多一份
+    就會有兩套一致性規則，GSI 慢半拍時兩邊給的答案還會不一樣。
+
+    `slug` 由 Phase 20 的 `parse_version_id` 從 `TutorialStep.tutorial_version` 還原，不再查一
+    次表。GSI 有候選、基表卻讀不到目前已發布步驟時，Phase 27 丟的 `PermanentError` **原樣往
+    上拋**：那是「基表資料不完整」，不是「沒有命中」，不得改判成空 tuple 讓呼叫端誤 KEEP；
+    補邊是 Phase 28 的責任，不在查詢裡順手寫。
+    """
+    hits = {
+        StepHit(parse_version_id(step.tutorial_version)[0], step.tutorial_version, step.number)
+        for step in repository.find_current_published_steps_referencing(feature_id)
+    }
+    return tuple(sorted(hits, key=lambda hit: (hit.slug, hit.number)))
