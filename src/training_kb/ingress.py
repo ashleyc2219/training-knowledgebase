@@ -65,6 +65,8 @@ from training_kb.pipelines.common import JSONValue, PipelineName
 from training_kb.repository import Repository
 from training_kb.source_ids import stable_user_from_import
 from training_kb.writing.client import Writer
+from training_kb.writing.prompts import prompt_classify_comment
+from training_kb.writing.schemas import CommentClassification
 
 if TYPE_CHECKING:                       # 只給型別檢查用，執行期不 import（見 `_build_rote_deps`）
     from training_kb.adapters import ToolRegistry
@@ -637,6 +639,35 @@ def _settle(value: str | None, approved: frozenset[str]) -> str | None:
     if not name:
         return None
     return name if name in approved or name == PENDING_CATEGORY else PENDING_CATEGORY
+
+
+def classify_feedback_category(feedback: Feedback, *, approved: frozenset[str],
+                               writer: Writer, operation_id: str) -> str | None:
+    """決策表的四條分支；只有第 4 列會送出 request，而且**恰好一次**。
+
+    勾選命中就 `return`，模型沒有機會覆蓋使用者的選擇（`COL` Rule 4）。留言去頭尾後為空
+    回 `None`（只有評分，`COL` Rule 3 仍是有效回饋）。留言非空才呼叫模型，回來的值一樣
+    走 `_settle`：未核定就降級成 `待分類`，**不重問第二次**（`COL` Rule 5、6）。
+
+    `generate_json` 吃 schema **dict**、回 **dict**（00A D-02），所以讀值用
+    `reply.get("category")` 而不是 `reply.category`——`CommentClassification` 不是 Pydantic
+    類別。判斷類的 `maxTokens 512`／`temperature 0.1` 由 `inference_config(schema)` 依
+    `$id` 自動決定（00A §3.7），本函式**不傳**任何推論參數。
+
+    模型回空字串／非字串／缺欄位時 `_settle` 會回 `None`，這裡再收斂成 `PENDING_CATEGORY`：
+    留言非空卻判不出來是「待分類」，不是「這筆沒有類別」。
+    """
+    chosen = _settle(feedback.category, approved)
+    if chosen is not None:
+        return chosen
+    comment = (feedback.comment or "").strip()
+    if not comment:
+        return None
+    system, user = prompt_classify_comment(comment, approved)
+    reply = writer.generate_json(system, user, CommentClassification,
+                                 operation_id=operation_id, node=CLASSIFY_NODE)
+    answer = reply.get("category")
+    return _settle(answer if isinstance(answer, str) else None, approved) or PENDING_CATEGORY
 
 
 # ---- Phase 42 ----------------------------------------------------------------
