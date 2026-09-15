@@ -7,6 +7,8 @@
 """
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -153,6 +155,38 @@ def test_main_fails_when_a_catch_is_removed(tmp_path: Path,
     broken.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
     assert main([str(broken)]) == 1
     assert "[不通過]" in capsys.readouterr().out
+
+
+def test_module_entry_point_forwards_argv(tmp_path: Path) -> None:
+    """Given `python -m infra.scripts.check_asl <path>`，Then 真的檢查那個路徑。
+
+    `sys.exit(main())` 少傳 `sys.argv[1:]` 會讓命令列參數被**靜靜忽略**、改掃預設 glob，
+    於是「指到不存在的檔」也會回 0（review Important 1 實測到的行為）。這條測試走
+    **真正的 subprocess**，不是直接呼叫 `main`，才擋得住這個缺口。
+    """
+    missing = subprocess.run(
+        [sys.executable, "-m", "infra.scripts.check_asl", str(tmp_path / "nope" / "v1.json")],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+    assert missing.returncode == 2, missing.stdout + missing.stderr
+    assert "找不到 ASL 定義" in missing.stdout
+
+    source = REPO_ROOT / ASL_ROOT / "ticket-analysis" / "v1.json"
+    doc = json.loads(source.read_text(encoding="utf-8"))
+    for state in doc["States"].values():
+        if state.get("Type") == "Task":
+            del state["Catch"]
+            break
+    broken = tmp_path / "v1.json"
+    broken.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    bad = subprocess.run([sys.executable, "-m", "infra.scripts.check_asl", str(broken)],
+                         cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    assert "[不通過]" in bad.stdout
+
+    good = subprocess.run([sys.executable, "-m", "infra.scripts.check_asl"],
+                          cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+    assert good.returncode == 0, good.stdout + good.stderr
+    assert good.stdout.count("[通過]") == len(PIPELINES)
 
 
 def test_main_fails_when_the_second_retrier_is_removed(

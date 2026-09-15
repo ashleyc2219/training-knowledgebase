@@ -109,12 +109,15 @@ def check_asl_document(doc: Mapping[str, Any], *,
 def main(argv: list[str] | None = None) -> int:
     """檢查指定路徑（或預設 glob）的每一份定義；任何一份不通過就回 1。
 
-    `argv` 為 `None`／空 list 時掃 `infra/stepfunctions/*/v*.json`；掃不到就回 2 並說明，
-    與「掃到但不通過」的 1 分開，呼叫端看得出是缺檔還是檢查沒過。
+    `argv` 為 `None`／空 list 時掃 `infra/stepfunctions/*/v*.json`；**掃不到、或指名的路徑
+    不存在**都回 2 並說明，與「掃到但不通過」的 1 分開，呼叫端看得出是缺檔還是檢查沒過。
+    指名不存在的檔案**不得**退回去掃預設 glob：那會讓打錯路徑的呼叫靜靜「通過」。
     """
     paths = [Path(item) for item in argv] if argv else sorted(ASL_ROOT.glob(ASL_GLOB))
-    if not paths:
-        print(f"找不到 ASL 定義：{ASL_ROOT / ASL_GLOB}（三份定義由 P41／P48／P52 建立）")
+    missing = [path for path in paths if not path.is_file()]
+    if not paths or missing:
+        where = "、".join(str(path) for path in missing) or str(ASL_ROOT / ASL_GLOB)
+        print(f"找不到 ASL 定義：{where}（三份定義由 P41／P48／P52 建立）")
         return 2
     failed = False
     for path in paths:
@@ -127,4 +130,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover - 命令列進入點
-    sys.exit(main())
+    # 一定要把 `sys.argv[1:]` 傳下去：少了它，`python -m infra.scripts.check_asl <path>`
+    # 的參數會被靜靜忽略、改掃預設 glob，打錯路徑也會回 0（Phase 59 review Important 1）。
+    sys.exit(main(sys.argv[1:]))
