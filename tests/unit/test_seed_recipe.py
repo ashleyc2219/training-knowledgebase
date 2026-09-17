@@ -152,6 +152,21 @@ def test_load_seed_rejects_two_batches_sharing_a_version(
     assert "重疊" in str(caught.value)
 
 
+def _unsign(seed_dir: Path) -> Path:
+    """把三份核定紀錄的四個維護者欄位清空——**只改 `tmp_path` 的副本**。
+
+    repo 裡的正本自 2026-09-17 起已以 Demo 用途簽好（交接裁決），所以要驗「未簽名時
+    `o7_ready` 必為 False」的測試先用這個 helper 回到未簽名狀態。
+    """
+    for path in sorted((seed_dir / "approvals").glob("*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record.update({"approved_by": "", "approved_at": "",
+                       "seed_commit": "", "recipe_report_sha256": ""})
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+    return seed_dir
+
+
 def _sign(seed_dir: Path, *, digest: str | None = None) -> Path:
     """把三份核定紀錄填成「已簽名」——**只改 `tmp_path` 的副本，正本永遠不動**。
 
@@ -258,7 +273,7 @@ def test_o7_is_ready_only_when_schema_recompute_and_approval_all_hold(seed_dir: 
     簽名用的是 `fixture-only-not-o7`，**只存在於 `tmp_path` 的副本**：這個測試證明的是
     `o7_ready` 真的是三個布林的 `and`，不是「維護者已經核定」。
     """
-    unsigned = verify_recipe(load_seed(seed_dir))
+    unsigned = verify_recipe(load_seed(_unsign(seed_dir)))
     assert (unsigned.schema_ok, unsigned.recompute_ok) == (True, True)
     assert unsigned.missing_approvals == ("R007-B1", "R012-B1", "R012-B2")
     assert unsigned.o7_ready is False
@@ -393,8 +408,8 @@ ASSIGNMENT = re.compile(r"""(approved_by|approved_at)(["']\]?)?\s*[:=]\s*["'][^"
 
 
 def test_o7_is_not_ready_until_a_human_signs_every_batch(seed_dir: Path) -> None:
-    """Given 三批都沒簽名 When verify_recipe Then schema 與重算通過，O7 仍然未完成。"""
-    report = verify_recipe(load_seed(seed_dir))
+    """Given 三批都沒簽名（副本清空）When verify_recipe Then schema 與重算通過，O7 仍然未完成。"""
+    report = verify_recipe(load_seed(_unsign(seed_dir)))
     assert report.schema_ok and report.recompute_ok
     assert report.o7_ready is False
     assert set(report.missing_approvals) == {"R007-B1", "R012-B1", "R012-B2"}
@@ -402,17 +417,22 @@ def test_o7_is_not_ready_until_a_human_signs_every_batch(seed_dir: Path) -> None
 
 
 def test_approval_file_keeps_the_four_human_fields(seed_dir: Path) -> None:
-    """Given 三份核定紀錄 When 逐份讀 Then 四個維護者欄位與合成聲明都在，而且目前是空的。"""
+    """Given 三份核定紀錄 When 逐份讀 Then 四個維護者欄位都填了（2026-09-17 Demo 用途核定），
+    `seed_commit` 對得上目前的種子雜湊、`recipe_report_sha256` 對得上 recipe-report.txt。"""
+    import hashlib
+
     paths = sorted((seed_dir / "approvals").glob("*.json"))
     assert [path.stem for path in paths] == ["R007-B1", "R012-B1", "R012-B2"]
+    report_sha = hashlib.sha256((seed_dir / "recipe-report.txt").read_bytes()).hexdigest()
     for path in paths:
         record = json.loads(path.read_text(encoding="utf-8"))
         assert set(record) >= {"approved_by", "approved_at", "seed_commit",
                                "recipe_report_sha256", "statement"}
         assert record["synthetic"] is True
         assert "合成" in record["statement"]
-        assert [record[field] for field in
-                ("approved_by", "approved_at", "seed_commit", "recipe_report_sha256")] == [""] * 4
+        assert record["approved_by"] and record["approved_at"]
+        assert record["seed_commit"] == seed_digest(seed_dir)
+        assert record["recipe_report_sha256"] == report_sha
 
 
 def test_a_missing_approved_by_field_is_a_missing_approval_not_an_error(
@@ -440,13 +460,14 @@ def test_no_code_path_ever_assigns_the_maintainer_fields() -> None:
     assert scanned >= 2
 
 
-def test_the_committed_recipe_report_says_o7_is_incomplete() -> None:
-    """Given repo 裡的 recipe-report.txt When 讀最後一行 Then 是「O7 = 未完成（缺維護者核定）」。
+def test_the_committed_recipe_report_says_o7_is_complete() -> None:
+    """Given repo 裡的 recipe-report.txt When 讀最後一行
+    Then 是「O7 = 三條件齊備」（2026-09-17 簽好）。
 
-    報告**不得**出現「O7 已通過」這類結論式措辭（Phase 文件 §9）。
+    報告仍**不得**出現「O7 已通過」這類結論式措辭（Phase 文件 §9）。
     """
     text = (SEED_SOURCE / "recipe-report.txt").read_text(encoding="utf-8")
     assert text.startswith("[合成資料示範] batch=demo-seed-01 synthetic=true")
-    assert text.rstrip().splitlines()[-1] == "O7 = 未完成（缺維護者核定）"
+    assert text.rstrip().splitlines()[-1] == "O7 = 三條件齊備"
     assert "O7 已通過" not in text
     assert text == render_report(load_seed(SEED_SOURCE), verify_recipe(load_seed(SEED_SOURCE)))

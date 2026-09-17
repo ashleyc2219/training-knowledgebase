@@ -13,7 +13,8 @@ from training_kb.rote import RawEvent, structure_signature
 
 
 def test_unknown_event_type_is_blocked() -> None:
-    event = RawEvent("github.com", "github_pr", "pull_request", {}, {})
+    """github.com/pull_request 已於 2026-09-17 核定；改用一個真的不在核定表裡的事件型別。"""
+    event = RawEvent("github.com", "github_pr", "pull_request_review", {}, {})
     with pytest.raises(PermanentError, match="STABLE_KEYS"):
         structure_signature(event)
 

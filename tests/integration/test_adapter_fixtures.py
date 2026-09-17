@@ -72,7 +72,8 @@ def test_each_source_reaches_canonical_without_storing_values(row: SourceApprova
     event = event_of(row.domain, row.adapter, row.event_type, row.fixture)
     canonical = execute_recorded_steps(event, steps, default_registry())
     assert canonical["id"].startswith("t_" if PARSER_KIND[parser] == "ticket" else "r_")
-    recorded = json.dumps([step.model_dump() for step in steps], ensure_ascii=False)
+    # 只看 args：工具名稱本來就含來源字眼（parse_changelog 含 "changelog"），不算「存了事件值」。
+    recorded = json.dumps([step.model_dump()["args"] for step in steps], ensure_ascii=False)
     assert all(value not in recorded for value in leaf_strings(event.payload))
 
 

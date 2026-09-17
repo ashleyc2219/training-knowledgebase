@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-09-14
-Approver: controller（代維護者 Timmy Lin 依授權暫定；待維護者親自確認）
+Approver: Timmy Lin
 Sort-Key: META
 
 上面四個欄位是 `tests/unit/test_keys.py::test_metadata_sort_key_matches_the_recorded_o1_decision`

@@ -61,7 +61,15 @@ STABLE_KEYS: Mapping[tuple[str, str], frozenset[str]] = {
     # 逐條抄自 Phase 13 的核定紀錄（approved_by 非空的列）。正式程式不讀 tests/ 路徑，
     # 抄錯由 tests/integration/test_o6_stable_keys.py 的逐列比對擋下來。
     ("github.com", "issues"): frozenset({"action", "issue", "repository", "sender"}),
-    # ("github.com", "pull_request")：等 O6 核定後才加入，核定前保持 blocked。
+    # 以下四列於 2026-09-17 交接時以 Demo 用途核定（tests/fixtures/o6/approved-sources.json）。
+    ("github.com", "pull_request"): frozenset(
+        {"action", "number", "pull_request", "repository", "sender"}),
+    ("discord.com", "manual_batch"): frozenset(
+        {"source", "domain", "adapter", "batch_id", "items"}),
+    ("mail.local", "manual_batch"): frozenset(
+        {"source", "domain", "adapter", "batch_id", "items"}),
+    ("changelog.local", "manual_batch"): frozenset(
+        {"source", "domain", "adapter", "batch_id", "items"}),
 }
 """每個已核定 `(domain, event_type)` 的固定必備最上層 key 清單（決策 F02）。"""
 

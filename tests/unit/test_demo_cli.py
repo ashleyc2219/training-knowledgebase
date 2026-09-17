@@ -255,9 +255,20 @@ def test_metrics_zero_sample_shows_na_not_zero(
 
 
 def test_seed_refuses_and_writes_nothing_while_approvals_missing(
-        aws: FakeAws, capsys: pytest.CaptureFixture[str]) -> None:
-    """Given `o7_ready is False` When `seed` Then 印 `missing_approvals`、回非 0、零寫入。"""
-    assert run(["seed", "--dir", SEED_DIR], aws) != 0
+        aws: FakeAws, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """Given `o7_ready is False`（副本清空核定欄位）When `seed`
+    Then 印 `missing_approvals`、回非 0、零寫入。"""
+    import shutil
+
+    copy = tmp_path / "seed"
+    shutil.copytree(SEED_DIR, copy)
+    for path in sorted((copy / "approvals").glob("*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record.update({"approved_by": "", "approved_at": "",
+                       "seed_commit": "", "recipe_report_sha256": ""})
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+    assert run(["seed", "--dir", str(copy)], aws) != 0
     printed = capsys.readouterr().out
     assert "R007-B1" in printed and "待維護者核定" in printed
     assert "O7 已通過" not in printed

@@ -208,12 +208,33 @@ def test_call_breakdown_of_an_empty_trace_is_all_zero() -> None:
 # --- 載入整份 dashboard（`demo/dashboard.py` 的唯一資料來源）--------------------
 
 
-def test_load_dashboard_reports_o7_as_pending_not_passed() -> None:
-    """Given 核定紀錄仍空著 When 載入 dashboard Then 寫「待維護者核定」，不得寫「O7 已通過」。"""
+def test_load_dashboard_reports_o7_as_complete_not_passed() -> None:
+    """Given 核定紀錄已簽（2026-09-17 Demo 用途）When 載入 dashboard Then 寫「三條件齊備」，
+    仍不得寫「O7 已通過」。"""
     data = load_dashboard(SEED_DIR)
     assert data.banner.batch == BATCH
-    assert data.missing_approvals == ("R007-B1", "R012-B1", "R012-B2")
-    assert "待維護者核定" in data.o7_line
+    assert data.missing_approvals == ()
+    assert "三條件齊備" in data.o7_line
     assert "已通過" not in data.o7_line
     assert tuple(data.blocks) == DASHBOARD_BLOCKS
     assert data.calls == CallBreakdown(0, 0, ())
+
+
+def test_load_dashboard_reports_o7_as_pending_when_unsigned(tmp_path: Path) -> None:
+    """Given 核定紀錄清空（副本）When 載入 dashboard
+    Then 寫「待維護者核定」，不得寫「O7 已通過」。"""
+    import json
+    import shutil
+
+    copy = tmp_path / "seed"
+    shutil.copytree(SEED_DIR, copy)
+    for path in sorted((copy / "approvals").glob("*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record.update({"approved_by": "", "approved_at": "",
+                       "seed_commit": "", "recipe_report_sha256": ""})
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+    data = load_dashboard(copy)
+    assert data.missing_approvals == ("R007-B1", "R012-B1", "R012-B2")
+    assert "待維護者核定" in data.o7_line
+    assert "已通過" not in data.o7_line

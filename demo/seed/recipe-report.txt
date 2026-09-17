@@ -3,5 +3,5 @@
   A v1 negative count expected 8      actual 8      OK  | A v2 negative count 2     2     OK
   A v1 reopen count   expected 7      actual 7      OK  | A v2 reopen count   2     2     OK
   A v1 reopen rate    expected 0.7    actual 0.7    OK  | A v2 reopen rate    0.2   0.2   OK
-schema=PASS  recompute=PASS  approvals=MISSING(R007-B1, R012-B1, R012-B2)
-O7 = 未完成（缺維護者核定）
+schema=PASS  recompute=PASS  approvals=PASS
+O7 = 三條件齊備

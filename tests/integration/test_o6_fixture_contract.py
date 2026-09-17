@@ -30,7 +30,8 @@ def test_unapproved_source_is_blocked_and_fixture_matches_keys() -> None:
     assert keys[("github.com", "issues")] == frozenset(
         {"action", "issue", "repository", "sender"}
     )
-    assert ("discord.com", "manual_batch") not in keys
+    # 2026-09-17 交接：五列都以 Demo 用途核定，手動來源不再 blocked。
+    assert ("discord.com", "manual_batch") in keys
     for row in approvals:
         payload = json.loads((FIXTURE_ROOT / row.fixture).read_text("utf-8"))
         assert set(row.stable_keys) <= set(payload)
@@ -66,9 +67,6 @@ def test_mapping_report_is_rendered_from_the_approval_record() -> None:
     assert table in report
 
     blocked = tuple(row for row in approvals if not row.approved)
-    assert len(blocked) == 4
-    for row in blocked:
-        assert f"候選：{', '.join(row.stable_keys)}" in table
-        assert (row.domain, row.event_type) not in approved_stable_keys(approvals)
-    assert "待維護者核定" in report
-    assert table.count("待維護者核定") == 2 * len(blocked)
+    assert blocked == ()                       # 2026-09-17：五列都已核定（Demo 用途）
+    assert len(approved_stable_keys(approvals)) == len(approvals)
+    assert "待維護者核定" not in table

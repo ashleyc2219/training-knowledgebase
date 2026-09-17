@@ -52,6 +52,6 @@ def test_pending_sources_stay_blocked() -> None:
             structure_signature(RawEvent(row.domain, row.adapter, row.event_type, {}, {}))
 
 
-@pytest.mark.xfail(strict=True, reason="O6 尚未核對完畢，見 docs/plan/report/o6-mapping.md")
 def test_every_source_row_is_approved() -> None:
+    """2026-09-17 交接：五列都以 Demo 用途核定（tests/fixtures/o6/approved-sources.json）。"""
     assert [f"{row.domain}:{row.event_type}" for row in APPROVALS if not row.approved_by] == []

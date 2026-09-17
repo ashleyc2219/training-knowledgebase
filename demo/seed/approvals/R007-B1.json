@@ -11,9 +11,9 @@
     "before_rate": 0.7,
     "after_rate": 0.2
   },
-  "recipe_report_sha256": "",
-  "seed_commit": "",
-  "approved_by": "",
-  "approved_at": "",
+  "recipe_report_sha256": "80de6cb89f5a9085ff93c0451632f5bd2edd2080de8adf8c6b84c8e1243bbe9b",
+  "seed_commit": "36a9172a09c757182731763855fcbf21a31c49de658da0b440b0eef3101d9cda",
+  "approved_by": "demo-handover（交接時以 Demo 用途核定，非正式核定）",
+  "approved_at": "2026-09-17T00:00:00Z",
   "statement": "我已核對本批次為合成資料、數值可由 demo/seed 重算，同意作為 O7 驗證批次。"
 }

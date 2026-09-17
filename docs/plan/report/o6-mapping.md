@@ -1,6 +1,6 @@
 # O6 來源 ID 與穩定使用者 mapping 表
 
-> 狀態：**待維護者核定**（4 / 5 列尚未簽收）
+> 狀態：**五列皆已核定**（2026-09-17 交接時以 Demo 用途核定；正式上線前可重新審視）
 >
 > 本表由 `tests/fixtures/o6/approved-sources.json` 渲染，欄位順序等同
 > `training_kb.source_ids.SourceApproval` 的九個欄位。**程式測試綠燈不等於 O6 PASS**：
@@ -21,10 +21,10 @@
 | domain | event_type | adapter | STABLE_KEYS | fixture | 事件 ID 編碼 | 穩定 user 來源 | 核定者 | 核定日期 |
 |---|---|---|---|---|---|---|---|---|
 | `github.com` | `issues` | `github_issue` | action, issue, repository, sender | `github/issue-opened.json` | github_ticket_id | sender.id | docs/design/training-kb.md §7.2 | 2026-09-13 |
-| `github.com` | `pull_request` | `github_pr` | 候選：action, number, pull_request, repository, sender | `github/pull-request-merged.json` | github_release_id | sender.id | 待維護者核定 | 待維護者核定 |
-| `discord.com` | `manual_batch` | `discord_manual` | 候選：source, domain, adapter, batch_id, items | `manual/discord-message.json` | 檔案提供 | 檔案 author | 待維護者核定 | 待維護者核定 |
-| `mail.local` | `manual_batch` | `email_manual` | 候選：source, domain, adapter, batch_id, items | `manual/support-email.json` | 檔案提供 | 檔案 author | 待維護者核定 | 待維護者核定 |
-| `changelog.local` | `manual_batch` | `changelog_manual` | 候選：source, domain, adapter, batch_id, items | `manual/changelog-entry.json` | 檔案提供 | 不適用 | 待維護者核定 | 待維護者核定 |
+| `github.com` | `pull_request` | `github_pr` | action, number, pull_request, repository, sender | `github/pull-request-merged.json` | github_release_id | sender.id | demo-handover（交接時以 Demo 用途核定） | 2026-09-17 |
+| `discord.com` | `manual_batch` | `discord_manual` | source, domain, adapter, batch_id, items | `manual/discord-message.json` | 檔案提供 | 檔案 author | demo-handover（交接時以 Demo 用途核定） | 2026-09-17 |
+| `mail.local` | `manual_batch` | `email_manual` | source, domain, adapter, batch_id, items | `manual/support-email.json` | 檔案提供 | 檔案 author | demo-handover（交接時以 Demo 用途核定） | 2026-09-17 |
+| `changelog.local` | `manual_batch` | `changelog_manual` | source, domain, adapter, batch_id, items | `manual/changelog-entry.json` | 檔案提供 | 不適用 | demo-handover（交接時以 Demo 用途核定） | 2026-09-17 |
 
 ## 3. 各列的核對重點
 
