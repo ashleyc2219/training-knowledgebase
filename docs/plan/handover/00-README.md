@@ -59,7 +59,7 @@
 AWS-Hackathon/
 ├── src/training_kb/      程式本體（Python）
 ├── infra/                AWS 部署（CDK）與流程定義、檢查腳本
-├── demo/                 Demo 用：種子資料、命令列控制台、儀表板
+├── demo/                 Demo 用：種子資料、命令列控制台、公開站的 CSS／JS 與上傳腳本
 ├── tests/                自動測試（unit = 純本機；integration = 用假 AWS 或真 AWS）
 ├── docs/design/          設計文件（唯一的權威來源）
 ├── docs/plan/unfinish/   60 份實作計畫 + 00A 契約 + 00B 需求對照（已全部做完，名稱是歷史遺留）
