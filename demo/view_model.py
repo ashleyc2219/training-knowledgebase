@@ -1,12 +1,12 @@
 """Demo Dashboard 的四區 view model（Phase 58 Task 3／4）——**純計算，不畫任何東西**。
 
-分工（00A §3.2 的 `demo/` 表）：本檔算好一個 dict，`demo/dashboard.py` 只負責用 Streamlit
-把它畫出來。所以本檔**不 import streamlit**，`dashboard.py` 也**不含任何業務邏輯**
-（守門測試：`tests/unit/test_demo_dashboard_guard.py`）。
+分工（00A §3.2 的 `demo/` 表）：本檔算好一個 dict 給任何呈現層用。原本的 Streamlit 畫面
+`demo/dashboard.py` 已於 2026-09-17 移除（Demo 只需要公開站與命令列），本檔仍是四區指標的
+唯一計算入口，`tests/unit/test_demo_view_model.py` 守住公式只有一份。
 
 **指標公式一份都不在這裡。** 平均、負面回饋、重開票窗口與呼叫數全部轉呼
 `training_kb.analytics`（Phase 53／54）；本檔只做「挑哪些版本、怎麼排、缺值寫什麼字」。
-守門：`tests/unit/test_demo_dashboard_guard.py::test_demo_package_has_no_second_metric_formula`
+守門：`tests/unit/test_demo_view_model.py`
 會掃過整個 `demo/`，找到十四天窗口或自己算平均的樣式就紅燈。
 
 四個區塊與來源固定如下，其他欄位不加（設計 §13）：
@@ -59,7 +59,7 @@ from training_kb.writing.client import CallTrace
 
 DASHBOARD_BLOCKS: tuple[str, ...] = (
     "最新教學與版本差異", "每版評分與回饋數", "重開票筆數與分子分母", "規則狀態與來源證據")
-"""`dashboard_view` 的四個 key，順序固定（Phase 58 §5）。Streamlit 照這個順序畫。"""
+"""`dashboard_view` 的四個 key，順序固定（Phase 58 §5）。呈現層照這個順序畫。"""
 
 SYNTHETIC_NOTICE = "合成資料示範"
 """橫幅與每一列數字的合成資料標示；與 `demo/seed_loader.py:BANNER` **逐字相同**（R11）。
@@ -322,12 +322,12 @@ def dashboard_view(*, repository: Repository | Any, approved: frozenset[str],
             DASHBOARD_BLOCKS[3]: _block_rules(repository, versions, batch)}
 
 
-# --- 4. Dashboard 的唯一入口（`demo/dashboard.py` 只呼叫這個）------------------
+# --- 4. Dashboard 的唯一入口（呈現層只呼叫這個）--------------------------------
 
 
 @dataclass(frozen=True)
 class Dashboard:
-    """`demo/dashboard.py` 要畫的全部東西；Streamlit 那一側不再做任何計算。"""
+    """呈現層要畫的全部東西；呈現層不再做任何計算。"""
 
     banner: Banner
     blocks: dict[str, Any]
