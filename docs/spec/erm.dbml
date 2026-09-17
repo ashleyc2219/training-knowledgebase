@@ -1,163 +1,275 @@
-// 來源：docs/客服自助教學生成器 — 系統架構規格.md（產品主軸）＋ docs/spec/draft/design-draft.md（Tutorial 生命週期）
-// Clarify 決策見 docs/spec/.clarify/resolved/決策總表.md；本檔只放已定案的實體、屬性與關係。
-// 型別限 int / long / float / bool / string。時間一律 string（ISO 8601）。
+// Formulation 來源：docs/spec/draft/training-kb-design-doc.md（設計）
+//                  docs/spec/draft/training-kb-erd.md（ERD）
+// 表達規則：docs/spec/prompts/formulation-rules.md
+// 語法參考：https://dbml.dbdiagram.io/docs/
 
-Project SupportTutorialGenerator {
-  database_type: 'Generic'
-  Note: '''客服自助教學生成器（Self-Improving Support Tutorial Generator）。
-顧客票單（Ticket）聚成問題類型（UserProblem）→ 產生教學（Tutorial / TutorialVersion）→ 同類新票自動回覆教學連結（deflection）→ 顧客評分（Feedback）與再開票訊號驅動 REFINE；Release Note 驅動 UPDATE / RETIRE；成功的攔截流程由 Workflow 重放。
-Self-learning 的定義：past outcomes change future system behavior，不是 fine-tuning。
-Demo 領域資料：Bitext Customer Support 公開資料集（category / intent / instruction / response）。'''
+Project training_kb {
+  Note: '''
+  本檔是十個實體的邏輯資料模型。物理儲存仍是 DynamoDB training_kb
+  單表（PK、SK）、by_target GSI（分割鍵 target）與 training-kb-content S3 bucket。
+  Table 與 Ref 不代表建立十張實體 SQL 表或資料庫外鍵。
+
+  欄位型別依 formulation-rules.md 限於 int、long、float、bool、string。
+  原始 list、巢狀物件、timestamp 以 string 表達，原始形狀保留於 note；
+  這不要求 DynamoDB 把 List、Map 或向量改存字串。
+  標為「衍生投影」的欄位只拆解原文已定義的 PK，供 Ref 表達關係，
+  不增加實際儲存欄位。未指定 required、default 或刪除策略的地方不補規則。
+
+  邊的物理結構：PK = 起點，SK = 關係#終點，target = 終點。
+  同一起點可以有多筆邊；邏輯實體的 pk 不取代物理複合主鍵（PK、SK）。
+  TODO：原文未定義各實體 metadata item 的 SK，不假設 META 等值。
+  邏輯關聯欄位使用裸識別碼；adapter / 圖譜層只在 DynamoDB 邊與查詢加上型別前綴。
+
+  Knowledge Gap 由 Ticket.cluster_id 表達；原文未定義獨立持久化實體。
+  MVP 僅服務單一專案；Tutorial 與 Feature 識別碼在此範圍內唯一，不增加專案維度或 Project 實體。
+  MVP 新增瀏覽事件 TUTORIAL_VIEW，至少記錄版本、使用者與瀏覽時間，作為同題重開票率分母。
+  瀏覽事件 user、Feedback.user 與 Ticket.author 共用同一穩定使用者 ID，由來源接入時提供。
+  不新增 User 實體，也不另存跨來源身分對照表。Demo 的 7 與 2 仍是重開票筆數，不能直接當成已驗證比例。
+  '''
 }
 
-Table Ticket {
-  id int [pk, note: '票單識別碼']
-  content string [note: '顧客問題本文；對應 Bitext instruction，例如「I want to cancel order {{Order Number}}」']
-  resolution_steps string [note: '客服解決步驤；對應 Bitext response。可空：新進票尚未解決時為空']
-  category string [note: '客服分類；對應 Bitext category，例如 ORDER、REFUND、ACCOUNT。可空']
-  customer_ref string [note: '顧客識別字串（demo 用假名或 email）。可空。不建 Customer 表，日後要歸戶再升級成 FK']
-  feature_id int [note: 'asks_about：此票詢問的產品功能。可空；分析前或無法對應功能時為 null']
-  user_problem_id int [note: '此票被聚到哪個問題類型。可空；輪詢進來時為 null，自動回覆或分析後填入']
-  status string [note: '票單狀態，值限 open / deflected / escalated / resolved。open：剛進來；deflected：已自動回覆教學連結；escalated：轉真人（含 user_problem_id 為空、無 published Tutorial、再開票三種情況）；resolved：真人已結案（歷史匯入票直接為 resolved）']
-  deflected_tutorial_id int [note: '自動回覆時送出的 Tutorial。只有 status = deflected 才有值']
-  deflected_tutorial_version string [note: '自動回覆時送出的 TutorialVersion。只有 status = deflected 才有值']
-  reopened_from_ticket_id int [note: '同一 customer_ref 在被攔截後又開同一 user_problem_id 的新票時，指向被攔截的那張舊票。可空。這是「教學無效」的隱性訊號']
-  created_at string [note: '進票時間，必填；輪詢新票用 created_at > 上次檢查時間']
+// 來源：設計 §4、§8.2、§9；ERD §2、§3。
+Table TUTORIAL {
+  pk string [pk, note: '教學身分的邏輯主鍵；DynamoDB PK = TUTORIAL#<slug>。MVP 僅有一個專案，此鍵不包含專案範圍。']
+  slug string [unique, note: '衍生投影：從 TUTORIAL#<slug> 取出 slug；用於連結該教學各版本，不新增儲存欄位。']
+  current_version string [note: '指向目前已上架的 TutorialVersion；邏輯欄位使用裸 version_id，例如 prepare-meeting@v2。publish 成功回傳時才切換；create_version 或 publish 失敗不切換。DynamoDB 邊與查詢才加 VERSION# 前綴。']
+  topic string [note: '這篇教學解釋的主題。']
+  feature_ids string [note: '原始型別 list：教學對應的 Feature 識別碼清單；不把整份清單當成單一外鍵。']
+  status string [note: '教學狀態；枚舉 active | retired。obsolete 只是 retired 的顯示文字，不是第二個資料狀態。判定已有教學時，status=active 即使尚無已發布版本也算；retired 不算。']
+  successor string [note: '後繼教學的裸 slug，可空。由維護者在 RETIRE 當次選定既有 Tutorial；未選定則空。沒有後繼仍完成 RETIRE，不卡住等待後繼。來源事件不直接指定。邏輯關聯不帶 TUTORIAL# 前綴。']
+  cluster_id string [note: '可空。第一版建立時寫入來源 Knowledge Gap 的 cluster_id，之後不變。同題對應以此欄為準，不比 topic 文字。後續分群須可追溯到此 cluster_id。']
 
-  Note: '''顧客客服票單。同時保存顧客問題與（已解決時的）客服解決步驟。
-主要用途：(1) 聚成 UserProblem 決定是否 CREATE Tutorial（只納入 status IN (escalated, resolved) 的票）；(2) 新票依 user_problem_id 匹配已發布 Tutorial 做 deflection；(3) reopened_from_ticket_id 提供再開票訊號。
-狀態轉換：open → deflected | escalated（自動回覆顧客）；escalated → resolved（真人結案，規格外）；歷史匯入票直接為 resolved。
-不變條件：status = deflected ⇔ deflected_tutorial_id 與 deflected_tutorial_version 皆有值。
-不變條件：reopened_from_ticket_id 指向的票 status 必須為 deflected。
-deflection rate = COUNT(status = deflected) / COUNT(status IN (deflected, escalated))，由 hotdata 查詢層計算，不落欄。
-關係：Ticket N:1 Feature（asks_about）；Ticket N:1 UserProblem；Ticket N:1 Tutorial（deflected_by）；Ticket N:1 Ticket（reopened_from）。'''
+  Note: '''
+  一篇教學的身分，指向目前版本。TUTORIAL 1:N TUTORIAL_VERSION（可尚無版本）。
+  版本號屬於各篇 Tutorial，從 v1 起算；只有 Ticket Analysis 建立新的 Tutorial。
+  MVP 固定單一專案，slug 與教學識別碼在此範圍唯一。
+  feature_ids 記錄與 Feature 的關聯；未指定每篇教學的 Feature 數量上限。
+  RETIRE 將 status 設為 retired，並可把 successor 指向另一篇 Tutorial 的 slug。
+  沒有後繼仍完成 RETIRE，successor 保持空。
+  判定已有教學時，status=active 即使尚無已發布版本也算；retired 不算。
+  cluster_id 在第一版建立時寫入，之後不變；同題對應讀此欄或等價的首版 gap:<cluster_id>。
+  '''
 }
 
-Table UserProblem {
-  id int [pk, note: '問題類型識別碼']
-  topic string [note: '問題類型名稱，全域唯一；對應 Bitext intent，例如 cancel_order、track_refund、change_shipping_address。同一 topic 重跑分析必須重用既有列']
-  feature_id int [note: '此問題類型主要涉及的產品功能。可空']
+// 來源：設計 §4、§8.2–§8.4、§9、§20.B；ERD §2–§4。
+Table TUTORIAL_VERSION {
+  pk string [pk, note: '版本邏輯主鍵；DynamoDB PK = VERSION#<slug>@v<n>。']
+  version_id string [unique, note: '衍生投影：從 PK 取出 <slug>@v<n>；例如 prepare-meeting@v2，供原文的版本參照使用，不新增儲存欄位。']
+  slug string [not null, note: '衍生投影：從 VERSION#<slug>@v<n> 取出所屬 Tutorial 的 slug；每版屬於一篇教學，不新增儲存欄位。']
+  supersedes string [unique, note: '取代的前一版本；邏輯欄位使用裸 version_id，例如 prepare-meeting@v2。ERD 為可選一對一，v1 沒有前一版。物理邊 SK = SUPERSEDES#VERSION#<slug>@v<n>。']
+  reason string [note: '改動原因。格式：gap:<cluster_id>、release:<id>、feedback:<n> 則 <category>。REFINE 用設計格式同時保存數量與類別。第一版的 gap:<cluster_id> 同時寫入 Tutorial.cluster_id；後續版本 reason 改變不改該對應。']
+  rules_applied string [note: '原始型別 list：本次寫作 prompt 實際注入的 Authoring Rule 識別碼清單。原文複製沿用的規則不計入。此清單是套用關係的權威；規則 applied_to 與 APPLIED_TO 邊可由它重建。']
+  s3_key string [note: '完整教學的 S3 物件路徑 tutorials/<slug>/v<n>.md；DynamoDB 不存教學全文。']
+  published_at string [note: '原始型別 timestamp：該版本的上架時間。空值或 null 代表未發布；只有非空值才表示已上架。不加版本狀態機。']
 
-  Note: '''問題類型。同義詞：recurring topic、Knowledge Gap、問題類型；規格一律用 UserProblem。
-由語意相似的 Ticket 聚集而成（demo 以 Bitext intent 標籤為聚集依據）。
-「Knowledge Gap」= 已聚成 topic 且目前沒有 status = published 的 Tutorial 對應此 UserProblem。
-是否已有教學不落欄，以 Tutorial.user_problem_id 查詢。
-關係：UserProblem 1:N Ticket；UserProblem N:1 Feature；UserProblem 1:1 Tutorial；UserProblem 1:1 Workflow。'''
+  Note: '''
+  教學的一個版本。TUTORIAL_VERSION N:1 TUTORIAL；1:N TUTORIAL_STEP（可尚無步驟）；
+  supersedes 為可選一對一自我關聯；1:N FEEDBACK；1:N TUTORIAL_VIEW；N:M AUTHORING_RULE。
+  跨屬性規則：任一 pipeline 修改既有教學時，產生該篇下一版並記 reason，
+  supersedes 指向該篇前一版；版本號不依 pipeline 分別累計。
+  S3 完整內容含 Title、Problem、Prerequisites、Steps、Expected Outcome；
+  與前版的 diff 路徑是 tutorials/<slug>/v<n>.diff。
+  v1 建立空的 v1.diff；介面以版本號識別它沒有前版。
+  Step Functions 的 ASL 快照另存 stepfunctions/<pipeline>/v<n>.json，
+  它的版本與 TutorialVersion 不混用。
+  邏輯關聯欄位 supersedes 使用裸 version_id；物理邊 SK 與 target 才加 VERSION# 前綴。
+  rules_applied 是套用關係的權威；規則 applied_to 與 APPLIED_TO 邊由它重建，不另作雙寫交易。
+  版本可先建立未發布版本，此時 published_at 為空。
+  同一邏輯變更失敗重試時重用原 version_id；永久失敗後，後續版本可保留號碼缺口。
+  不要覆蓋已發布內容。
+  '''
 }
 
-Table Feature {
-  id int [pk, note: '產品功能識別碼']
-  name string [note: '產品功能名稱，例如 "Cancel Order"、"Track Refund"。Release Note 更名後直接改成新名稱，舊名稱只留在 Release.content']
-  status string [note: '功能狀態，值限 active / deprecated / removed。Release Note 擷取到 deprecated / removed 時更新']
+// 來源：設計 §8.2、§8.3、§9.2、§10；ERD §2–§4。
+Table TUTORIAL_STEP {
+  pk string [pk, note: '步驟邏輯主鍵；DynamoDB PK = STEP#<slug>@v<n>#<i>，i 是該版本內的步驟編號。']
+  tutorial_version string [not null, note: '衍生投影：從 STEP#<slug>@v<n>#<i> 取出 <slug>@v<n>，每步屬於一個版本，不新增儲存欄位。']
+  sk string [note: '引用邊的排序鍵；REFERENCES#FEATURE#<name>。與 PK 組成物理 item 的複合主鍵。']
+  target string [not null, note: '引用邊的終點 FEATURE#<name>，也是 by_target GSI 的分割鍵；每個步驟恰好引用一個 Feature。']
+  type string [note: '步驟型態；枚舉 click_ui | input | read，用於 applies_when 篩選規則。']
+  text string [note: '該步驟的教學文字；精準更新與 feedback 診斷的單位。']
 
-  Note: '''產品功能。Release 可 new / change / rename / deprecate / remove Feature。
-每篇 Tutorial 必須連回一個 Feature，這是依 Release Note 找受影響 Tutorial 的依據。
-關係：Feature 1:N Ticket（asks_about）；Feature 1:N Tutorial（explains）；Feature 1:N UserProblem；Feature N:M Release（透過 ReleaseFeatureChange）。'''
+  Note: '''
+  某版本內的一步。TUTORIAL_STEP N:1 TUTORIAL_VERSION；N:1 FEATURE。
+  跨屬性不變條件：sk = REFERENCES# + target；target 是關係終點的複本。
+  每個步驟恰好引用一個 Feature；沒有 Feature 或引用多個 Feature 時須先拆解步驟或驗證失敗。
+  Release 更新只重寫命中的步驟；未命中步驟原文複製到新版本。
+  '''
 }
 
-Table Tutorial {
-  tutorial_id int [pk, note: 'Tutorial 識別碼']
-  feature_id int [note: 'explains：此教學解釋的產品功能，必填；沒有 Feature 不得建立 Tutorial']
-  user_problem_id int [note: '此教學解決的問題類型，必填；一個 UserProblem 最多一篇 Tutorial']
-  path string [note: '教學檔案路徑，例如 tutorials/cancel-order.md']
-  status string [note: '發布狀態，值限 draft / published / retired。建立成功即 published（黑客松不走人工審核，保留 draft 供日後加審核）；RETIRE 後為 retired，不再用於自動回覆']
-  current_version string [note: '目前對外的 TutorialVersion.tutorial_version，例如 v2。平均 rating 只算此版的 Feedback']
-  is_possibly_outdated bool [note: 'Release Note 比對到受影響時設為 true；產出新版本後設回 false']
-  is_obsolete bool [note: 'Feature 被 deprecated / removed 後設為 true；等同 RETIRE']
-  last_action string [note: '最後一次生命週期動作，值限 CREATE / UPDATE / REFINE / KEEP / RETIRE']
+// 來源：設計 §4、§8.2、§9.2、§10.1；ERD §2、§3。
+Table FEATURE {
+  pk string [pk, note: '產品功能節點的邏輯主鍵；DynamoDB PK = FEATURE#<建立時名稱>。第一次寫入後不再變更，改名不遷移 PK。MVP 僅有一個專案，此鍵不包含專案範圍。']
+  name string [unique, note: '目前顯示名稱；建立時與 PK 後綴相同，改名後可與 PK 後綴不同。供 Release.feature 與 alias 對應到同一節點。']
+  aliases string [note: '原始型別 list：同一功能曾用名稱，例如 Meeting Summary；各 alias 指向同一 Feature 節點，不含獨立 Feature ID。同一專案內每個 alias 至多指向一個 Feature，也不可與其他 Feature 的 name 重複；衝突則拒絕該次 alias 更新。']
+  first_seen string [note: '原始型別 timestamp：首次出現的時間；格式未定義。']
 
-  Note: '''教學（Tutorial）。同義詞：教學文章；規格一律用 Tutorial。內容欄位（title / problem / prerequisites / steps / expected_outcome）只存在 TutorialVersion，Tutorial 只存身分、狀態與旗標。
-不變條件：is_obsolete = true 時 is_possibly_outdated 必為 false、status 必為 retired、last_action 必為 RETIRE。
-不變條件：status = published 時 current_version 必有值且對應一筆 TutorialVersion。
-不變條件：last_action = CREATE 時 current_version = v1。
-關係：Tutorial N:1 Feature（explains）；Tutorial 1:1 UserProblem；Tutorial 1:N TutorialVersion；Tutorial 1:N Ticket（deflected_by）。'''
+  Note: '''
+  圖譜樞紐，表示產品功能。FEATURE 1:N TUTORIAL_STEP、1:N RELEASE。
+  MVP 固定單一專案；第一次建立的 PK 在此範圍唯一且改名後不變。
+  name 是目前顯示名稱；aliases 記錄曾用名稱。不新增獨立 Feature ID。
+  同一專案內 alias 必須唯一，亦不可與其他 Feature 的 name 撞名；衝突拒絕該次更新。
+  教學的 feature_ids 另記錄 Tutorial 與 Feature 的關聯。
+  TICKET N:0..1 FEATURE，見 TICKET.feature_ids。
+  '''
 }
 
-Table TutorialVersion {
-  tutorial_id int [note: '所屬 Tutorial']
-  tutorial_version string [note: '版本識別，v1、v2、v3 …']
-  title string [note: 'Tutorial 內容欄位：Title，必填']
-  problem string [note: 'Tutorial 內容欄位：Problem，必填']
-  prerequisites string [note: 'Tutorial 內容欄位：Prerequisites，必填（自由文字，不建先備知識關聯）']
-  steps string [note: 'Tutorial 內容欄位：Steps，必填']
-  expected_outcome string [note: 'Tutorial 內容欄位：Expected Outcome，必填']
-  reason string [note: '產生此版本的原因，例如 "Repeated feedback indicates Step 3 lacks context."。v1 可空']
-  supersedes_version string [note: '被此版本取代的上一版 tutorial_version，只能指向同一 tutorial_id。v1 必為空，v2 起必填']
-  created_at string [note: '版本建立時間，必填']
+// 來源：設計 §7.4、§8.2、§9.1、§20.A；ERD §2–§4、§6。
+Table TICKET {
+  pk string [pk, note: '正規化工單邏輯主鍵；DynamoDB PK = TICKET#<id>。']
+  id string [unique, note: '正規化 Ticket 識別碼；直接使用已全域唯一的上游識別碼，例如 t_881。接入層負責產出不撞號格式，pk 由此前綴而得。']
+  source string [not null, note: '來源類型；枚舉 github_issue | discord | email。接入必填。MVP 僅開放一個已驗簽的 GitHub webhook；discord 與 email 以手動上傳接入，不開放未驗證公開入口。']
+  text string [not null, note: '使用者問題的正規化文字。接入必填。']
+  author string [not null, note: '工單作者；接入必填。與 Feedback.user、TUTORIAL_VIEW.user 共用同一穩定使用者 ID，不以顯示名稱推定同一人。']
+  ts string [not null, note: '工單時間；原始為時間值，供同群 recurring 窗口計數；接入必填。窗口以 Ticket.ts 的 UTC 日期歸入當日。']
+  project_id string [not null, note: 'MVP 單一專案的識別碼；接入必填。不作跨專案隔離，也不建立獨立 Project 實體。']
+  cluster_id string [note: '語意分群識別碼；同群的 recurring question 用於識別 Knowledge Gap，附錄例子的初始值為 null。寫入 Tutorial.cluster_id 後，後續分群須可追溯到該值。']
+  feature_ids string [note: '原始型別 list：工單對應的 Feature 識別碼；長度為 0 或 1。附錄例子為空清單。空清單表示尚未對應 Feature。']
+  embedding string [note: '權威的 1,024 維 Titan 向量；原始型別 list<float>。接入後由 Ticket Analysis 計算一次並寫入，不是接入必填。不另存 embedding_ref。string 只是 formulation 的型別投影。']
 
-  indexes {
-    (tutorial_id, tutorial_version) [pk]
-  }
-
-  Note: '''Tutorial 的一版內容快照。五個內容欄位缺任一則建立失敗。
-關係：TutorialVersion N:1 Tutorial；TutorialVersion 1:1 TutorialVersion（supersedes，同篇）；TutorialVersion 1:N Feedback（refers_to）。'''
+  Note: '''
+  來自 GitHub Issues、Discord 或 email 的使用者問題。
+  接入必填：id、source、text、author、ts、project_id。
+  author 與 Feedback.user、TUTORIAL_VIEW.user 為同一穩定使用者 ID；此項覆寫 D09 的 author 可空。
+  embedding 與 cluster_id 由分析流程補入，不是接入必填。
+  TICKET N:0..1 FEATURE。asks_about 邊至多一條：PK = TICKET#<id>；
+  SK = ASKS_ABOUT#FEATURE#<name>；target = FEATURE#<name>。
+  feature_ids 長度為 0 或 1，不另增 scalar feature_id 欄位。
+  向量以 Ticket.embedding 為準，不持久化 embedding_ref。
+  '''
 }
 
-Table Feedback {
-  id int [pk, note: '回饋識別碼']
-  tutorial_id int [note: '回饋所屬 Tutorial，必填']
-  tutorial_version string [note: '回饋所屬 TutorialVersion，必填；顧客未指定時預設為該 Tutorial 的 current_version']
-  rating int [note: '1–5 整數，必填；小於 1 或大於 5 則提交失敗']
-  feedback_category string [note: '回饋類別，值限：指示不清楚 / 缺少資訊 / UI 與 Tutorial 不一致 / Tutorial 太長 / Tutorial 沒有解決問題 / 缺少自己的使用情境 / 其他。可空，未填存空字串']
-  comment string [note: '顧客留言，可空，未填存空字串']
-  submitter_id string [note: '提交者識別（對應 Ticket.customer_ref）。可空；同一提交者可對同一版本重複評分，每次新增一筆']
-  timestamp string [note: '回饋時間，必填']
+// 來源：設計 §4、§9.2、§10.1、§20.A；ERD §2、§3。
+Table RELEASE {
+  pk string [pk, note: '產品改版事件邏輯主鍵；DynamoDB PK = RELEASE#<id>。']
+  id string [unique, note: '正規化改版事件識別碼；直接使用已全域唯一的上游識別碼，例如 r_42。與 PK 的 id 部分相同。同一父來源拆出的子 Release 仍須各有全域唯一 id，不可多筆共用 r_42。']
+  source_event_id string [note: '父來源事件識別碼，例如 PR 號。一則來源含多個 Feature 變更時拆成多個子 Release，各遵守一則一個 feature 加 kind，並共用此值。']
+  source string [not null, note: '來源類型；枚舉 github_pr | changelog，來源為 PR diff 或 changelog。接入必填。MVP 的 github_pr 經由同一個已驗簽 GitHub webhook；changelog 以手動上傳接入，不開放未驗證公開入口。']
+  feature string [not null, note: '改版影響的產品功能；附錄例子為 Prepare。接入時即完成解析，對應 FEATURE.name 或 aliases，指向既有 Feature PK。']
+  kind string [not null, note: '改版種類；枚舉 renamed | changed | removed。接入必填。']
+  old_name string [note: '改名前的名稱；原文例子 Meeting Summary。kind 為 renamed 時必填，其他 kind 可空。']
+  new_name string [note: '改名後的名稱；原文例子 Prepare。kind 為 renamed 時必填，其他 kind 可空。']
+  evidence string [not null, note: '改版依據；原文例子 PR #42 diff excerpt。接入必填。']
+  ts string [not null, note: '改版事件時間；接入必填。格式未定義。']
 
-  Note: '''顧客對某一 TutorialVersion 的顯性回饋。
-隱性回饋（看完教學後又開同類票）不寫進本表，記在 Ticket.reopened_from_ticket_id。
-Hotdata 計算 avg_rating 與 feedback_count（只算 Tutorial.current_version 那一版）。
-進入 Periodic Refinement 的條件：avg_rating < 3.5 且 feedback_count >= 3 且存在 recurring complaints（同一 feedback_category >= 2 筆）。
-關係：Feedback N:1 TutorialVersion（refers_to）。'''
+  Note: '''
+  正規化的產品改版事件，不是 TutorialVersion 的 Publish 動作。
+  接入必填：id、source、feature、kind、evidence、ts。
+  kind 為 renamed 時 old_name 與 new_name 必填；changed 與 removed 的名稱欄位可空。
+  一則來源含多個 Feature 變更時拆成多個子 Release，各一則一個 feature 加 kind，共用 source_event_id。
+  RELEASE N:1 FEATURE。renamed / changed 對應 UPDATE；removed 對應 RETIRE。
+  '''
 }
 
-Table Release {
-  id int [pk, note: 'Release 識別碼']
-  content string [note: 'Release Note 本文，例如 "Cancel Order has been renamed to Cancel Purchase."']
-  created_at string [note: '發布時間，必填；輪詢入庫用 created_at > 上次檢查時間']
-  processed_at string [note: '系統處理完成時間。可空；入庫時為空；有值代表已跑過更新流程，不得重複觸發']
+// 來源：設計 §6、§9.3、§11.1、§15、§20.A；ERD §2–§4、§6。
+Table FEEDBACK {
+  pk string [pk, note: '回饋邏輯主鍵；DynamoDB PK = FEEDBACK#<id>。']
+  id string [unique, note: '正規化回饋識別碼；直接使用已全域唯一的上游識別碼，格式為 f_<n>，例如 f_12。']
+  tutorial_version string [not null, note: '被評價的版本，必須存在於圖譜；邏輯欄位使用裸 version_id，例如 prepare-meeting@v2。']
+  rating int [note: '使用者評分；範圍 1..5。每個版本的平均評分與弱教學挑選使用此欄位。']
+  category string [note: 'Feedback Category，可空。核定類別表初始值：找不到按鈕、缺少資訊。未知值寫入待分類，不自動新增核定類別。使用者勾選優先於模型分類。只有評分時保持空，不送模型分類。']
+  comment string [note: '使用者自由留言，可空。有非空留言且未勾選類別時才計算一次 Feedback Category。']
+  user string [not null, note: '提交回饋的使用者；接入必填。與 Ticket.author、TUTORIAL_VIEW.user 共用同一穩定使用者 ID。']
+  ts string [note: '回饋時間；原始型別 timestamp，格式未定義。']
 
-  Note: '''Release Note。demo 的模擬 changelog 表就是本表，一列一則。
-系統定期輪詢 changelog 來源，把 created_at > 上次檢查時間的新列寫入本表（processed_at 為空）；相同 content + created_at 不重複寫入。
-入庫後才由「依ReleaseNote更新Tutorial」擷取 new / changed / renamed / deprecated / removed，寫入 ReleaseFeatureChange。
-主要用途：入庫產品變更訊號，再找出受影響 Tutorial → UPDATE 或 RETIRE。Release Note 不直接觸發 CREATE。
-關係：Release 1:N ReleaseFeatureChange。'''
+  Note: '''
+  使用者對指定 TutorialVersion 的回饋。FEEDBACK N:1 TUTORIAL_VERSION。
+  refers_to 邊的 SK = REFERS_TO#VERSION#<slug>@v<n>，
+  target = VERSION#<slug>@v<n>，可用 by_target 反查該版本回饋。
+  user 接入必填，與 Ticket.author、TUTORIAL_VIEW.user 為同一穩定使用者 ID。
+  新回饋先持久化，等每日 Periodic Feedback Review，不立即改版。
+  MVP 的 Feedback 以手動上傳接入，不開放未驗證公開入口。
+  核定類別表可擴充，但新增類別須先寫入規格；待分類不視為核定類別。
+  只有評分、類別與留言皆空的回饋仍有效，只參與評分計算。
+  同一使用者對同一版本的每次新提交 ID 都計一筆；同一提交重送不另計。
+  負面回饋的判定：rating <= 2，或 category 為已核定問題類別（找不到按鈕、缺少資訊）。
+  待分類不因 category 計入負面。不另增 negative 標記欄。
+  '''
 }
 
-Table ReleaseFeatureChange {
-  id int [pk, note: '變更識別碼']
-  release_id int [note: '所屬 Release，必填']
-  feature_id int [note: '受變更的 Feature，必填']
-  change_type string [note: '變更類型，值限 new / changed / renamed / deprecated / removed']
-  from_name string [note: 'renamed 時的舊名稱。其他類型可空']
-  to_name string [note: 'renamed 時的新名稱。其他類型可空']
+// 來源：釐清 D23、D24；設計 §15。
+Table TUTORIAL_VIEW {
+  pk string [pk, note: '瀏覽事件邏輯主鍵。PK 格式未指定，不假設 VIEW# 前綴。']
+  tutorial_version string [not null, note: '被瀏覽的版本；邏輯欄位使用裸 version_id，例如 prepare-meeting@v2。接入必填。']
+  user string [not null, note: '瀏覽者穩定使用者 ID；接入必填。與 Ticket.author、Feedback.user 共用同一識別碼。不新增 User 實體。']
+  ts string [not null, note: '瀏覽時間；原始型別 timestamp。接入必填。格式與窗口端點未定義。']
 
-  Note: '''Release 與 Feature 的多對多關聯，並記錄變更類型。
-受影響 Tutorial = Tutorial.feature_id IN (此 Release 的 feature_id)。
-關係：ReleaseFeatureChange N:1 Release；ReleaseFeatureChange N:1 Feature。'''
+  Note: '''
+  教學版本的瀏覽事件，是同題重開票率的分母來源。TUTORIAL_VIEW N:1 TUTORIAL_VERSION。
+  必填：tutorial_version、user、ts。不新增 User 實體或跨來源對照表。
+  同一人比對只認此 user 與 Feedback.user、Ticket.author 的同一穩定識別碼。
+  Demo 的 7 與 2 仍是重開票筆數，不能直接當成比例。
+  PK 格式未指定，不假設 VIEW#。
+  '''
 }
 
-Table Workflow {
-  id int [pk, note: 'Workflow 識別碼']
-  user_problem_id int [note: '此流程解決的問題類型，必填且唯一；一個 UserProblem 最多一條已捕捉流程']
-  steps string [note: 'Rote 捕捉的攔截流程步驟序列（匹配 UserProblem → 取 published Tutorial → 回覆連結 → 更新 Ticket）']
-  captured_at string [note: '第一次成功捕捉時間，必填']
-  replay_count int [note: '已重放次數，初始 0；每次同類新票用重放處理時 +1']
+// 來源：設計 §8.5、§9、§11、§12.1、§15；ERD §2–§5。
+Table AUTHORING_RULE {
+  pk string [pk, note: '教學規則邏輯主鍵；DynamoDB PK = RULE#<id>。']
+  rule_id string [unique, note: '設計 §11.1 明列的規則識別碼，例如 R-007；對應 PK 的 id 部分。']
+  rule string [note: '規則內容，例如要求點 UI 時寫出頁面、按鈕位置與點擊結果。']
+  applies_when string [note: '適用範圍；MVP 僅支援單一條件：step.type 等於 click_ui、input 或 read。不支援 AND/OR 組合；LLM 不產生任意運算式。規則必須帶範圍。']
+  evidence string [note: '回饋證據；只存 Feedback ID 清單。category 由被引用的 Feedback 取得，不另存提出時類別快照。跨專案共享只接受明示合成種子證據；真實專案證據暫不進共享庫。']
+  status string [note: '生命週期；枚舉 candidate | active | retired。propose_rule 產生 candidate；Analytics 驗證後改為 active 或 retired。']
+  applied_to string [note: '原始型別 list：套用過的 TutorialVersion 清單，使用裸 version_id。此清單是由各版本 rules_applied 重建的投影，例如 prepare-meeting@v2、share-summary@v1、prepare-meeting@v3。']
+  derived_from string [note: '規則來源的 TutorialVersion；恰好一個裸 version_id，例如 prepare-meeting@v1。證據只能來自該版本。']
 
-  Note: '''Rote Muscle Memory。第一次成功攔截某 UserProblem 後立刻捕捉為可重放流程；下一張同類票直接重放，不再讓 Agent 重新推理。
-重放解決率 = SUM(replay_count) / COUNT(Ticket.status = deflected)，由 hotdata 計算。
-關係：Workflow 1:1 UserProblem。'''
+  Note: '''
+  從回饋歸納、帶證據與範圍、可轉移與退役的寫作規則。
+  AUTHORING_RULE N:M TUTORIAL_VERSION（applied_to）；恰好 N:1 TUTORIAL_VERSION（derived_from）；
+  evidence 只存可追溯的 Feedback ID 清單；category 由被引用的回饋取得，不另存提出時類別快照。
+  未指定 Feedback 只能支持一條規則。
+  applied_to 邊：PK = RULE#<id>；SK = APPLIED_TO#VERSION#<slug>@v<n>；
+  target = VERSION#<slug>@v<n>。applied_to 清單與邊由各版本 rules_applied 重建。
+  只有 Feedback Review 產生規則；Analytics 寫 status；MVP 固定單一專案，跨專案共享只接受明示合成種子證據，真實專案證據暫不進共享庫。
+  同類 feedback >= 5 才提出 candidate；驗證比較套用與未套用版本的評分及重開票率。
+  TODO：設計 §9 只讀 active，但 §12.1 在 candidate 階段套用 R-007；
+  candidate 如何取得驗證用 applied_to 資料、勝出判準與時間窗口尚未定義。
+  '''
 }
 
-Ref: Ticket.feature_id > Feature.id
-Ref: Ticket.user_problem_id > UserProblem.id
-Ref: Ticket.(deflected_tutorial_id, deflected_tutorial_version) > TutorialVersion.(tutorial_id, tutorial_version)
-Ref: Ticket.reopened_from_ticket_id > Ticket.id
-Ref: UserProblem.feature_id > Feature.id
-Ref: Tutorial.feature_id > Feature.id
-Ref: Tutorial.user_problem_id - UserProblem.id
-Ref: TutorialVersion.tutorial_id > Tutorial.tutorial_id
-Ref: TutorialVersion.(tutorial_id, supersedes_version) - TutorialVersion.(tutorial_id, tutorial_version)
-Ref: Feedback.(tutorial_id, tutorial_version) > TutorialVersion.(tutorial_id, tutorial_version)
-Ref: ReleaseFeatureChange.release_id > Release.id
-Ref: ReleaseFeatureChange.feature_id > Feature.id
-Ref: Workflow.user_problem_id - UserProblem.id
+// 來源：設計 §6、§7、§8.5；ERD §2、§3、§5、§6。
+Table PROVEN_WORKFLOW {
+  pk string [pk, note: '程序性記憶主鍵；DynamoDB PK = PROC#<signature>，signature 為結構 SHA-1 的前 16 個十六進位字元。']
+  steps string [note: '原始型別 list<object>：tool 呼叫序列，每步含 tool 與 args；args 使用 JSONPath 指向事件欄位或前一步輸出，不固定具體事件值。']
+  keys string [note: '原始型別 list：簽名用欄位。每種來源與事件類型各有固定必備 top-level key。MVP GitHub 清單為原文例子 action、issue、repository、sender。其他來源等手動上傳後再定，不預先發明 Discord 或 email 清單。第二層 Jaccard 比對使用。']
+  success_count int [note: '成功次數。首次完整成功記 1；同簽名再由 Agent 走完同一可泛化序列，每次完整成功加 1。第一層與第二層重放皆須 status = active 且 success_count >= 3。原文 PROC 範例為 4。']
+  fail_count int [note: '連續重放失敗次數。每次失敗加 1，成功重放後歸零；達到 3 時 status 變為 retired。']
+  status string [note: '流程狀態；枚舉 active | retired。第一層只命中 active，退役後下次視同未命中。已退役簽名保持停用，不覆寫舊序列；重學須人工核定新序列後再明確重置。']
+  last_used string [note: '原始型別 timestamp：最近一次成功重放或成功寫回的時間；設計 §7.4 例子為 2026-09-12。成功時更新，供第二層 Jaccard 同分時挑選最近成功者。']
+
+  Note: '''
+  某種來源形狀對應的已成功 tool 序列；只有 Rote 層讀寫，沒有任何圖譜邊。
+  簽名使用來源網域、有意義的 header 名稱、該來源／事件類型固定必備的最上層 payload key；
+  ID、時間戳、標題等值不參與簽名。
+  MVP GitHub 的固定 key 為 action、issue、repository、sender；其他來源清單尚未提供。
+  第一層與第二層重放資格皆為 status = active 且 success_count >= 3；
+  第二層同寄件者範圍是來源網域加 adapter 類型，再以 key Jaccard >= 0.8 比對。
+  不新增 sender、domain 或專案欄位；比對時由事件與既有 keys／簽名脈絡取得範圍。
+  fail_count 為連續失敗，成功重放歸零。
+  已退役簽名保持停用，不覆寫舊序列；重新學到的流程須人工核定新序列後再明確重置。
+  Ticket 與 Release 的流程成功須最後 validate 通過且 Step Functions 成功啟動。
+  Feedback 不納入 PROVEN_WORKFLOW 學習，只用固定保存路徑；
+  validate 通過並寫入 FEEDBACK 即接入成功，不啟動 Step Functions。
+  '''
+}
+
+// 所有邏輯關聯欄位使用裸識別碼；DynamoDB 邊與查詢才加型別前綴。
+// 來源：設計 §4、§8.2.1、§9；ERD §2。
+Ref tutorial_has_versions: TUTORIAL.slug < TUTORIAL_VERSION.slug
+Ref tutorial_successor: TUTORIAL.successor > TUTORIAL.slug
+Ref tutorial_current_version: TUTORIAL_VERSION.version_id - TUTORIAL.current_version
+Ref version_contains_steps: TUTORIAL_VERSION.version_id < TUTORIAL_STEP.tutorial_version
+Ref version_supersedes_version: TUTORIAL_VERSION.version_id - TUTORIAL_VERSION.supersedes
+Ref step_references_feature: TUTORIAL_STEP.target > FEATURE.pk
+Ref release_changes_feature: RELEASE.feature > FEATURE.name
+Ref feedback_refers_to_version: FEEDBACK.tutorial_version > TUTORIAL_VERSION.version_id
+Ref view_refers_to_version: TUTORIAL_VIEW.tutorial_version > TUTORIAL_VERSION.version_id
+
+// 來源：設計 §11.1；ERD §2、§4。N:M 使用端點識別碼，不將 applied_to 清單當成單一外鍵。
+Ref rule_applied_to_version: AUTHORING_RULE.pk <> TUTORIAL_VERSION.pk
+Ref rule_derived_from_version: AUTHORING_RULE.derived_from > TUTORIAL_VERSION.version_id
+
+// TICKET.feature_ids 長度 0..1，不另增 scalar feature_id，也不額外宣告 N:M。
+// TUTORIAL.feature_ids 與 AUTHORING_RULE.evidence 保留清單關係及說明；
+// 原文未完整指定反向基數，不額外宣告 N:M 或增加 junction table。
