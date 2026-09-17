@@ -1,0 +1,7 @@
+id,source,text,author,ts,project_id,cluster_id,feature_ids,embedding
+t_1015,discord,每次都要進會議才看得到重點，能不能提前看,u_25,2026-07-29T09:00:00Z,demo,,,
+t_1016,discord,會前重點整理的功能怎麼用,u_26,2026-07-29T15:00:00Z,demo,,,
+t_1017,discord,開會前想先讀過摘要，步驟是什麼,u_27,2026-07-30T09:00:00Z,demo,,,
+t_1018,discord,摘要只有會後才有嗎？我想在會前看,u_28,2026-07-31T09:00:00Z,demo,,,
+t_1019,discord,會議詳細頁上找不到會前摘要,u_29,2026-07-31T15:00:00Z,demo,,,
+t_1020,discord,要怎麼樣才會出現會前摘要,u_30,2026-08-01T09:00:00Z,demo,,,

@@ -1,0 +1,2 @@
+id,source,text,author,ts,project_id,cluster_id,feature_ids,embedding
+t_gh_001,github_issue,會前摘要按鈕在 Issue 裡找不到,u_gh_01,2026-09-17T10:00:00Z,demo,,,

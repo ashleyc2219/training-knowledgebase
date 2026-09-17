@@ -1,4 +1,4 @@
-"""Phase 58 Task 1：Demo 控制台六個子命令與「唯一寫入路徑」的守門。
+"""Phase 58 Task 1：Demo 控制台子命令與「唯一寫入路徑」的守門。
 
 Given 維護者在本機用 `python -m demo.cli <子命令>`
 When 每個子命令跑完
@@ -22,6 +22,7 @@ import pytest
 from demo.cli import (
     ANALYTICS_FUNCTION,
     DEFAULT_SEED_DIR,
+    DEFAULT_TICKETS_DIR,
     IMPORT_FUNCTION,
     SUBCOMMANDS,
     build_parser,
@@ -82,14 +83,14 @@ def run(argv: Sequence[str], aws: FakeAws, payloads: Sequence[dict[str, Any]] = 
 # --- 1. 參數 -----------------------------------------------------------------
 
 
-def test_parser_has_exactly_six_subcommands() -> None:
-    """Given 控制台 When 建立 parser Then 子命令恰好是 `SUBCOMMANDS` 六個。"""
+def test_parser_has_exactly_the_declared_subcommands() -> None:
+    """Given 控制台 When 建立 parser Then 子命令恰好是 `SUBCOMMANDS`。"""
     parser = build_parser()
     actions = [action for action in parser._actions if action.dest == "command"]
     assert len(actions) == 1
     assert actions[0].choices is not None
     assert set(actions[0].choices) == set(SUBCOMMANDS)
-    assert len(SUBCOMMANDS) == 6
+    assert "upload-tickets" in SUBCOMMANDS
 
 
 @pytest.mark.parametrize("mode", ["formal", "demo"])
@@ -108,6 +109,13 @@ def test_seed_dir_defaults_to_demo_seed() -> None:
     """Given 沒給 `--dir` When 解析 Then 預設是 `demo/seed`（Phase 56 的種子目錄）。"""
     assert build_parser().parse_args(["seed"]).dir == DEFAULT_SEED_DIR
     assert DEFAULT_SEED_DIR == SEED_DIR
+
+
+def test_trigger_ticket_defaults_to_test_tickets_dir() -> None:
+    """Given 沒給 `--tickets-dir` When 解析 Then 預設是 `demo/test-tickets`。"""
+    parsed = build_parser().parse_args(["trigger-ticket", "--ticket-id", "t_3001"])
+    assert parsed.tickets_dir == DEFAULT_TICKETS_DIR
+    assert DEFAULT_TICKETS_DIR == "demo/test-tickets"
 
 
 # --- 2. trigger-review：input 逐字只有 mode（00A D-61）------------------------
@@ -158,15 +166,39 @@ def test_trigger_ticket_invokes_import_lambda_with_one_item(
         "mail.local", "email_manual", "manual_batch")
     inner = item["payload"]["items"][0]
     assert inner["id"] == "t_3001"
-    assert inner["text"]            # 原文來自種子檔，不由 CLI 捏造
+    assert inner["text"]            # 原文來自測試工單檔，不由 CLI 捏造
     assert set(aws.services) == {"lambda"}
     assert "saved" in capsys.readouterr().out
 
 
 def test_trigger_ticket_rejects_unknown_ticket(aws: FakeAws) -> None:
-    """Given 種子裡沒有這張工單 When `trigger-ticket` Then 回非 0 且沒有送出任何請求。"""
+    """Given 測試目錄沒有這張工單 When `trigger-ticket` Then 回非 0 且沒有送出任何請求。"""
     assert run(["trigger-ticket", "--ticket-id", "t_0000"], aws) != 0
     assert aws.invocations == [] and aws.executions == []
+
+
+def test_trigger_ticket_github_issue_does_not_invoke(aws: FakeAws) -> None:
+    """Given github_issue 範例 When `trigger-ticket` Then parser 過、不 invoke。"""
+    assert run(["trigger-ticket", "--ticket-id", "t_gh_001"], aws) != 0
+    assert aws.invocations == [] and aws.executions == []
+
+
+def test_upload_tickets_sends_one_invoke_per_row(aws: FakeAws) -> None:
+    """Given discord json 六筆 When `upload-tickets` Then 六次 invoke、不碰 dynamodb。"""
+    replies = [{"results": [{"status": "saved", "object_id": f"t_{index}",
+                             "message": "", "fields": []}]} for index in range(6)]
+    assert run(["upload-tickets", "--source", "discord", "--format", "json"],
+               aws, replies) == 0
+    assert len(aws.invocations) == 6
+    assert all(event["kind"] == "ticket" for _, event in aws.invocations)
+    assert set(aws.services) == {"lambda"}
+
+
+def test_upload_tickets_rejects_github_file(aws: FakeAws) -> None:
+    """Given github_issue json When `upload-tickets --file` Then 不 invoke。"""
+    assert run(["upload-tickets", "--file",
+                "demo/test-tickets/github_issue/json/tickets.json"], aws) != 0
+    assert aws.invocations == []
 
 
 def test_trigger_release_invokes_import_lambda_with_one_item(aws: FakeAws) -> None:
@@ -280,13 +312,14 @@ def test_seed_refuses_and_writes_nothing_while_approvals_missing(
 
 def test_no_subcommand_ever_asks_for_a_dynamodb_client(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Given 六個子命令都跑一次 When 收集要過的 client Then 沒有 `dynamodb`。"""
+    """Given 每個子命令都跑一次 When 收集要過的 client Then 沒有 `dynamodb`。"""
     monkeypatch.setenv("TKB_AWS_REGION", REGION)
     monkeypatch.setenv("TKB_PROJECT_ID", "demo")
     path = tmp_path / "view.json"
     path.write_text(json.dumps({"kind": "view", "items": [{"id": "v_1"}]}), encoding="utf-8")
     runs = (["seed", "--dir", SEED_DIR],
             ["trigger-ticket", "--ticket-id", "t_3001"],
+            ["upload-tickets", "--source", "discord", "--format", "json"],
             ["trigger-release", "--release-id", "r_42"],
             ["trigger-review", "--mode", "demo"],
             ["import", "--file", str(path), "--kind", "view"],

@@ -3,6 +3,7 @@
 ```text
 uv run python -m demo.cli seed            # 唯一直接寫入；O7 未核定時直接拒絕
 uv run python -m demo.cli trigger-ticket  --ticket-id t_3001
+uv run python -m demo.cli upload-tickets  --source email --format json
 uv run python -m demo.cli trigger-release --release-id r_42
 uv run python -m demo.cli trigger-review  --mode demo
 uv run python -m demo.cli import --file <widget 匯出檔> --kind feedback|view
@@ -17,13 +18,13 @@ uv run python -m demo.cli metrics --version prepare-meeting@v1
 **身分與區域**：client 一律 `boto3.client(service, region_name=load_settings().aws_region)`，
 本檔沒有任何金鑰字面值，也不接受金鑰參數；身分走維護者本機的 AWS 登入（R11）。
 
-**本計畫選擇（2026-09-14）——`trigger-ticket`／`trigger-release` 送什麼：**
-CLI 不讀 DynamoDB，所以工單／Release 的原文一律從**本機種子檔**（`--dir`，預設
-`demo/seed`）讀出來，組成 00A D-60 的「可信入口設定 ＋ 原始事件」形狀交給受控匯入
+**本計畫選擇（2026-09-14，測試工單目錄後續補上）——`trigger-ticket`／`trigger-release` 送什麼：**
+CLI 不讀 DynamoDB。工單原文從 **`demo/test-tickets/`**（`--tickets-dir`）依來源
+email／discord／github_issue 與 json／csv／xlsx 讀出來；Release 仍從種子檔 `--dir`
+（預設 `demo/seed`）。組成 00A D-60 的「可信入口設定 ＋ 原始事件」交給受控匯入
 Lambda。可信入口設定是**維護者宣告**的（`TICKET_ENTRIES`／`RELEASE_ENTRY`，值取自
 `tests/fixtures/o6/approved-sources.json` 已登記的手動匯入來源），不從 payload 反推。
-這兩個來源目前**都還沒有 O6 核定**，所以真實 AWS 上這條路會被「未核定來源一律 blocked」
-擋下；本 Phase 只保證送出的內容逐字正確，實機演練與證據排在 Phase 60。
+`github_issue` 只接受 parser、不 invoke（正式入口是 webhook）。
 
 **O5 BLOCKED**：`trigger-ticket` 觸發的正式 Ticket Analysis 會在 Titan／Claude 節點
 `ValidationException: Operation not allowed` → `PermanentError` → Catch → PipelineFailed。
@@ -50,22 +51,32 @@ from typing import Any
 import boto3
 
 from demo.seed_loader import BANNER, apply_seed, load_seed, render_report, verify_recipe
+from demo.ticket_files import DEFAULT_TICKETS_DIR as DEFAULT_TICKETS_DIR
+from demo.ticket_files import (
+    FORMATS,
+    GITHUB_ISSUE_HINT,
+    SOURCES,
+    find_ticket,
+    load_file,
+    load_slot,
+)
 from training_kb.clock import now_utc, to_iso
 from training_kb.config import load_settings
-from training_kb.errors import PermanentError
+from training_kb.errors import ContentError, PermanentError
 from training_kb.faults import is_production
 from training_kb.ingress import execution_name, operation_id_for
-from training_kb.models import Release, Ticket
+from training_kb.models import Release, Ticket, TicketSource
 from training_kb.pipeline_starter import state_machine_arns
 from training_kb.pipelines.common import PipelineName
 from training_kb.repository import Repository
 
 SUBCOMMANDS: tuple[str, ...] = (
-    "seed", "trigger-ticket", "trigger-release", "trigger-review", "import", "metrics")
-"""六個子命令（00A §3.2 的 `demo/` 表）；順序就是 `--help` 的顯示順序。"""
+    "seed", "trigger-ticket", "upload-tickets", "trigger-release", "trigger-review",
+    "import", "metrics")
+"""子命令順序就是 `--help` 的顯示順序；`upload-tickets` 讀測試工單目錄。"""
 
 DEFAULT_SEED_DIR = "demo/seed"
-"""Phase 56 的種子目錄；`seed`／`trigger-ticket`／`trigger-release` 的 `--dir` 預設值。"""
+"""Phase 56 的種子目錄；`seed`／`trigger-release` 的 `--dir` 預設值。"""
 
 IMPORT_FUNCTION = "training-kb-import"
 ANALYTICS_FUNCTION = "training-kb-analytics"
@@ -124,7 +135,7 @@ def _region() -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """六個子命令的參數定義；未知的 `--mode`／`--kind` 在這一層就 `SystemExit`。"""
+    """子命令的參數定義；未知的 `--mode`／`--kind`／`--source` 在這一層就 `SystemExit`。"""
     parser = argparse.ArgumentParser(
         prog="python -m demo.cli",
         description=f"{BANNER}：維護者本機的 Demo 控制台（唯讀為主，寫入只走受控路徑）")
@@ -136,9 +147,17 @@ def build_parser() -> argparse.ArgumentParser:
     seed.add_argument(APPLY_FLAG, action="store_true",
                       help="真的寫入 DynamoDB 與私有 S3 前綴（覆寫既有的 Demo 主鍵）")
 
-    ticket = sub.add_parser("trigger-ticket", help="以種子裡的一張工單觸發正式 Ticket Analysis")
-    ticket.add_argument("--ticket-id", required=True, help="種子 tickets.json 的工單 ID")
-    ticket.add_argument("--dir", default=DEFAULT_SEED_DIR, help="種子目錄")
+    ticket = sub.add_parser(
+        "trigger-ticket", help="以測試工單目錄裡的一張工單觸發正式 Ticket Analysis")
+    ticket.add_argument("--ticket-id", required=True, help="測試工單的 ID")
+    ticket.add_argument("--tickets-dir", default=DEFAULT_TICKETS_DIR, help="測試工單目錄")
+
+    upload = sub.add_parser(
+        "upload-tickets", help="把測試工單目錄（json／csv／xlsx）逐張送進 import Lambda")
+    upload.add_argument("--tickets-dir", default=DEFAULT_TICKETS_DIR, help="測試工單目錄")
+    upload.add_argument("--file", help="單一工單檔（路徑可在目錄外）")
+    upload.add_argument("--source", choices=SOURCES, help="來源資料夾")
+    upload.add_argument("--format", dest="ticket_format", choices=FORMATS, help="json／csv／xlsx")
 
     release = sub.add_parser("trigger-release", help="以種子裡的一筆 Release 觸發 Release Update")
     release.add_argument("--release-id", required=True, help="種子 releases.json 的 Release ID")
@@ -235,7 +254,9 @@ def _seed(args: argparse.Namespace) -> int:
 
 
 def _ticket_event(ticket: Ticket) -> dict[str, Any]:
-    """一張種子工單 -> 受控匯入的一個 item（可信入口設定由本檔宣告，不從 payload 反推）。"""
+    """一張測試工單 -> 受控匯入的一個 item（可信入口設定由本檔宣告，不從 payload 反推）。"""
+    if ticket.source is TicketSource.GITHUB_ISSUE:
+        raise PermanentError(GITHUB_ISSUE_HINT)
     entry = TICKET_ENTRIES.get(str(ticket.source))
     if entry is None:
         raise PermanentError(
@@ -260,16 +281,59 @@ def _release_event(release: Release) -> dict[str, Any]:
                         "batch_id": f"{DEMO_SOURCE}-{release.id}", "items": [item]}}
 
 
-def _trigger_ticket(args: argparse.Namespace) -> int:
-    """送一張 B 類工單走正常 Ticket Analysis（D-68）；只呼叫 `lambda.invoke` 一次。"""
-    bundle = _seed_bundle(args.dir)
-    found = next((row for row in bundle.tickets if row.id == args.ticket_id), None)
-    if found is None:
-        print(f"種子裡沒有工單 {args.ticket_id}", file=sys.stderr)
+def _invoke_ticket(ticket: Ticket) -> int:
+    """一張工單一次 invoke；github_issue 在組事件時就拒絕，不會打 Lambda。"""
+    try:
+        event = {"kind": "ticket", "source": DEMO_SOURCE, "items": [_ticket_event(ticket)]}
+    except PermanentError as error:
+        print(str(error), file=sys.stderr)
         return 2
-    event = {"kind": "ticket", "source": DEMO_SOURCE, "items": [_ticket_event(found)]}
-    print(f"[{BANNER}] invoke {IMPORT_FUNCTION} kind=ticket ticket_id={found.id}")
+    print(f"[{BANNER}] invoke {IMPORT_FUNCTION} kind=ticket ticket_id={ticket.id}")
     return _print_results(_invoke(IMPORT_FUNCTION, event).get("results") or ())
+
+
+def _trigger_ticket(args: argparse.Namespace) -> int:
+    """送一張測試工單走正常 Ticket Analysis（D-68）；只呼叫 `lambda.invoke` 一次。"""
+    try:
+        found = find_ticket(Path(args.tickets_dir), args.ticket_id)
+    except ContentError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    if found is None:
+        print(f"測試工單目錄沒有工單 {args.ticket_id}", file=sys.stderr)
+        return 2
+    return _invoke_ticket(found)
+
+
+def _upload_tickets(args: argparse.Namespace) -> int:
+    """`--file` 或 `--source`＋`--format` 擇一；一列一次 invoke。"""
+    if args.file:
+        if args.source or args.ticket_format:
+            print("upload-tickets：`--file` 不能和 `--source`／`--format` 一起用",
+                  file=sys.stderr)
+            return 2
+        try:
+            tickets = load_file(Path(args.file))
+        except ContentError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+    elif args.source and args.ticket_format:
+        try:
+            tickets = load_slot(Path(args.tickets_dir), args.source, args.ticket_format)
+        except ContentError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+    else:
+        print("upload-tickets：請給 `--file`，或同時給 `--source` 與 `--format`",
+              file=sys.stderr)
+        return 2
+    if not tickets:
+        print("沒有可上傳的工單", file=sys.stderr)
+        return 2
+    failed = 0
+    for ticket in tickets:
+        failed += 0 if _invoke_ticket(ticket) == 0 else 1
+    return 1 if failed else 0
 
 
 def _trigger_release(args: argparse.Namespace) -> int:
@@ -353,8 +417,9 @@ def _metrics(args: argparse.Namespace) -> int:
 
 
 _HANDLERS: Mapping[str, Any] = {
-    "seed": _seed, "trigger-ticket": _trigger_ticket, "trigger-release": _trigger_release,
-    "trigger-review": _trigger_review, "import": _import, "metrics": _metrics,
+    "seed": _seed, "trigger-ticket": _trigger_ticket, "upload-tickets": _upload_tickets,
+    "trigger-release": _trigger_release, "trigger-review": _trigger_review,
+    "import": _import, "metrics": _metrics,
 }
 
 

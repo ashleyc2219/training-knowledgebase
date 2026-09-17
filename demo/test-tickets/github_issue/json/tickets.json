@@ -1,0 +1,17 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：測試上傳用工單，不是真實觀測、不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "items": [
+    {
+      "id": "t_gh_001",
+      "source": "github_issue",
+      "text": "會前摘要按鈕在 Issue 裡找不到",
+      "author": "u_gh_01",
+      "ts": "2026-09-17T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：測試上傳用工單，不是真實觀測、不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "items": [
+    {
+      "id": "t_1015",
+      "source": "discord",
+      "text": "每次都要進會議才看得到重點，能不能提前看",
+      "author": "u_25",
+      "ts": "2026-07-29T09:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_1016",
+      "source": "discord",
+      "text": "會前重點整理的功能怎麼用",
+      "author": "u_26",
+      "ts": "2026-07-29T15:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_1017",
+      "source": "discord",
+      "text": "開會前想先讀過摘要，步驟是什麼",
+      "author": "u_27",
+      "ts": "2026-07-30T09:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_1018",
+      "source": "discord",
+      "text": "摘要只有會後才有嗎？我想在會前看",
+      "author": "u_28",
+      "ts": "2026-07-31T09:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_1019",
+      "source": "discord",
+      "text": "會議詳細頁上找不到會前摘要",
+      "author": "u_29",
+      "ts": "2026-07-31T15:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_1020",
+      "source": "discord",
+      "text": "要怎麼樣才會出現會前摘要",
+      "author": "u_30",
+      "ts": "2026-08-01T09:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    }
+  ]
+}
