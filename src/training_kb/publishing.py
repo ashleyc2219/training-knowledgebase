@@ -697,6 +697,43 @@ class Publisher:
         """重建站台索引（公開方法）；同 `write_tutorial_index` 的理由。"""
         self._write_site_index()
 
+    def publish_recorded_pages(self, slug: str) -> tuple[str, ...]:
+        """替**表裡已標為已發布、但公開站還沒有頁面**的版本補上版本頁與 diff 副本。
+
+        這是給種子資料（`demo/seed`）用的路徑：`apply_seed` 直接寫入帶 `published_at` 的
+        `VERSION` item、私有全文與 diff，卻不會（也不該）走 `prepare → commit`——那條路
+        以「尚未發布」為前提，對已標發布的版本會在 `inspect` 被擋下。這裡只做三件事：
+        核對版本完整、渲染、以**條件寫入**放進 `site/`。
+
+        - 只補**缺的**：`site_key` 已存在就跳過，既有版本頁一個 byte 都不動（一次性產物）。
+        - 不切 `current_version`、不寫 `published_at`、不寫 ledger：那些都是資料本來就有的。
+        - 不重建索引：呼叫端補完頁面後自己呼叫 `write_tutorial_index`／`write_site_index`。
+
+        回傳這次寫進 `site/` 的 key（版本頁與 diff 副本），沒補任何東西時回空 tuple。
+        """
+        written: list[str] = []
+        for version in self._repository.list_versions_of_tutorial(slug):
+            if version.published_at is None:
+                continue
+            page_key = site_key(version.version_id)
+            if self._repository.object_exists(f"{PUBLIC_SITE_PREFIX}{page_key}"):
+                continue
+            if not verify_version_complete(version.version_id, self._repository):
+                raise PublishError(f"{version.version_id} 的內容或關係不完整")
+            loaded, tutorial, content = self._load(version.version_id)
+            page = self._renderer.render_version_page(
+                tutorial, loaded, self._repository.get_steps(version.version_id), content)
+            _, number = parse_version_id(version.version_id)
+            diff = self._repository.get_object(diff_key(slug, number))
+            if diff is None:
+                raise PublishError(f"{version.version_id} 缺少私有 diff")
+            _put_public_object(self._repository, page_key, page.encode("utf-8"),
+                               SITE_PAGE_CONTENT_TYPE)
+            _put_public_object(self._repository, site_diff_key(version.version_id), diff,
+                               DIFF_CONTENT_TYPE)
+            written += [page_key, site_diff_key(version.version_id)]
+        return tuple(written)
+
     def _write_tutorial_index(self, slug: str) -> None:
         """重建一篇教學的版本紀錄頁；只列已發布版本，版號大的在前。
 

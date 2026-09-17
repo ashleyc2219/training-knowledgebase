@@ -1,145 +1,443 @@
-/* 教學站樣式（Phase 57）。
+/* 教學站樣式（Phase 57；2026-09-17 重新設計）。
  *
- * 只用系統字型與純色：不引外部字型、圖片與任何其他樣式表（設計 §13 的「不連外部資源」，
- * 而且 S3 website endpoint 只提供 HTTP，混進加密來源會在部分瀏覽器被擋）。
+ * 規則不變：只用系統字型與純色，不引外部字型、圖片或任何其他樣式表（設計 §13 的
+ * 「不連外部資源」；website endpoint 只有 HTTP，混進加密來源會被部分瀏覽器擋下）。
+ *
+ * 設計語言：一本會長大的操作手冊。
+ *   - 版本是這個站最有個性的東西，所以「版本印章」（.stamp）是全站唯一的重色：
+ *     芥末黃底、等寬字、雙線框，像圖書館的日期章。
+ *   - 標題用宋體（襯線）、內文用黑體（無襯線）、版號與識別碼用等寬字。
+ *   - 步驟是真正有順序的內容，所以用大號序號；其他地方不用編號裝飾。
  */
 
 :root {
-  --ink: #1f2328;
-  --muted: #57606a;
-  --line: #d0d7de;
-  --paper: #ffffff;
-  --notice: #fff8c5;
-  --retired: #fff1e5;
+  --paper: #eef3f1;
+  --card: #ffffff;
+  --ink: #14262e;
+  --muted: #5b6b70;
+  --line: #cbd6d3;
+  --teal: #0f6e73;
+  --teal-deep: #0a4f53;
+  --stamp: #f2c14e;
+  --stamp-ink: #4a3600;
+  --retired: #8c3b2e;
+  --retired-bg: #f8e9e4;
+  --notice-bg: #fff6d6;
+  --serif: "Noto Serif TC", "Songti TC", "Source Han Serif TC", "PMingLiU", "Times New Roman", serif;
+  --sans: system-ui, -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
+* { box-sizing: border-box; }
+
+html { background: var(--paper); }
+
 body {
-  margin: 0 auto;
-  max-width: 44rem;
-  padding: 1.5rem 1rem 4rem;
+  margin: 0;
+  padding: 0 1rem 5rem;
   color: var(--ink);
   background: var(--paper);
-  font-family: system-ui, -apple-system, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
-  line-height: 1.7;
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.8;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--teal); text-decoration: underline; text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { color: var(--teal-deep); text-decoration-thickness: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 3px solid var(--stamp);
+  outline-offset: 2px;
+}
+
+article {
+  max-width: 52rem;
+  margin: 0 auto;
+}
+
+/* --- 站台頂欄 ------------------------------------------------------------ */
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.1rem 0 0.9rem;
+  border-bottom: 2px solid var(--ink);
+  margin-bottom: 1.5rem;
+}
+
+.masthead .home {
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.masthead .home:hover { color: var(--teal); }
+
+.masthead .crumb {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+/* --- 合成資料橫幅 --------------------------------------------------------- */
+
+p.banner {
+  margin: 0 0 1.25rem;
+  padding: 0.45rem 0.8rem;
+  background: var(--notice-bg);
+  border-left: 4px solid var(--stamp);
+  font-size: 0.88rem;
+  color: var(--stamp-ink);
+}
+
+/* --- 版本印章（全站唯一的重色）------------------------------------------- */
+
+.stamp {
+  display: inline-block;
+  padding: 0.1rem 0.55rem;
+  border: 2px solid var(--stamp-ink);
+  box-shadow: inset 0 0 0 2px var(--stamp);
+  background: var(--stamp);
+  color: var(--stamp-ink);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.chip {
+  display: inline-block;
+  padding: 0 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.tag-retired {
+  display: inline-block;
+  padding: 0 0.5rem;
+  border-radius: 3px;
+  background: var(--retired-bg);
+  color: var(--retired);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* --- 版本頁：左側版本欄 + 右側內文 -------------------------------------- */
+
+.page { display: block; }
+
+.rail {
+  margin: 0 0 1.5rem;
+  padding: 0.9rem 1rem 1rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--teal);
+}
+
+.rail p.version {
+  margin: 0 0 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+nav.version-switch ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  font-size: 0.92rem;
+}
+
+nav.version-switch li { margin: 0; }
+nav.version-switch span.current { font-weight: 700; color: var(--ink); }
+
+p.diff-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.eyebrow {
+  margin: 0 0 0.2rem;
+  font-family: var(--serif);
+  font-size: 0.85rem;
+  letter-spacing: 0.3em;
+  color: var(--teal);
 }
 
 h1 {
-  font-size: 1.6rem;
-  margin: 0 0 0.25rem;
+  margin: 0 0 1.25rem;
+  font-family: var(--serif);
+  font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.25rem);
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
 }
 
-h2 {
-  font-size: 1.1rem;
-  margin: 1.75rem 0 0.5rem;
-  padding-bottom: 0.2rem;
+.part { margin: 0 0 1.75rem; }
+
+.part-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin: 0 0 0.5rem;
+  padding-bottom: 0.3rem;
   border-bottom: 1px solid var(--line);
 }
 
-a {
-  color: #0969da;
-}
-
-p.banner {
-  margin: 0 0 1rem;
-  padding: 0.4rem 0.7rem;
-  background: var(--notice);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font-size: 0.9rem;
-}
-
-p.version {
+.part h2 {
+  order: 2;
   margin: 0;
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-
-nav.version-switch {
-  margin: 0.75rem 0;
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font-size: 0.95rem;
-}
-
-nav.version-switch span.current {
+  font-family: var(--mono);
+  font-size: 0.72rem;
   font-weight: 600;
-}
-
-p.diff-note {
-  margin: 0.5rem 0 1rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   color: var(--muted);
 }
+
+.part-zh {
+  order: 1;
+  font-family: var(--serif);
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.part > p, .part > ul { margin: 0; }
+
+.part ul { padding-left: 1.2rem; }
+
+ol.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  counter-reset: step;
+}
+
+ol.steps li {
+  position: relative;
+  counter-increment: step;
+  margin: 0 0 0.75rem;
+  padding: 0.85rem 1rem 0.85rem 3.6rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+ol.steps li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0.95rem;
+  top: 0.8rem;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 50%;
+  background: var(--teal);
+  color: #ffffff;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.9rem;
+  text-align: center;
+}
+
+@media (min-width: 900px) {
+  .page {
+    display: grid;
+    grid-template-columns: 12rem minmax(0, 1fr);
+    gap: 2rem;
+    align-items: start;
+  }
+
+  .rail {
+    position: sticky;
+    top: 1rem;
+    margin: 0;
+  }
+
+  nav.version-switch ul { flex-direction: column; gap: 0.3rem; }
+}
+
+/* --- 退役提示 ------------------------------------------------------------- */
 
 p.retired {
-  margin-top: 2rem;
-  padding: 0.6rem 0.8rem;
-  background: var(--retired);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font-weight: 600;
+  margin: 2rem 0 0;
+  padding: 0.7rem 0.9rem;
+  background: var(--retired-bg);
+  border-left: 4px solid var(--retired);
+  color: var(--retired);
+  font-weight: 700;
 }
 
 p.successor {
-  margin-top: 0.4rem;
+  margin: 0.4rem 0 0;
+  padding-left: 0.9rem;
 }
 
-article.tutorial-index ul,
-article.site-index ul {
-  padding-left: 1.2rem;
+/* --- 教學索引：版本紀錄 --------------------------------------------------- */
+
+article.tutorial-index ol.versions {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0 0 0 1.1rem;
+  border-left: 2px solid var(--line);
 }
+
+article.tutorial-index ol.versions li {
+  position: relative;
+  margin: 0 0 0.9rem;
+  padding-left: 1rem;
+}
+
+article.tutorial-index ol.versions li::before {
+  content: "";
+  position: absolute;
+  left: -1.55rem;
+  top: 0.75rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: var(--paper);
+  border: 2px solid var(--muted);
+}
+
+article.tutorial-index ol.versions li.is-current::before {
+  background: var(--stamp);
+  border-color: var(--stamp-ink);
+}
+
+article.tutorial-index ol.versions a { font-family: var(--mono); font-size: 0.95rem; }
+article.tutorial-index ol.versions .stamp { margin-left: 0.6rem; }
+
+/* --- 站台索引：教學清單 --------------------------------------------------- */
+
+article.site-index ul.tutorials {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+}
+
+article.site-index ul.tutorials li {
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+article.site-index ul.tutorials a {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.8rem;
+  padding: 0.85rem 0.25rem;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+article.site-index ul.tutorials a:hover { background: var(--card); }
+article.site-index ul.tutorials .topic { flex: 1 1 14rem; font-family: var(--serif); font-size: 1.1rem; font-weight: 600; }
+article.site-index ul.tutorials a:hover .topic { color: var(--teal); }
+
+.lede { margin: 0 0 1.5rem; color: var(--muted); }
+
+/* --- 回饋 widget ---------------------------------------------------------- */
 
 #tkb-widget {
   margin-top: 2.5rem;
-  padding: 0.8rem 1rem 1rem;
+  padding: 1rem 1.1rem 1.1rem;
+  background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-top: 3px solid var(--teal);
 }
 
 #tkb-widget h2 {
-  margin-top: 0.25rem;
-  border-bottom: none;
+  margin: 0 0 0.75rem;
+  font-family: var(--serif);
+  font-size: 1.15rem;
 }
 
+#tkb-widget p { margin: 0 0 0.75rem; }
+
 #tkb-widget button {
-  margin-right: 0.35rem;
-  padding: 0.25rem 0.7rem;
+  margin: 0 0.35rem 0.35rem 0;
+  padding: 0.3rem 0.8rem;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: var(--paper);
+  background: var(--card);
   color: inherit;
   font: inherit;
   cursor: pointer;
 }
 
+#tkb-widget button:hover { border-color: var(--teal); color: var(--teal); }
+
 #tkb-widget button[aria-pressed="true"] {
-  border-color: #0969da;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #ffffff;
+}
+
+#tkb-widget button.rating { min-width: 2.6rem; font-family: var(--mono); font-weight: 700; }
+
+#tkb-widget p.actions button {
+  border-radius: 4px;
+  border-color: var(--teal);
+  color: var(--teal);
   font-weight: 600;
 }
 
+#tkb-widget p.actions button#tkb-download { background: var(--teal); color: #ffffff; }
+#tkb-widget p.actions button#tkb-download:hover { background: var(--teal-deep); border-color: var(--teal-deep); }
+
 #tkb-widget label {
   display: block;
-  font-size: 0.9rem;
+  margin-bottom: 0.2rem;
+  font-size: 0.88rem;
   color: var(--muted);
 }
 
 #tkb-widget textarea,
 #tkb-widget input {
-  box-sizing: border-box;
   width: 100%;
-  padding: 0.35rem 0.5rem;
+  padding: 0.45rem 0.6rem;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
+  background: var(--card);
   font: inherit;
+  color: var(--ink);
 }
 
 #tkb-widget p.not-sent {
-  margin-bottom: 0.3rem;
+  padding: 0.5rem 0.7rem;
+  background: var(--paper);
   color: var(--muted);
   font-size: 0.85rem;
 }
 
-#tkb-widget p.status {
-  margin-top: 0;
-  font-size: 0.9rem;
+#tkb-widget p.status { margin: 0; font-size: 0.9rem; }
+#tkb-widget p.status span { font-family: var(--mono); }
+
+@media (prefers-reduced-motion: no-preference) {
+  a, #tkb-widget button { transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease; }
 }

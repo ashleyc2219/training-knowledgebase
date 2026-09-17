@@ -1,7 +1,7 @@
-"""公開頁最小 renderer（Phase 24）：把**已保存**的內容轉成 HTML，不做任何寫入。
+"""公開頁 renderer（Phase 24 建立、Phase 57 加畫面、2026-09-17 重新設計版面）：把**已保存**的內容
+轉成 HTML，不做任何寫入。
 
-三個 render 方法的簽名到 Phase 57 都不改，Phase 57 只換實作（00A §6.7），所以這裡只固定
-**內容契約**，不固定版面：
+三個 render 方法的簽名固定不變（00A §6.7），這裡只固定**內容契約**，版面可以換：
 
 ```text
 render_version_page   版本頁     五段內容 + 版號 + 退役提示 + data-published
@@ -22,6 +22,11 @@ render_site_index     站台索引    只列 current_version 非空的 Tutorial
 它必然是 `None`）。改用可機器檢查的標記：`published_at is None` 的頁面帶
 `data-published="false"`，只能存在於 `operations/` 私有 staging；`Publisher.commit` 在交易
 成功後用已切換的 `published_at` 重新渲染，所以進 `site/` 的一律是 `"true"`（00A §3.8、§6.7）。
+
+**版面（2026-09-17）**：每一頁都是完整的 HTML 文件（`<!doctype html>` … `</html>`），
+`<article>` 仍是內容根節點、機器可讀標記都掛在它身上。版本頁左欄是「版本欄」（版號、
+上一版、版本紀錄、差異），右欄是內文；教學索引是版本時間軸；站台索引是教學清單。
+所有連結一律是**瀏覽器相對路徑**（D-78），不含 `http://`、`https://` 或 CDN。
 
 **所有使用者可見文字一律先 `html.escape` 再拼字串**（同時轉 `&`、`<`、`>`、`"`、`'`）。
 它與 Phase 22 的 `escape_markdown` 不是同一層，不得互換：那個是給 Markdown 全文用的。
@@ -49,6 +54,12 @@ ASSET_KEYS = (f"{SITE_PREFIX}assets/style.css", f"{SITE_PREFIX}assets/widget.js"
 瀏覽器路徑 `<asset_prefix>/style.css`，預設 `/site/assets/style.css`——同一份檔案的兩種
 寫法：key 給 `put_object`，路徑給瀏覽器。"""
 
+SITE_TITLE = "教學站"
+"""站台名稱：站台索引的 `<h1>`、其他頁面頂欄的返回連結，以及每一頁 `<title>` 的尾巴。"""
+
+SITE_LEDE = "依使用者回饋與產品改版自動維護的操作教學；每一版都保留，可以逐版對照。"
+"""站台索引標題下的一句說明。"""
+
 NO_PREVIOUS_TEXT = "第一版，沒有前一版可比較"
 """v1 的差異區塊固定文案（設計 §8.2）。v1 沒有 `.diff` 可比，顯示空連結比不顯示更糟。"""
 
@@ -66,13 +77,23 @@ SUCCESSOR_PREFIX = "改看："
 Phase 57 都不變（00A §6.7），手上只有被退役的那一篇 `Tutorial`，要拿到後繼的 topic 就得
 多讀一次 DynamoDB——renderer 不碰儲存層，所以這裡誠實地印 slug，連結本身仍然可點。"""
 
+CURRENT_LABEL = "目前版本"
+"""「目前版本」四個字只在這裡宣告；版本欄的括號標記與索引的印章都用它。"""
+
 _SECTIONS = ("Problem", "Prerequisites", "Steps", "Expected Outcome")
 """版本頁固定的四個 `<h2>`；標題自己是 `<h1>`，所以五段裡只有四段有 `<h2>`。"""
+
+_SECTION_ZH = {"Problem": "問題", "Prerequisites": "前置條件",
+               "Steps": "步驟", "Expected Outcome": "預期結果"}
+"""四個 `<h2>` 旁的中文標籤；`<h2>` 本身維持英文（那是內容契約），中文只是給讀者看。"""
 
 _TUTORIALS_DIR = "tutorials"
 """站台索引往教學索引的那一層目錄名。字面值與 `publishing.SITE_TUTORIALS_DIR` 相同，但那是
 **S3 key** 的一段、這是**瀏覽器相對路徑**的一段；`site` 不得 import `publishing`（會循環），
 所以兩邊各自宣告、由 `tests/integration/test_site_widget_roundtrip.py` 的整站掃描守住一致。"""
+
+_HOME_FROM_TUTORIAL = "../../index.html"
+"""版本頁與教學索引都公開在 `site/tutorials/<slug>/`，回站台索引要往上兩層（D-78 的相對路徑）。"""
 
 _WIDGET_HEADING = "這篇有幫助嗎？"
 _UNSELECTED_CATEGORY = "未選擇"
@@ -179,7 +200,7 @@ def _diff_block(tutorial: Tutorial, version: TutorialVersion) -> str:
 
 
 def _version_switch(tutorial: Tutorial, version: TutorialVersion) -> str:
-    """版本選擇列：上一版、本頁（必要時標「目前版本」）、版本紀錄頁。
+    """版本欄的連結清單：上一版、本頁（必要時標「目前版本」）、版本紀錄頁。
 
     **不列 `v1..vN`**：設計 §8.1 允許永久失敗留下版號缺口，用版號推算清單會產生死連結。
     完整清單只在版本紀錄頁（`index.html`），那一頁的內容來自 DynamoDB 的實際版本列。
@@ -188,11 +209,12 @@ def _version_switch(tutorial: Tutorial, version: TutorialVersion) -> str:
     if version.supersedes is not None:
         parts.append(f'<a href="{_page_href(version.supersedes, ".html")}">'
                      f"上一版 {_version_number(version.supersedes)}</a>")
-    current = "（目前版本）" if version.version_id == tutorial.current_version else ""
+    current = f"（{CURRENT_LABEL}）" if version.version_id == tutorial.current_version else ""
     parts.append(f'<span class="current">本頁 {_version_number(version.version_id)}'
                  f"{current}</span>")
     parts.append('<a href="index.html">查看版本紀錄</a>')
-    return f'<nav class="version-switch">{"｜".join(parts)}</nav>'
+    items = "".join(f"<li>{part}</li>" for part in parts)
+    return f'<nav class="version-switch" aria-label="版本"><ul>{items}</ul></nav>'
 
 
 def _banner(notice: str, batch: str) -> str:
@@ -216,6 +238,32 @@ def _asset_links(asset_prefix: str, *, script: bool = True) -> str:
     prefix = escape_text(asset_prefix.rstrip("/"))
     link = f'<link rel="stylesheet" href="{prefix}/style.css">'
     return link + (f'<script src="{prefix}/widget.js" defer></script>' if script else "")
+
+
+def _document(title: str, head: str, body: str) -> str:
+    """把 `<article>` 包成一份完整的 HTML 文件。
+
+    `<meta>` 只有字元集與 viewport 兩個：不放 `http-equiv`（測試明令禁止，避免被拿來做
+    自動跳轉），也不放任何外部資源。`<title>` 與內文一樣先轉義。
+    """
+    return (f'<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f"<title>{escape_text(title)}</title>{head}</head>"
+            f"<body>{body}</body></html>")
+
+
+def _masthead(home_href: str, crumb: str) -> str:
+    """頂欄：回站台索引的連結＋本頁在哪裡（slug／版號，等寬字）。"""
+    return (f'<header class="masthead"><a class="home" href="{escape_text(home_href)}">'
+            f"{escape_text(SITE_TITLE)}</a>"
+            f'<span class="crumb">{escape_text(crumb)}</span></header>')
+
+
+def _part(section: str, inner: str) -> str:
+    """版本頁的一段：固定的英文 `<h2>`（內容契約）＋中文標籤，內文原樣放進去。"""
+    return (f'<section class="part"><div class="part-head"><h2>{section}</h2>'
+            f'<span class="part-zh">{escape_text(_SECTION_ZH[section])}</span></div>'
+            f"{inner}</section>")
 
 
 def _widget_block(tutorial: Tutorial, version: TutorialVersion,
@@ -262,11 +310,10 @@ def _widget_block(tutorial: Tutorial, version: TutorialVersion,
 
 
 class SiteRenderer:
-    """最小公開頁 renderer。
+    """公開頁 renderer。
 
-    四個 keyword 參數在本 Phase 只是存起來備用（Phase 57 才會真的用到橫幅與資產路徑），
-    但**現在就要有預設值**：`SiteRenderer()` 無參數建構是 Phase 24／25／41／48／52 的既定
-    用法，Phase 57 加畫面選項時也不得拿掉預設值（00A §6.7）。
+    四個 keyword 參數都有預設值：`SiteRenderer()` 無參數建構是 Phase 24／25／41／48／52 的
+    既定用法，加畫面選項時也不得拿掉預設值（00A §6.7）。
     """
 
     def __init__(self, *, notice: str = "", batch: str = "",
@@ -286,9 +333,10 @@ class SiteRenderer:
         半對的頁面比停下來危險得多（設計 §8.2）。核對只比 `(number, text)`——`type` 與
         `feature_id` 不進公開頁，拿它們比對會把「不影響公開內容的差異」誤判成不同步。
 
-        **Phase 57 在同一個簽名上多輸出四樣東西**（00A §6.7 明訂簽名不變）：`data-retired`
-        機器可讀標記、合成資料橫幅、版本選擇與差異連結、以及回饋／瀏覽紀錄下載區。
-        `version.reason` 仍然一個字都不進頁面（`release:<id>` 是上游識別碼，設計 §13 私有）。
+        **機器可讀標記全掛在 `<article>` 上**：`data-published`（00A §3.8）、`data-retired`、
+        `data-slug`、`data-version-id`。左欄是版本欄（版號、上一版、版本紀錄、差異連結），
+        右欄是內文；`version.reason` 一個字都不進頁面（`release:<id>` 是上游識別碼，
+        設計 §13 私有）。
         """
         saved = [(step.number, step.text) for step in steps]
         public = [(draft.number, draft.text) for draft in content.steps]
@@ -296,24 +344,40 @@ class SiteRenderer:
             raise PublishError(f"{version.version_id} 的已保存步驟與公開內容不同步")
         published = "true" if version.published_at is not None else "false"
         retired = "true" if tutorial.status == TutorialStatus.RETIRED else "false"
-        page = (
+        is_current = version.version_id == tutorial.current_version
+        crumb = f"{tutorial.slug} / {_version_number(version.version_id)}"
+        stamp = (f'<p><span class="stamp">{escape_text(CURRENT_LABEL)}</span></p>'
+                 if is_current else "")
+        rail = (
+            f'<aside class="rail" aria-label="版本資訊">'
+            f'<p class="version">{escape(version.version_id)}</p>'
+            f"{stamp}"
+            f"{_version_switch(tutorial, version)}"
+            f"{_diff_block(tutorial, version)}"
+            f"</aside>"
+        )
+        body = (
+            f'<div class="body">'
+            f'<p class="eyebrow">操作教學</p>'
+            f"<h1>{escape(content.title)}</h1>"
+            + _part(_SECTIONS[0], f"<p>{escape(content.problem)}</p>")
+            + _part(_SECTIONS[1], f"<ul>{_items(content.prerequisites)}</ul>")
+            + _part(_SECTIONS[2], f'<ol class="steps">{_items([step.text for step in steps])}</ol>')
+            + _part(_SECTIONS[3], f"<p>{escape(content.expected_outcome)}</p>")
+            + _widget_block(tutorial, version, self.categories, self.notice)
+            + "</div>"
+        )
+        article = (
             f'<article data-published="{published}" data-retired="{retired}"'
             f' data-slug="{escape(tutorial.slug)}"'
             f' data-version-id="{escape(version.version_id)}">'
-            f"{_asset_links(self.asset_prefix)}"
+            f"{_masthead(_HOME_FROM_TUTORIAL, crumb)}"
             f"{_banner(self.notice, self.batch)}"
-            f"<h1>{escape(content.title)}</h1>"
-            f'<p class="version">{escape(version.version_id)}</p>'
-            f"{_version_switch(tutorial, version)}"
-            f"{_diff_block(tutorial, version)}"
-            f"<h2>{_SECTIONS[0]}</h2><p>{escape(content.problem)}</p>"
-            f"<h2>{_SECTIONS[1]}</h2><ul>{_items(content.prerequisites)}</ul>"
-            f"<h2>{_SECTIONS[2]}</h2>"
-            f"<ol>{_items([step.text for step in steps])}</ol>"
-            f"<h2>{_SECTIONS[3]}</h2><p>{escape(content.expected_outcome)}</p>"
-            f"{_widget_block(tutorial, version, self.categories, self.notice)}"
+            f'<div class="page">{rail}{body}</div>'
+            f"{_retired_block(tutorial)}</article>"
         )
-        return page + _retired_block(tutorial) + "</article>"
+        return _document(f"{content.title}｜{version.version_id}｜{SITE_TITLE}",
+                         _asset_links(self.asset_prefix), article)
 
     def render_tutorial_index(self, tutorial: Tutorial,
                               versions: list[TutorialVersion]) -> str:
@@ -323,38 +387,58 @@ class SiteRenderer:
         `data-site-version` 是「公開站此刻指向哪一版」的機器可讀標記，Phase 12 的 O3 觀察
         腳本就是讀它；`current_version` 是空的（還沒有任何已發布版本）時它是空字串。
 
-        退役區塊放在版本清單**之後**、`</article>` 之前，與版本頁的位置一致（同一個
-        `_retired_block`）。退役之後真正讓讀者看到提示的是「P52 退役後重寫這一頁」，
-        本模組只負責產生內容，不決定何時寫（那是 `Publisher` 的事）。
+        清單照呼叫端給的順序輸出（`Publisher` 給的是版號大的在前），目前版本那一列
+        加上印章。退役區塊放在版本清單**之後**、`</article>` 之前，與版本頁一致。
         """
         current = tutorial.current_version
         marker = "" if current is None else _version_number(current)
-        rows = "".join(
-            f'<li><a href="{_page_href(version.version_id, ".html")}">'
-            f"{escape(version.version_id)}"
-            f"{'（目前版本）' if version.version_id == current else ''}</a></li>"
-            for version in versions if version.published_at is not None
-        )
-        return (f'<article class="tutorial-index" data-site-version="{escape(marker)}"'
-                f' data-slug="{escape(tutorial.slug)}">'
-                f"{_asset_links(self.asset_prefix, script=False)}"
-                f"{_banner(self.notice, self.batch)}"
-                f"<h1>{escape(tutorial.topic)}</h1><ul>{rows}</ul>"
-                f"{_retired_block(tutorial)}</article>")
+        rows = []
+        for version in versions:
+            if version.published_at is None:
+                continue
+            is_current = version.version_id == current
+            label = escape(version.version_id) + (f"（{CURRENT_LABEL}）" if is_current else "")
+            stamp = (f'<span class="stamp">{escape_text(CURRENT_LABEL)}</span>'
+                     if is_current else "")
+            rows.append(f'<li{" class=\"is-current\"" if is_current else ""}>'
+                        f'<a href="{_page_href(version.version_id, ".html")}">{label}</a>'
+                        f"{stamp}</li>")
+        article = (f'<article class="tutorial-index" data-site-version="{escape(marker)}"'
+                   f' data-slug="{escape(tutorial.slug)}">'
+                   f"{_masthead(_HOME_FROM_TUTORIAL, tutorial.slug)}"
+                   f"{_banner(self.notice, self.batch)}"
+                   '<p class="eyebrow">版本紀錄</p>'
+                   f"<h1>{escape(tutorial.topic)}</h1>"
+                   f'<ol class="versions">{"".join(rows)}</ol>'
+                   f"{_retired_block(tutorial)}</article>")
+        return _document(f"{tutorial.topic}｜版本紀錄｜{SITE_TITLE}",
+                         _asset_links(self.asset_prefix, script=False), article)
 
     def render_site_index(self, tutorials: list[Tutorial]) -> str:
         """站台索引；**只列 `current_version` 非空的 Tutorial**（還沒發布過的不上架）。
 
         連結是 `tutorials/<slug>/index.html`：站台索引公開在 `site/index.html`，教學索引在
         `site/tutorials/<slug>/index.html`，所以從這一頁看過去就是往下兩層的相對路徑
-        （同 D-78 的規則，不是 S3 key）。沒發布過的教學連 slug 都不輸出。
+        （同 D-78 的規則，不是 S3 key）。沒發布過的教學連 slug 都不輸出。每一列顯示
+        主題、目前版號，退役的教學加上標籤（連結仍可點，讀者會在教學索引看到後繼）。
         """
-        rows = "".join(
-            f'<li><a href="{_TUTORIALS_DIR}/{escape_text(tutorial.slug)}/index.html">'
-            f"{escape(tutorial.topic)}</a></li>"
-            for tutorial in tutorials if tutorial.current_version is not None
-        )
-        return (f'<article class="site-index">'
-                f"{_asset_links(self.asset_prefix, script=False)}"
-                f"{_banner(self.notice, self.batch)}"
-                f"<h1>教學站</h1><ul>{rows}</ul></article>")
+        rows = []
+        for tutorial in tutorials:
+            if tutorial.current_version is None:
+                continue
+            retired = ('<span class="tag-retired">已退役</span>'
+                       if tutorial.status == TutorialStatus.RETIRED else "")
+            rows.append(
+                f'<li><a href="{_TUTORIALS_DIR}/{escape_text(tutorial.slug)}/index.html">'
+                f'<span class="topic">{escape(tutorial.topic)}</span>'
+                f'<span class="chip">'
+                f'{escape_text(_version_number(tutorial.current_version))}</span>'
+                f"{retired}</a></li>")
+        article = (f'<article class="site-index">'
+                   f'<header class="masthead"><span class="home">{escape_text(SITE_TITLE)}</span>'
+                   f'<span class="crumb">{len(rows)} 篇</span></header>'
+                   f"{_banner(self.notice, self.batch)}"
+                   f"<h1>{escape_text(SITE_TITLE)}</h1>"
+                   f'<p class="lede">{escape_text(SITE_LEDE)}</p>'
+                   f'<ul class="tutorials">{"".join(rows)}</ul></article>')
+        return _document(SITE_TITLE, _asset_links(self.asset_prefix, script=False), article)

@@ -20,6 +20,7 @@ status=active           -> 兩行都不輸出
 自己在哪一篇。完整的退役頁樣式、版本選擇與 diff 檢視留給 Phase 57。
 """
 
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
@@ -35,7 +36,7 @@ from training_kb.models import (
     TutorialStep,
     TutorialVersion,
 )
-from training_kb.site import SiteRenderer
+from training_kb.site import SUCCESSOR_PREFIX, SiteRenderer
 
 SLUG = "meeting-summary"
 SUCCESSOR = "prepare-meeting"
@@ -181,7 +182,10 @@ def test_tutorial_index_omits_the_link_when_the_successor_was_rejected(
     page = renderer.render_tutorial_index(tutorial, [version])
     assert 'class="retired"' in page and RETIRED_NOTICE in page
     assert 'class="successor"' not in page
-    assert "index.html" not in page
+    assert SUCCESSOR_PREFIX not in page
+    # 頂欄回站台索引的 `../../index.html` 是唯一允許的 index.html 連結；後繼連結長得像
+    # `../<slug>/index.html`（slug 不含 `.`），所以用 slug 形狀排除頂欄那一條。
+    assert re.search(r'href="\.\./[a-z0-9_-]+/index\.html"', page) is None
 
 
 def test_tutorial_index_escapes_the_successor_slug(renderer: SiteRenderer) -> None:

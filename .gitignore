@@ -11,3 +11,6 @@ cdk.out/
 .env.*
 !.env.example
 .DS_Store
+
+# Playwright MCP 的截圖與快照（本機驗證用，不進版控）
+.playwright-mcp/
