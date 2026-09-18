@@ -1,0 +1,39 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：測試上傳用工單，不是真實觀測、不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "items": [
+    {
+      "id": "t_5001",
+      "source": "email",
+      "text": "會議開始前沒有收到提醒通知，要去哪裡打開？",
+      "author": "u_51",
+      "ts": "2026-09-10T11:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_5002",
+      "source": "email",
+      "text": "通知太多了，想只留會前提醒，設定在哪？",
+      "author": "u_52",
+      "ts": "2026-09-11T09:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_5003",
+      "source": "email",
+      "text": "怎麼把通知改成寄到 email 而不是手機推播",
+      "author": "u_53",
+      "ts": "2026-09-12T15:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    }
+  ]
+}

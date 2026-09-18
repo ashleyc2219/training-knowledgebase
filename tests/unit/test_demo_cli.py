@@ -184,11 +184,12 @@ def test_trigger_ticket_github_issue_does_not_invoke(aws: FakeAws) -> None:
 
 
 def test_upload_tickets_sends_one_invoke_per_row(aws: FakeAws) -> None:
-    """Given discord json 六筆 When `upload-tickets` Then 六次 invoke、不碰 dynamodb。"""
+    """Given prepare-meeting 的 discord json 六筆 When `upload-tickets --category`
+    Then 六次 invoke、不碰 dynamodb（其他主題資料夾的 discord 工單不會被掃進來）。"""
     replies = [{"results": [{"status": "saved", "object_id": f"t_{index}",
                              "message": "", "fields": []}]} for index in range(6)]
-    assert run(["upload-tickets", "--source", "discord", "--format", "json"],
-               aws, replies) == 0
+    assert run(["upload-tickets", "--category", "prepare-meeting",
+                "--source", "discord", "--format", "json"], aws, replies) == 0
     assert len(aws.invocations) == 6
     assert all(event["kind"] == "ticket" for _, event in aws.invocations)
     assert set(aws.services) == {"lambda"}
@@ -197,7 +198,7 @@ def test_upload_tickets_sends_one_invoke_per_row(aws: FakeAws) -> None:
 def test_upload_tickets_rejects_github_file(aws: FakeAws) -> None:
     """Given github_issue json When `upload-tickets --file` Then 不 invoke。"""
     assert run(["upload-tickets", "--file",
-                "demo/test-tickets/github_issue/json/tickets.json"], aws) != 0
+                "demo/test-tickets/prepare-meeting/github_issue/json/tickets.json"], aws) != 0
     assert aws.invocations == []
 
 

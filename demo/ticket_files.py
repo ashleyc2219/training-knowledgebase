@@ -1,11 +1,12 @@
-"""測試工單檔：依來源分資料夾，json／csv／xlsx 三種格式讀成同一個 `Ticket`。
+"""測試工單檔：依主題類別再依來源分資料夾，json／csv／xlsx 讀成同一個 `Ticket`。
 
 目錄契約：
 
 ```text
-demo/test-tickets/{email|discord|github_issue}/{json|csv|xlsx}/tickets.<ext>
+demo/test-tickets/{category}/{email|discord|github_issue}/{json|csv|xlsx}/tickets.<ext>
 ```
 
+第一層是主題資料夾（例如 `prepare-meeting`），名稱可自訂，不必先登記。
 `source` 必須與來源資料夾名稱一致。本模組不碰 DynamoDB、不呼叫 Lambda。
 xlsx 只在本機 dev 依賴 `openpyxl` 裡解析，不進 Lambda runtime。
 """
@@ -33,6 +34,9 @@ COLUMNS: tuple[str, ...] = (
     "id", "source", "text", "author", "ts", "project_id", "cluster_id", "feature_ids",
     "embedding")
 DEFAULT_TICKETS_DIR = "demo/test-tickets"
+SEED_CATEGORIES: tuple[str, ...] = (
+    "prepare-meeting", "share-summary", "notification-settings", "weekly-digest")
+"""匯出腳本預先建好的主題資料夾；`load_all` 仍會掃第一層任何非來源名的目錄。"""
 NOTICE = ("合成資料示範（SYNTHETIC）：測試上傳用工單，不是真實觀測、不含任何真人資料、帳號或金鑰。")
 GITHUB_ISSUE_HINT = (
     "github_issue 不能走 training-kb-import 的精簡 Ticket 檔；"
@@ -101,7 +105,11 @@ def _format_of(path: Path) -> str:
 
 
 def infer_source(path: Path) -> str | None:
-    """`.../{source}/{format}/file` 才認得出來源資料夾；否則回 None，改看 Ticket.source。"""
+    """`.../{source}/{format}/file` 才認得出來源資料夾；否則回 None，改看 Ticket.source。
+
+    主題層不參與判斷：`prepare-meeting/email/json/tickets.json` 與舊的
+    `email/json/tickets.json` 都認成 `email`。
+    """
     parts = path.resolve().parts
     if len(parts) < 3:
         return None
@@ -109,6 +117,22 @@ def infer_source(path: Path) -> str | None:
     if source in SOURCES and fmt in FORMATS:
         return source
     return None
+
+
+def list_categories(directory: Path) -> tuple[str, ...]:
+    """第一層不是來源名、也不是隱藏目錄的資料夾，就是主題類別。"""
+    root = Path(directory)
+    if not root.is_dir():
+        return ()
+    return tuple(sorted(
+        child.name for child in root.iterdir()
+        if child.is_dir() and child.name not in SOURCES and not child.name.startswith(".")))
+
+
+def _reserved_category(category: str) -> None:
+    if category in SOURCES or category in FORMATS or category.startswith("."):
+        raise ContentError(
+            f"類別資料夾名稱不能是來源、格式或隱藏目錄：{category}")
 
 
 def _check_source(tickets: Sequence[Ticket], *, expected: str, name: str) -> None:
@@ -199,25 +223,49 @@ def load_file(path: Path, *, expected_source: str | None = None) -> tuple[Ticket
     return tickets
 
 
-def slot_dir(directory: Path, source: str, fmt: str) -> Path:
+def slot_dir(directory: Path, source: str, fmt: str, *, category: str | None = None) -> Path:
     if source not in SOURCES:
         raise ContentError(f"未知來源資料夾：{source}；可用的是 {list(SOURCES)}")
     if fmt not in FORMATS:
         raise ContentError(f"未知格式：{fmt}；可用的是 {list(FORMATS)}")
-    return directory / source / fmt
+    if category is None:
+        return directory / source / fmt
+    _reserved_category(category)
+    return directory / category / source / fmt
 
 
-def load_slot(directory: Path, source: str, fmt: str) -> tuple[Ticket, ...]:
-    folder = slot_dir(directory, source, fmt)
-    if not folder.is_dir():
-        raise ContentError(f"缺少測試工單目錄：{folder}")
-    paths = sorted(path for path in folder.iterdir()
-                   if path.is_file() and path.suffix.lower() == f".{fmt}")
-    if not paths:
-        raise ContentError(f"{folder} 裡沒有 .{fmt} 檔")
+def _slot_folders(directory: Path, source: str, fmt: str,
+                  *, category: str | None) -> list[Path]:
+    """有主題資料夾就掃每一類；沒有就退回舊的 `{source}/{format}`。"""
+    root = Path(directory)
+    if category is not None:
+        return [slot_dir(root, source, fmt, category=category)]
+    names = list_categories(root)
+    if names:
+        return [slot_dir(root, source, fmt, category=name) for name in names]
+    return [slot_dir(root, source, fmt)]
+
+
+def load_slot(directory: Path, source: str, fmt: str,
+              *, category: str | None = None) -> tuple[Ticket, ...]:
+    candidates = _slot_folders(directory, source, fmt, category=category)
+    folders = [folder for folder in candidates if folder.is_dir()]
+    if not folders:
+        raise ContentError(f"缺少測試工單目錄：{candidates[0]}")
     tickets: list[Ticket] = []
-    for path in paths:
-        tickets.extend(load_file(path, expected_source=source))
+    seen_files = False
+    for folder in folders:
+        paths = sorted(path for path in folder.iterdir()
+                       if path.is_file() and path.suffix.lower() == f".{fmt}")
+        if not paths:
+            if category is not None:
+                raise ContentError(f"{folder} 裡沒有 .{fmt} 檔")
+            continue
+        seen_files = True
+        for path in paths:
+            tickets.extend(load_file(path, expected_source=source))
+    if not seen_files:
+        raise ContentError(f"{folders[0]} 裡沒有 .{fmt} 檔")
     return tuple(tickets)
 
 
@@ -227,22 +275,24 @@ def load_all(directory: Path) -> tuple[Ticket, ...]:
     if not root.is_dir():
         raise ContentError(f"缺少測試工單目錄：{root}")
     by_id: dict[str, Ticket] = {}
-    for source in SOURCES:
-        for fmt in FORMATS:
-            folder = root / source / fmt
-            if not folder.is_dir():
-                continue
-            for path in sorted(folder.iterdir()):
-                if not path.is_file() or path.suffix.lower() != f".{fmt}":
+    bases = [root / name for name in list_categories(root)] or [root]
+    for base in bases:
+        for source in SOURCES:
+            for fmt in FORMATS:
+                folder = base / source / fmt
+                if not folder.is_dir():
                     continue
-                for ticket in load_file(path, expected_source=source):
-                    existing = by_id.get(ticket.id)
-                    if existing is None:
-                        by_id[ticket.id] = ticket
+                for path in sorted(folder.iterdir()):
+                    if not path.is_file() or path.suffix.lower() != f".{fmt}":
                         continue
-                    if ticket_row(existing) != ticket_row(ticket):
-                        raise ContentError(
-                            f"工單 {ticket.id} 在測試目錄裡出現不一致的內容")
+                    for ticket in load_file(path, expected_source=source):
+                        existing = by_id.get(ticket.id)
+                        if existing is None:
+                            by_id[ticket.id] = ticket
+                            continue
+                        if ticket_row(existing) != ticket_row(ticket):
+                            raise ContentError(
+                                f"工單 {ticket.id} 在測試目錄裡出現不一致的內容")
     return tuple(by_id[key] for key in sorted(by_id))
 
 
@@ -288,8 +338,9 @@ def dump_xlsx(path: Path, tickets: Sequence[Ticket]) -> None:
     workbook.save(path)
 
 
-def dump_source(directory: Path, source: str, tickets: Sequence[Ticket]) -> None:
+def dump_source(directory: Path, source: str, tickets: Sequence[Ticket],
+                *, category: str | None = None) -> None:
     """同一個來源寫出 json／csv／xlsx 各一份 `tickets.<ext>`。"""
-    dump_json(slot_dir(directory, source, "json") / "tickets.json", tickets)
-    dump_csv(slot_dir(directory, source, "csv") / "tickets.csv", tickets)
-    dump_xlsx(slot_dir(directory, source, "xlsx") / "tickets.xlsx", tickets)
+    dump_json(slot_dir(directory, source, "json", category=category) / "tickets.json", tickets)
+    dump_csv(slot_dir(directory, source, "csv", category=category) / "tickets.csv", tickets)
+    dump_xlsx(slot_dir(directory, source, "xlsx", category=category) / "tickets.xlsx", tickets)

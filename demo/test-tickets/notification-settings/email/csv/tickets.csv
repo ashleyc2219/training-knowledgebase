@@ -1,0 +1,4 @@
+id,source,text,author,ts,project_id,cluster_id,feature_ids,embedding
+t_5001,email,會議開始前沒有收到提醒通知，要去哪裡打開？,u_51,2026-09-10T11:00:00Z,demo,,,
+t_5002,email,通知太多了，想只留會前提醒，設定在哪？,u_52,2026-09-11T09:00:00Z,demo,,,
+t_5003,email,怎麼把通知改成寄到 email 而不是手機推播,u_53,2026-09-12T15:00:00Z,demo,,,

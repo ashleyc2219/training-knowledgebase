@@ -1,0 +1,39 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：測試上傳用工單，不是真實觀測、不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "items": [
+    {
+      "id": "t_4001",
+      "source": "email",
+      "text": "會議結束後要怎麼把摘要分享給沒參加的同事？",
+      "author": "u_41",
+      "ts": "2026-09-10T09:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_4002",
+      "source": "email",
+      "text": "找不到分享摘要的連結在哪裡產生",
+      "author": "u_42",
+      "ts": "2026-09-11T14:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_4003",
+      "source": "email",
+      "text": "摘要能不能直接用連結給主管看，不用登入？",
+      "author": "u_43",
+      "ts": "2026-09-12T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    }
+  ]
+}

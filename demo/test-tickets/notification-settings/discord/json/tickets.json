@@ -1,0 +1,28 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：測試上傳用工單，不是真實觀測、不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "items": [
+    {
+      "id": "t_5004",
+      "source": "discord",
+      "text": "設定頁找不到通知的開關",
+      "author": "u_54",
+      "ts": "2026-09-14T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_5005",
+      "source": "discord",
+      "text": "每週摘要的通知可以關掉嗎？",
+      "author": "u_55",
+      "ts": "2026-09-16T09:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    }
+  ]
+}

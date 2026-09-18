@@ -1,0 +1,193 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：測試上傳用工單，不是真實觀測、不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "items": [
+    {
+      "id": "t_3001",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_01",
+      "ts": "2026-06-02T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3002",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_02",
+      "ts": "2026-06-02T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3003",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_03",
+      "ts": "2026-06-02T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3004",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_04",
+      "ts": "2026-06-02T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3005",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_01",
+      "ts": "2026-06-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3006",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_02",
+      "ts": "2026-06-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3007",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_03",
+      "ts": "2026-06-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3008",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_01",
+      "ts": "2026-07-05T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3009",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_02",
+      "ts": "2026-07-05T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3010",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_03",
+      "ts": "2026-07-05T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3011",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_01",
+      "ts": "2026-07-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3012",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_02",
+      "ts": "2026-07-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3013",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_03",
+      "ts": "2026-07-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3014",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_04",
+      "ts": "2026-07-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3015",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_05",
+      "ts": "2026-07-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3016",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_06",
+      "ts": "2026-07-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_3017",
+      "source": "email",
+      "text": "看過每週摘要教學後，還是不知道漏掉的會議重點要在哪裡展開",
+      "author": "u_07",
+      "ts": "2026-07-21T10:00:00Z",
+      "project_id": "demo",
+      "cluster_id": "c58",
+      "feature_ids": [],
+      "embedding": null
+    }
+  ]
+}

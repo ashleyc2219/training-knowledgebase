@@ -1,0 +1,28 @@
+{
+  "_notice": "合成資料示範（SYNTHETIC）：測試上傳用工單，不是真實觀測、不含任何真人資料、帳號或金鑰。",
+  "synthetic": true,
+  "items": [
+    {
+      "id": "t_4004",
+      "source": "discord",
+      "text": "分享出去的摘要連結別人打開是空的",
+      "author": "u_44",
+      "ts": "2026-09-13T16:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    },
+    {
+      "id": "t_4005",
+      "source": "discord",
+      "text": "會後摘要要怎麼分享到群組？",
+      "author": "u_45",
+      "ts": "2026-09-15T09:00:00Z",
+      "project_id": "demo",
+      "cluster_id": null,
+      "feature_ids": [],
+      "embedding": null
+    }
+  ]
+}

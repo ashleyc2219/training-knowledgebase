@@ -1,0 +1,4 @@
+id,source,text,author,ts,project_id,cluster_id,feature_ids,embedding
+t_4001,email,會議結束後要怎麼把摘要分享給沒參加的同事？,u_41,2026-09-10T09:00:00Z,demo,,,
+t_4002,email,找不到分享摘要的連結在哪裡產生,u_42,2026-09-11T14:00:00Z,demo,,,
+t_4003,email,摘要能不能直接用連結給主管看，不用登入？,u_43,2026-09-12T10:00:00Z,demo,,,

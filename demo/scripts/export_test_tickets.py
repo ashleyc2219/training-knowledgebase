@@ -1,12 +1,14 @@
-"""從 `demo/seed/tickets.json` 依 source 拆到 `demo/test-tickets/`。
+"""從 `demo/seed/tickets.json` 依主題類別再依 source 拆到 `demo/test-tickets/`。
 
 種子檔本身不動。github_issue 種子沒有，寫一筆合成範例供 parser 測試。
+沒有工單的主題仍寫出空的來源 × 格式格子，方便接著加票。
 """
 
+from collections import defaultdict
 from pathlib import Path
 
 from demo.seed_loader import load_seed
-from demo.ticket_files import DEFAULT_TICKETS_DIR, dump_source
+from demo.ticket_files import DEFAULT_TICKETS_DIR, SEED_CATEGORIES, SOURCES, dump_source
 from training_kb.clock import parse_iso
 from training_kb.models import Ticket, TicketSource
 
@@ -17,18 +19,29 @@ GITHUB_SAMPLE = Ticket(
     feature_ids=[], embedding=None)
 
 
+def category_for(ticket: Ticket) -> str:
+    """種子工單目前只有兩類主題；對不到的歸入準備會議。"""
+    if ticket.cluster_id == "c58" or ticket.id.startswith("t_30"):
+        return "weekly-digest"
+    return "prepare-meeting"
+
+
 def main() -> int:
     bundle = load_seed(Path("demo/seed"))
     root = Path(DEFAULT_TICKETS_DIR)
-    by_source: dict[str, list[Ticket]] = {str(TicketSource.EMAIL): [],
-                                          str(TicketSource.DISCORD): []}
+    grouped: dict[tuple[str, str], list[Ticket]] = defaultdict(list)
     for ticket in bundle.tickets:
-        by_source.setdefault(str(ticket.source), []).append(ticket)
-    dump_source(root, str(TicketSource.EMAIL), by_source[str(TicketSource.EMAIL)])
-    dump_source(root, str(TicketSource.DISCORD), by_source[str(TicketSource.DISCORD)])
-    dump_source(root, str(TicketSource.GITHUB_ISSUE), (GITHUB_SAMPLE,))
-    print(f"已寫入 {root}：email={len(by_source[str(TicketSource.EMAIL)])} "
-          f"discord={len(by_source[str(TicketSource.DISCORD)])} github_issue=1")
+        grouped[(category_for(ticket), str(ticket.source))].append(ticket)
+    github_key = ("prepare-meeting", str(TicketSource.GITHUB_ISSUE))
+    grouped[github_key].append(GITHUB_SAMPLE)
+    for category in SEED_CATEGORIES:
+        for source in SOURCES:
+            rows = grouped.get((category, source), [])
+            dump_source(root, source, rows, category=category)
+    counts = ", ".join(
+        f"{name}={sum(len(grouped[(name, source)]) for source in SOURCES)}"
+        for name in SEED_CATEGORIES)
+    print(f"已寫入 {root}：{counts}")
     return 0
 
 

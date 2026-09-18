@@ -19,8 +19,8 @@ uv run python -m demo.cli metrics --version prepare-meeting@v1
 本檔沒有任何金鑰字面值，也不接受金鑰參數；身分走維護者本機的 AWS 登入（R11）。
 
 **本計畫選擇（2026-09-14，測試工單目錄後續補上）——`trigger-ticket`／`trigger-release` 送什麼：**
-CLI 不讀 DynamoDB。工單原文從 **`demo/test-tickets/`**（`--tickets-dir`）依來源
-email／discord／github_issue 與 json／csv／xlsx 讀出來；Release 仍從種子檔 `--dir`
+CLI 不讀 DynamoDB。工單原文從 **`demo/test-tickets/`**（`--tickets-dir`）依主題類別
+再依來源 email／discord／github_issue 與 json／csv／xlsx 讀出來；Release 仍從種子檔 `--dir`
 （預設 `demo/seed`）。組成 00A D-60 的「可信入口設定 ＋ 原始事件」交給受控匯入
 Lambda。可信入口設定是**維護者宣告**的（`TICKET_ENTRIES`／`RELEASE_ENTRY`，值取自
 `tests/fixtures/o6/approved-sources.json` 已登記的手動匯入來源），不從 payload 反推。
@@ -156,6 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
         "upload-tickets", help="把測試工單目錄（json／csv／xlsx）逐張送進 import Lambda")
     upload.add_argument("--tickets-dir", default=DEFAULT_TICKETS_DIR, help="測試工單目錄")
     upload.add_argument("--file", help="單一工單檔（路徑可在目錄外）")
+    upload.add_argument("--category", help="主題資料夾；省略則掃全部主題")
     upload.add_argument("--source", choices=SOURCES, help="來源資料夾")
     upload.add_argument("--format", dest="ticket_format", choices=FORMATS, help="json／csv／xlsx")
 
@@ -308,8 +309,8 @@ def _trigger_ticket(args: argparse.Namespace) -> int:
 def _upload_tickets(args: argparse.Namespace) -> int:
     """`--file` 或 `--source`＋`--format` 擇一；一列一次 invoke。"""
     if args.file:
-        if args.source or args.ticket_format:
-            print("upload-tickets：`--file` 不能和 `--source`／`--format` 一起用",
+        if args.source or args.ticket_format or args.category:
+            print("upload-tickets：`--file` 不能和 `--category`／`--source`／`--format` 一起用",
                   file=sys.stderr)
             return 2
         try:
@@ -319,7 +320,8 @@ def _upload_tickets(args: argparse.Namespace) -> int:
             return 2
     elif args.source and args.ticket_format:
         try:
-            tickets = load_slot(Path(args.tickets_dir), args.source, args.ticket_format)
+            tickets = load_slot(Path(args.tickets_dir), args.source, args.ticket_format,
+                               category=args.category)
         except ContentError as error:
             print(str(error), file=sys.stderr)
             return 2

@@ -9,10 +9,13 @@ from demo.ticket_files import (
     COLUMNS,
     DEFAULT_TICKETS_DIR,
     GITHUB_ISSUE_HINT,
+    SEED_CATEGORIES,
     dump_csv,
     dump_json,
+    dump_source,
     dump_xlsx,
     find_ticket,
+    list_categories,
     load_all,
     load_file,
     load_slot,
@@ -39,6 +42,32 @@ def test_seeded_email_json_loads_t_3001() -> None:
     assert found is not None
     assert found.source is TicketSource.EMAIL
     assert found.text
+
+
+def test_seeded_layout_uses_category_then_source_folders() -> None:
+    """Given 測試工單目錄 When 列第一層 Then 是主題資料夾，不是來源資料夾。"""
+    assert set(list_categories(ROOT)) == set(SEED_CATEGORIES)
+    assert (ROOT / "prepare-meeting" / "email" / "json" / "tickets.json").is_file()
+    assert (ROOT / "weekly-digest" / "email" / "json" / "tickets.json").is_file()
+    assert not (ROOT / "email").exists()
+    assert find_ticket(ROOT, "t_1015") is not None
+    assert find_ticket(ROOT, "t_3001") is not None
+
+
+def test_load_all_reads_category_then_source_folders(tmp_path: Path) -> None:
+    """Given 工單放在主題／來源／格式 When load_all Then 讀得到，且舊扁平路徑不是必要的。"""
+    dump_source(tmp_path, "email", (_sample(),), category="prepare-meeting")
+    loaded = load_all(tmp_path)
+    assert [row.id for row in loaded] == ["t_9001"]
+    assert load_slot(tmp_path, "email", "json", category="prepare-meeting")[0].id == "t_9001"
+
+
+def test_load_slot_skips_category_missing_the_format(tmp_path: Path) -> None:
+    """Given 新主題只有半套格子 When 掃全部主題 Then 仍讀得到已完成的那一格。"""
+    dump_source(tmp_path, "email", (_sample(),), category="prepare-meeting")
+    (tmp_path / "new-topic" / "email" / "json").mkdir(parents=True)
+    loaded = load_slot(tmp_path, "email", "json")
+    assert [row.id for row in loaded] == ["t_9001"]
 
 
 def test_three_formats_round_trip(tmp_path: Path) -> None:
