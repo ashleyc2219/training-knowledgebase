@@ -21,8 +21,8 @@ from training_kb.pipelines.feedback import DiagnosisResult, WeakTarget, diagnose
 
 VERSION_ID = "prepare-meeting@v1"
 OTHER_VERSION_ID = "prepare-meeting@v2"
-CATEGORY = "找不到按鈕"
-OTHER_CATEGORY = "缺少資訊"
+CATEGORY = "Button not found"
+OTHER_CATEGORY = "Missing information"
 TARGET_FEEDBACK_IDS = ("f_12", "f_15", "f_19", "f_23", "f_27", "f_31", "f_34", "f_40")
 HIT: dict[str, Any] = {"number": 3, "reason": "沒有指出按鈕所在頁面與位置"}
 
@@ -57,7 +57,7 @@ def feedback(feedback_id: str, *, version_id: str = VERSION_ID, category: str = 
 
 @pytest.fixture
 def weak_target() -> WeakTarget:
-    """P44 選出的目標：`prepare-meeting@v1`、類別「找不到按鈕」、八筆同類證據。"""
+    """P44 選出的目標：`prepare-meeting@v1`、類別「Button not found」、八筆同類證據。"""
     return WeakTarget(tutorial_id="prepare-meeting", version_id=VERSION_ID,
                       category=CATEGORY, feedback_ids=TARGET_FEEDBACK_IDS)
 
@@ -70,12 +70,13 @@ def fake_repo() -> FakeRepo:
 
 @pytest.fixture
 def fake_repo_two_versions() -> FakeRepo:
-    """v1 四步＋八筆「找不到按鈕」，v2 兩步＋十筆「缺少資訊」；target 只指 v1 的八個 ID。"""
+    """v1 四步＋八筆「Button not found」，v2 兩步＋十筆「Missing information」；
+    target 只指 v1 的八個 ID。"""
     steps = [step(number) for number in (1, 2, 3, 4)]
     steps += [step(number, version_id=OTHER_VERSION_ID) for number in (1, 2)]
     rows = [feedback(row_id) for row_id in TARGET_FEEDBACK_IDS]
     rows += [feedback(f"f_{101 + offset}", version_id=OTHER_VERSION_ID,
-                      category=OTHER_CATEGORY, comment="缺少資訊，看不懂要填什麼")
+                      category=OTHER_CATEGORY, comment="Missing information，看不懂要填什麼")
              for offset in range(10)]
     return FakeRepo(steps=steps, feedback=rows)
 
@@ -165,7 +166,7 @@ def test_prompt_only_contains_target_version_and_evidence(
     assert "prepare-meeting@v2" not in call["user"]
     for feedback_id in weak_target.feedback_ids:
         assert feedback_id in call["user"]
-    assert "f_101" not in call["user"] and "缺少資訊" not in call["user"]
+    assert "f_101" not in call["user"] and "Missing information" not in call["user"]
     assert "第 4 步" in call["user"]
     assert CATEGORY in call["user"]
 

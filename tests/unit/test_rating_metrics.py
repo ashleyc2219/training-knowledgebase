@@ -19,7 +19,7 @@ from training_kb.models import Feedback
 V1 = "prepare-meeting@v1"
 V2 = "prepare-meeting@v2"
 # 核定類別表自備，不 import Phase 43 的 DEFAULT_FEEDBACK_CATEGORIES（值相同，但不建相依）。
-APPROVED = frozenset({"找不到按鈕", "缺少資訊"})
+APPROVED = frozenset({"Button not found", "Missing information"})
 V1_RATINGS = [
     ("f_12", 2),
     ("f_15", 2),
@@ -83,7 +83,7 @@ def test_cross_version_average_weights_each_version_equally():
 
 def test_negative_ids_union_is_deduplicated_by_feedback_id():
     """Given 八筆同時低分或屬核定類別，When 取負面集合，Then 長度是 8 不是 10。"""
-    v1 = [fb(fid, rating, "找不到按鈕") for fid, rating in V1_RATINGS]
+    v1 = [fb(fid, rating, "Button not found") for fid, rating in V1_RATINGS]
     negatives = negative_feedback_ids(v1, APPROVED)
     assert isinstance(negatives, frozenset)
     assert len(negatives) == 8
@@ -92,7 +92,7 @@ def test_negative_ids_union_is_deduplicated_by_feedback_id():
 
 def test_negative_ids_skip_unclassified_and_high_rating():
     """Given 「待分類」與 5 分的回饋，When 取負面集合，Then 只留 f_101 與 f_102。"""
-    v2 = [fb("f_101", 2, "缺少資訊", V2), fb("f_102", 2, "缺少資訊", V2)]
+    v2 = [fb("f_101", 2, "Missing information", V2), fb("f_102", 2, "Missing information", V2)]
     v2 += [fb(f"f_{n}", 5, None, V2) for n in range(103, 111)]
     v2.append(fb("f_200", 5, "待分類", V2))
     assert negative_feedback_ids(v2, APPROVED) == frozenset({"f_101", "f_102"})
@@ -101,10 +101,10 @@ def test_negative_ids_skip_unclassified_and_high_rating():
 def test_negative_ids_cover_three_independent_boundaries():
     """Given 三個獨立邊界，When 取負面集合，Then 四個 ID 都在且同筆重複只算一次。"""
     rows = [
-        fb("f_301", None, "找不到按鈕"),  # 沒有評分，但類別已核定
+        fb("f_301", None, "Button not found"),  # 沒有評分，但類別已核定
         fb("f_302", 2, "待分類"),  # 待分類，但低分條件獨立成立
-        fb("f_303", 3, "缺少資訊"),  # 不低分，但類別已核定
-        fb("f_304", 1, "缺少資訊"),  # 兩個條件同時命中
+        fb("f_303", 3, "Missing information"),  # 不低分，但類別已核定
+        fb("f_304", 1, "Missing information"),  # 兩個條件同時命中
     ]
     rows.append(rows[-1])  # 同一筆重複出現
     assert negative_feedback_ids(rows, APPROVED) == frozenset({"f_301", "f_302", "f_303", "f_304"})

@@ -64,7 +64,7 @@ from training_kb.pipelines.feedback import (
 from training_kb.repository import Repository
 
 NOW = datetime(2026, 9, 14, tzinfo=UTC)
-CATEGORY = "找不到按鈕"
+CATEGORY = "Button not found"
 EIGHT_IDS = ("f_12", "f_15", "f_19", "f_23", "f_27", "f_31", "f_34", "f_40")
 HIT_REASON = "沒有指出按鈕所在頁面與位置"
 REWRITE: dict[str, Any] = {"number": 3, "text": "在會議頁面右上角選擇 Meeting Summary。",
@@ -203,7 +203,7 @@ def run_retry_scenario(scenario: Scenario) -> dict[str, Any]:
     assert plan is not None
     assert plan.version_id == scenario.next_version_id          # 同版號（D26）
     assert plan.changed_indexes == (3,)
-    assert plan.reason == "feedback:8 則 找不到按鈕"
+    assert plan.reason == "feedback:8 則 Button not found"
     assert writer.request_attempts == 1                         # 重送沒有再打模型
 
     after_retry = scenario.operations.load(scenario.operation_id)

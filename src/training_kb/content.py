@@ -843,7 +843,7 @@ def _missing_parts(version_id: str, repository: Repository) -> list[str]:
 
 # --- 9. 教學退役與後繼導向 ---------------------------------------------------
 
-RETIRED_NOTICE = "此教學已退役，內容僅供歷史查閱。"
+RETIRED_NOTICE = "This tutorial has been retired. It is kept for reference only."
 """公開頁**唯一**的過期說明（00A §6.6）。
 
 刻意不含退役原因：`reason` 是 `release:<release_id>` 這種上游識別碼，設計 §13 把它列為

@@ -7,224 +7,224 @@
       "tutorial_version": "prepare-meeting@v1",
       "number": 1,
       "type": "click_ui",
-      "text": "在左側主選單點「Open Meeting」開啟會議。",
+      "text": "In the left main menu, click \"Open Meeting\" to open the meeting.",
       "feature_id": "Open Meeting"
     },
     {
       "tutorial_version": "prepare-meeting@v1",
       "number": 2,
       "type": "read",
-      "text": "在 Meeting List 頁面找到今天要開的那一場會議。",
+      "text": "On the Meeting List page, find today's meeting.",
       "feature_id": "Meeting List"
     },
     {
       "tutorial_version": "prepare-meeting@v1",
       "number": 3,
       "type": "click_ui",
-      "text": "點開會前摘要。",
+      "text": "Open the pre-meeting summary.",
       "feature_id": "Prepare"
     },
     {
       "tutorial_version": "prepare-meeting@v1",
       "number": 4,
       "type": "click_ui",
-      "text": "在頁面右下角點「Export Notes」把摘要存成筆記。",
+      "text": "In the bottom-right corner of the page, click \"Export Notes\" to save the summary as notes.",
       "feature_id": "Export Notes"
     },
     {
       "tutorial_version": "prepare-meeting@v2",
       "number": 1,
       "type": "click_ui",
-      "text": "在左側主選單點「Open Meeting」開啟會議。",
+      "text": "In the left main menu, click \"Open Meeting\" to open the meeting.",
       "feature_id": "Open Meeting"
     },
     {
       "tutorial_version": "prepare-meeting@v2",
       "number": 2,
       "type": "read",
-      "text": "在 Meeting List 頁面找到今天要開的那一場會議。",
+      "text": "On the Meeting List page, find today's meeting.",
       "feature_id": "Meeting List"
     },
     {
       "tutorial_version": "prepare-meeting@v2",
       "number": 3,
       "type": "click_ui",
-      "text": "在會議詳細頁右上角的工具列點「會前摘要」按鈕。",
+      "text": "In the toolbar at the top right of the meeting detail page, click the \"Meeting Summary\" button.",
       "feature_id": "Prepare"
     },
     {
       "tutorial_version": "prepare-meeting@v2",
       "number": 4,
       "type": "click_ui",
-      "text": "在頁面右下角點「Export Notes」把摘要存成筆記。",
+      "text": "In the bottom-right corner of the page, click \"Export Notes\" to save the summary as notes.",
       "feature_id": "Export Notes"
     },
     {
       "tutorial_version": "share-summary@v1",
       "number": 1,
       "type": "click_ui",
-      "text": "在左側主選單點「Open Meeting」開啟會議。",
+      "text": "In the left main menu, click \"Open Meeting\" to open the meeting.",
       "feature_id": "Open Meeting"
     },
     {
       "tutorial_version": "share-summary@v1",
       "number": 2,
       "type": "click_ui",
-      "text": "在會議詳細頁右上角點「Share Link」產生分享連結。",
+      "text": "At the top right of the meeting detail page, click \"Share Link\" to create a share link.",
       "feature_id": "Share Link"
     },
     {
       "tutorial_version": "share-summary@v1",
       "number": 3,
       "type": "click_ui",
-      "text": "在分享面板點「Share Summary」挑選要分享的重點段落。",
+      "text": "In the share panel, click \"Share Summary\" and pick the key-point sections to share.",
       "feature_id": "Share Summary"
     },
     {
       "tutorial_version": "share-summary@v1",
       "number": 4,
       "type": "click_ui",
-      "text": "在頁面右下角點「Export Notes」把摘要存成筆記。",
+      "text": "In the bottom-right corner of the page, click \"Export Notes\" to save the summary as notes.",
       "feature_id": "Export Notes"
     },
     {
       "tutorial_version": "notification-settings@v1",
       "number": 1,
       "type": "click_ui",
-      "text": "在右上角頭像選單點「Settings Page」開啟設定頁。",
+      "text": "In the avatar menu at the top right, click \"Settings Page\" to open your settings.",
       "feature_id": "Settings Page"
     },
     {
       "tutorial_version": "notification-settings@v1",
       "number": 2,
       "type": "click_ui",
-      "text": "在設定頁左欄點「Notification Settings」。",
+      "text": "In the left column of the settings page, click \"Notification Settings\".",
       "feature_id": "Notification Settings"
     },
     {
       "tutorial_version": "notification-settings@v1",
       "number": 3,
       "type": "input",
-      "text": "在 Notification Channel 欄位填入要接收提醒的信箱或頻道。",
+      "text": "In the Notification Channel field, enter the mailbox or channel that should receive reminders.",
       "feature_id": "Notification Channel"
     },
     {
       "tutorial_version": "notification-settings@v1",
       "number": 4,
       "type": "click_ui",
-      "text": "在頁面右下角點「Export Notes」把設定摘要存成筆記。",
+      "text": "In the bottom-right corner of the page, click \"Export Notes\" to save a summary of your settings as notes.",
       "feature_id": "Export Notes"
     },
     {
       "tutorial_version": "weekly-digest@v1",
       "number": 1,
       "type": "click_ui",
-      "text": "在左側主選單點「Open Meeting」開啟會議。",
+      "text": "In the left main menu, click \"Open Meeting\" to open the meeting.",
       "feature_id": "Open Meeting"
     },
     {
       "tutorial_version": "weekly-digest@v1",
       "number": 2,
       "type": "read",
-      "text": "在 Meeting List 頁面把時間範圍切到「本週」。",
+      "text": "On the Meeting List page, switch the time range to \"This week\".",
       "feature_id": "Meeting List"
     },
     {
       "tutorial_version": "weekly-digest@v1",
       "number": 3,
       "type": "read",
-      "text": "閱讀 Weekly Digest 區塊。",
+      "text": "Read the Weekly Digest section.",
       "feature_id": "Weekly Digest"
     },
     {
       "tutorial_version": "weekly-digest@v1",
       "number": 4,
       "type": "click_ui",
-      "text": "在頁面右下角點「Export Notes」把摘要存成筆記。",
+      "text": "In the bottom-right corner of the page, click \"Export Notes\" to save the summary as notes.",
       "feature_id": "Export Notes"
     },
     {
       "tutorial_version": "weekly-digest@v2",
       "number": 1,
       "type": "click_ui",
-      "text": "在左側主選單點「Open Meeting」開啟會議。",
+      "text": "In the left main menu, click \"Open Meeting\" to open the meeting.",
       "feature_id": "Open Meeting"
     },
     {
       "tutorial_version": "weekly-digest@v2",
       "number": 2,
       "type": "read",
-      "text": "在 Meeting List 頁面把時間範圍切到「本週」。",
+      "text": "On the Meeting List page, switch the time range to \"This week\".",
       "feature_id": "Meeting List"
     },
     {
       "tutorial_version": "weekly-digest@v2",
       "number": 3,
       "type": "read",
-      "text": "閱讀 Weekly Digest 區塊。這裡列出本週每一場會議的重點。",
+      "text": "Read the Weekly Digest section. It lists the highlights of every meeting this week.",
       "feature_id": "Weekly Digest"
     },
     {
       "tutorial_version": "weekly-digest@v2",
       "number": 4,
       "type": "click_ui",
-      "text": "在頁面右下角點「Export Notes」把摘要存成筆記。",
+      "text": "In the bottom-right corner of the page, click \"Export Notes\" to save the summary as notes.",
       "feature_id": "Export Notes"
     },
     {
       "tutorial_version": "weekly-digest@v3",
       "number": 1,
       "type": "click_ui",
-      "text": "在左側主選單點「Open Meeting」開啟會議。",
+      "text": "In the left main menu, click \"Open Meeting\" to open the meeting.",
       "feature_id": "Open Meeting"
     },
     {
       "tutorial_version": "weekly-digest@v3",
       "number": 2,
       "type": "read",
-      "text": "在 Meeting List 頁面把時間範圍切到「本週」。",
+      "text": "On the Meeting List page, switch the time range to \"This week\".",
       "feature_id": "Meeting List"
     },
     {
       "tutorial_version": "weekly-digest@v3",
       "number": 3,
       "type": "read",
-      "text": "閱讀 Weekly Digest 區塊。這裡依會議時間由新到舊列出本週每一場會議的重點。",
+      "text": "Read the Weekly Digest section. It lists the highlights of every meeting this week, newest first.",
       "feature_id": "Weekly Digest"
     },
     {
       "tutorial_version": "weekly-digest@v3",
       "number": 4,
       "type": "click_ui",
-      "text": "在頁面右下角點「Export Notes」把摘要存成筆記。",
+      "text": "In the bottom-right corner of the page, click \"Export Notes\" to save the summary as notes.",
       "feature_id": "Export Notes"
     },
     {
       "tutorial_version": "weekly-digest@v4",
       "number": 1,
       "type": "click_ui",
-      "text": "在左側主選單點「Open Meeting」開啟會議。",
+      "text": "In the left main menu, click \"Open Meeting\" to open the meeting.",
       "feature_id": "Open Meeting"
     },
     {
       "tutorial_version": "weekly-digest@v4",
       "number": 2,
       "type": "read",
-      "text": "在 Meeting List 頁面把時間範圍切到「本週」。",
+      "text": "On the Meeting List page, switch the time range to \"This week\".",
       "feature_id": "Meeting List"
     },
     {
       "tutorial_version": "weekly-digest@v4",
       "number": 3,
       "type": "read",
-      "text": "閱讀 Weekly Digest 區塊。漏掉的段落可以在同一頁的「補充重點」展開。",
+      "text": "Read the Weekly Digest section. Any section that was skipped can be expanded under \"More highlights\" on the same page.",
       "feature_id": "Weekly Digest"
     },
     {
       "tutorial_version": "weekly-digest@v4",
       "number": 4,
       "type": "click_ui",
-      "text": "在頁面右下角點「Export Notes」把摘要存成筆記。",
+      "text": "In the bottom-right corner of the page, click \"Export Notes\" to save the summary as notes.",
       "feature_id": "Export Notes"
     }
   ]

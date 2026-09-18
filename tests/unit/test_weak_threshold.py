@@ -20,7 +20,7 @@ from training_kb.pipelines.feedback import _top_category, is_weak
 
 TH = Thresholds()
 NOW = datetime(2026, 9, 14, tzinfo=UTC)
-APPROVED = frozenset({"找不到按鈕", "缺少資訊"})
+APPROVED = frozenset({"Button not found", "Missing information"})
 PENDING = "待分類"
 """Phase 43 的 `PENDING_CATEGORY`；它不在核定類別表裡，所以不必特別判斷就被擋掉。"""
 
@@ -75,19 +75,19 @@ def test_thresholds_come_from_config_not_from_literals() -> None:
 def test_tie_break_prefers_the_smaller_category_name() -> None:
     """Given 兩個核定類別各五筆、筆數多的那一類排在清單後面，When 取同類，Then 取名稱升序者。
 
-    「缺少資訊」刻意排在前面：依 dict 插入順序挑贏家的實作一定會回它，紅燈才不是碰運氣。
+    「Missing information」刻意排在前面：依 dict 插入順序挑贏家的實作一定會回它，紅燈才不是碰運氣。
     """
-    rows = [fb(f"f_{index}", "缺少資訊") for index in range(1, 6)]
-    rows += [fb(f"f_{index}", "找不到按鈕") for index in range(6, 11)]
-    assert _top_category(rows, APPROVED)[0] == "找不到按鈕"
+    rows = [fb(f"f_{index}", "Missing information") for index in range(1, 6)]
+    rows += [fb(f"f_{index}", "Button not found") for index in range(6, 11)]
+    assert _top_category(rows, APPROVED)[0] == "Button not found"
 
 
 def test_more_feedback_beats_the_smaller_category_name() -> None:
     """Given 名稱較大的類別多一筆，When 取同類，Then 筆數優先於名稱升序。"""
-    rows = [fb(f"f_{index}", "找不到按鈕") for index in range(1, 6)]
-    rows += [fb(f"f_{index}", "缺少資訊") for index in range(6, 12)]
+    rows = [fb(f"f_{index}", "Button not found") for index in range(1, 6)]
+    rows += [fb(f"f_{index}", "Missing information") for index in range(6, 12)]
     category, ids = _top_category(rows, APPROVED)
-    assert (category, len(ids)) == ("缺少資訊", 6)
+    assert (category, len(ids)) == ("Missing information", 6)
 
 
 def test_pending_and_unclassified_feedback_never_counts() -> None:
@@ -100,8 +100,9 @@ def test_pending_and_unclassified_feedback_never_counts() -> None:
 
 def test_same_feedback_read_twice_does_not_inflate_the_count() -> None:
     """Given 同一個 Feedback ID 出現兩次，When 取同類，Then 只算一筆且輸出已排序去重。"""
-    rows = [fb("f_15", "找不到按鈕"), fb("f_15", "找不到按鈕"), fb("f_12", "找不到按鈕")]
-    assert _top_category(rows, APPROVED) == ("找不到按鈕", ("f_12", "f_15"))
+    rows = [fb("f_15", "Button not found"), fb("f_15", "Button not found"),
+            fb("f_12", "Button not found")]
+    assert _top_category(rows, APPROVED) == ("Button not found", ("f_12", "f_15"))
 
 
 def test_average_denominator_is_the_rated_feedback_only() -> None:
@@ -110,12 +111,12 @@ def test_average_denominator_is_the_rated_feedback_only() -> None:
     平均的唯一實作是 Phase 53 的 `average_rating`，本 Phase 只 import 它；這兩條從
     Phase 44 這一側釘住「門檻判斷用的分母 = 有評分的筆數」，算法被改動時這裡也會紅。
     """
-    rows = [fb("f_12", "找不到按鈕", rating=2), fb("f_15", "找不到按鈕", rating=4),
-            fb("f_19", "找不到按鈕", rating=None)]
+    rows = [fb("f_12", "Button not found", rating=2), fb("f_15", "Button not found", rating=4),
+            fb("f_19", "Button not found", rating=None)]
     assert average_rating(rows) == 3.0
 
 
 def test_average_without_any_rating_is_none_not_zero() -> None:
     """Given 全部沒有評分，When 算平均，Then 回 `None`（零評分不是 0 分，設計 §12.1）。"""
-    assert average_rating([fb("f_12", "找不到按鈕", rating=None)]) is None
+    assert average_rating([fb("f_12", "Button not found", rating=None)]) is None
     assert average_rating([]) is None

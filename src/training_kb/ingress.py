@@ -605,7 +605,7 @@ def normalize_then_accept(*, domain: str, adapter: str, event_type: str,
 PENDING_CATEGORY = "待分類"
 """收斂用的保留值。**不是**新的核定類別：設計 §12.1 的負面回饋數不算它。"""
 
-DEFAULT_FEEDBACK_CATEGORIES: frozenset[str] = frozenset({"找不到按鈕", "缺少資訊"})
+DEFAULT_FEEDBACK_CATEGORIES: frozenset[str] = frozenset({"Button not found", "Missing information"})
 """設定讀不到或形狀不合法時的退路（設計 §13 的 widget 初始兩類）。
 
 **不得改成空集合**：Phase 44 的同類計數會整批歸零，一個壞掉的設定就等於「永遠沒有弱教學」。

@@ -5,7 +5,7 @@
 不斷言「每日」。moto 的 PASS 只證明資料形狀與查詢路徑，不是實表行為的證據。
 
 資料以設計 §11.2 的 A v1 八筆回饋為基準（評分 2、2、3、3、3、3、3、4 → 平均 23/8 = 2.875，
-類別全部是「找不到按鈕」）。O7 未核定前它仍是**待核定的合成資料**，`mode="demo"` 的命中
+類別全部是「Button not found」）。O7 未核定前它仍是**待核定的合成資料**，`mode="demo"` 的命中
 不得說成正式門檻已滿足。
 """
 
@@ -22,8 +22,8 @@ from training_kb.repository import Repository
 NOW = datetime(2026, 9, 14, tzinfo=UTC)
 SLUG = "prepare-meeting"
 VERSION = "prepare-meeting@v1"
-BUTTON = "找不到按鈕"
-MISSING = "缺少資訊"
+BUTTON = "Button not found"
+MISSING = "Missing information"
 PENDING = "待分類"
 
 DEMO_RATINGS: dict[str, int] = {
@@ -120,7 +120,8 @@ def repository_with_undated_feedback(repository: Repository) -> Repository:
 
 @pytest.fixture
 def tied_repository(repository: Repository) -> Repository:
-    """「找不到按鈕」與「缺少資訊」各五筆、全部 2 分：平均 2.0、n=10、兩類同為五筆。"""
+    """「Button not found」與「Missing information」各五筆、全部 2 分：
+    平均 2.0、n=10、兩類同為五筆。"""
     repository.put_meta(tutorial(SLUG, VERSION))
     repository.put_meta(version(VERSION))
     save(repository, [feedback(f"m_{index}", VERSION, category=MISSING) for index in range(5)])

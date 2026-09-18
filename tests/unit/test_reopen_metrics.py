@@ -145,7 +145,7 @@ def test_reopen_stats_reproduces_design_v2_two_over_ten() -> None:
 
 # --- Task 4：`VersionMetrics` 組裝與 analytics Lambda 入口 --------------------
 
-APPROVED = frozenset({"找不到按鈕", "缺少資訊"})
+APPROVED = frozenset({"Button not found", "Missing information"})
 RATINGS = [("f_12", 2), ("f_15", 2), ("f_19", 3), ("f_23", 3),
            ("f_27", 3), ("f_31", 3), ("f_34", 3), ("f_40", 4)]
 """設計 §11.2 的 A v1 回饋配方（合成資料）：平均 2.875、顯示 2.9、八筆都算負面。"""
@@ -172,7 +172,7 @@ class FakeRepo:
                         status="active", successor=None, cluster_id=self.cluster_id)
 
     def list_feedback_of_version(self, version_id: str) -> list[Feedback]:
-        return [Feedback(id=fid, tutorial_version=V1, rating=r, category="找不到按鈕",
+        return [Feedback(id=fid, tutorial_version=V1, rating=r, category="Button not found",
                          comment=None, user=f"u_{fid}", ts=None) for fid, r in RATINGS]
 
     def list_views_of_version(self, version_id: str) -> list[TutorialView]:

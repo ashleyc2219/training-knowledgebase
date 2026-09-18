@@ -65,17 +65,22 @@ ASSET_KEYS = (f"{SITE_PREFIX}assets/style.css", f"{SITE_PREFIX}assets/widget.js"
 瀏覽器路徑 `<asset_prefix>/style.css`，預設 `/site/assets/style.css`——同一份檔案的兩種
 寫法：key 給 `put_object`，路徑給瀏覽器。"""
 
-SITE_TITLE = "教學站"
-"""站台名稱：站台索引的 `<h1>`、其他頁面頂欄的返回連結，以及每一頁 `<title>` 的尾巴。"""
+SITE_TITLE = "Tutorials"
+"""站台名稱：站台索引的 `<h1>`、其他頁面頂欄的返回連結，以及每一頁 `<title>` 的尾巴。
 
-SITE_LEDE = "依使用者回饋與產品改版自動維護的操作教學；每一版都保留，可以逐版對照。"
+2026-09-17 起**所有讀者看得到的文字一律英文**（站台是給英文讀者 demo 的）；程式註解與
+例外訊息維持中文，那些不進頁面。"""
+
+SITE_LEDE = ("How-to guides kept current from user feedback and product releases. "
+             "Every version is preserved, so you can compare them side by side.")
 """站台索引標題下的一句說明。"""
 
-NO_PREVIOUS_TEXT = "第一版，沒有前一版可比較"
+NO_PREVIOUS_TEXT = "First version. There is no earlier version to compare."
 """v1 的差異區塊固定文案（設計 §8.2）。v1 沒有 `.diff` 可比，顯示空連結比不顯示更糟。"""
 
-NOT_SENT_TEXT = "檔案已產生，尚未送出"
-"""widget 的唯一狀態文案。**任何「已送出」「感謝回饋」的措辭都禁止**：widget 只在瀏覽器
+NOT_SENT_TEXT = "File generated, not sent yet"
+"""widget 的唯一狀態文案。**任何「已送出」「感謝回饋」的措辭都禁止**（英文版就是 sent／
+submitted／received／thank you 這些字不得出現在 `not sent` 以外的地方）：widget 只在瀏覽器
 本機產生檔案，要進系統得由維護者走 Phase 42 的固定匯入路徑（設計 §13）。"""
 
 RETIRED_PLACEHOLDER = RETIRED_NOTICE
@@ -83,20 +88,17 @@ RETIRED_PLACEHOLDER = RETIRED_NOTICE
 `content`）。**字面值只存在 `content.py` 一處**，兩支檔各抄一份的話改字就會漏掉一邊。
 退役提示刻意不顯示退役原因：`reason` 是 `release:<id>` 這種上游識別碼，設計 §13 列為私有。"""
 
-SUCCESSOR_PREFIX = "改看："
+SUCCESSOR_PREFIX = "See instead: "
 """後繼連結的固定前綴。連結文字用**後繼的 slug** 而不是它的 topic：renderer 的簽名到
 Phase 57 都不變（00A §6.7），手上只有被退役的那一篇 `Tutorial`，要拿到後繼的 topic 就得
 多讀一次 DynamoDB——renderer 不碰儲存層，所以這裡誠實地印 slug，連結本身仍然可點。"""
 
-CURRENT_LABEL = "目前版本"
-"""「目前版本」四個字只在這裡宣告；版本欄的括號標記與索引的印章都用它。"""
+CURRENT_LABEL = "Current version"
+"""「目前版本」的字只在這裡宣告；版本欄的括號標記與索引的印章都用它。"""
 
 _SECTIONS = ("Problem", "Prerequisites", "Steps", "Expected Outcome")
-"""版本頁固定的四個 `<h2>`；標題自己是 `<h1>`，所以五段裡只有四段有 `<h2>`。"""
-
-_SECTION_ZH = {"Problem": "問題", "Prerequisites": "前置條件",
-               "Steps": "步驟", "Expected Outcome": "預期結果"}
-"""四個 `<h2>` 旁的中文標籤；`<h2>` 本身維持英文（那是內容契約），中文只是給讀者看。"""
+"""版本頁固定的四個 `<h2>`；標題自己是 `<h1>`，所以五段裡只有四段有 `<h2>`。
+這四個字同時是內容契約（Markdown 全文的段落標題）與讀者看到的標籤。"""
 
 _TUTORIALS_DIR = "tutorials"
 """站台索引往教學索引的那一層目錄名。字面值與 `publishing.SITE_TUTORIALS_DIR` 相同，但那是
@@ -110,13 +112,13 @@ FEATURES_DIR = "features"
 """資料夾頁的那一層目錄名（瀏覽器相對路徑的一段）；`publishing.SITE_FEATURES_DIR` 是同一個
 字面值的 **S3 key** 版本，兩邊各自宣告的理由同 `_TUTORIALS_DIR`。"""
 
-UNCATEGORIZED_FEATURE = "未分類"
+UNCATEGORIZED_FEATURE = "Uncategorized"
 """沒有任何 `feature_ids` 的教學所在的資料夾；它不是 `FEATURE` item，只是站台的一格。"""
 
 _FOLDER_SLUG_UNSAFE = re.compile(r"[^\w]+", re.UNICODE)
 
-_WIDGET_HEADING = "這篇有幫助嗎？"
-_UNSELECTED_CATEGORY = "未選擇"
+_WIDGET_HEADING = "Was this helpful?"
+_UNSELECTED_CATEGORY = "No category"
 _RATINGS = (1, 2, 3, 4, 5)
 """評分只有 1–5 的整數（收集教學回饋.feature Rule 3）；頁面不提供其他值，匯入端再驗一次。"""
 
@@ -157,13 +159,18 @@ def escape_text(value: str) -> str:
 
     與 Phase 22 的 `escape_markdown` **不是同一層、不得互換**：那個是給 Markdown 全文用的。
     屬性值也走這一個函式（`quote=True` 是 `html.escape` 的預設），所以
-    `data-category="缺少資訊"` 這種屬性不會被使用者文字撐開。
+    `data-category="Missing information"` 這種屬性不會被使用者文字撐開。
     """
     return escape(value, quote=True)
 
 
 def _items(values: list[str]) -> str:
     return "".join(f"<li>{escape(value)}</li>" for value in values)
+
+
+def _count(number: int, noun: str) -> str:
+    """`1 tutorial`／`2 tutorials`：站台索引的計數，只處理規則複數。"""
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
 def _successor_line(successor: str | None) -> str:
@@ -247,7 +254,7 @@ def _diff_block(tutorial: Tutorial, version: TutorialVersion) -> str:
     _, previous = parse_version_id(version.supersedes)
     return (f'<p class="diff-note">'
             f'<a href="{_page_href(version.version_id, ".diff.txt")}">'
-            f"查看與 v{previous} 的差異</a></p>")
+            f"View changes since v{previous}</a></p>")
 
 
 def _version_switch(tutorial: Tutorial, version: TutorialVersion) -> str:
@@ -259,13 +266,13 @@ def _version_switch(tutorial: Tutorial, version: TutorialVersion) -> str:
     parts = []
     if version.supersedes is not None:
         parts.append(f'<a href="{_page_href(version.supersedes, ".html")}">'
-                     f"上一版 {_version_number(version.supersedes)}</a>")
-    current = f"（{CURRENT_LABEL}）" if version.version_id == tutorial.current_version else ""
-    parts.append(f'<span class="current">本頁 {_version_number(version.version_id)}'
+                     f"Previous {_version_number(version.supersedes)}</a>")
+    current = f" ({CURRENT_LABEL})" if version.version_id == tutorial.current_version else ""
+    parts.append(f'<span class="current">This page {_version_number(version.version_id)}'
                  f"{current}</span>")
-    parts.append('<a href="index.html">查看版本紀錄</a>')
+    parts.append('<a href="index.html">All versions</a>')
     items = "".join(f"<li>{part}</li>" for part in parts)
-    return f'<nav class="version-switch" aria-label="版本"><ul>{items}</ul></nav>'
+    return f'<nav class="version-switch" aria-label="Versions"><ul>{items}</ul></nav>'
 
 
 def _banner(notice: str, batch: str) -> str:
@@ -277,8 +284,8 @@ def _banner(notice: str, batch: str) -> str:
         return ""
     labels = [escape_text(notice)] if notice else []
     if batch:
-        labels.append(f"批次：{escape_text(batch)}")
-    return f'<p class="banner">{"｜".join(labels)}</p>'
+        labels.append(f"Batch: {escape_text(batch)}")
+    return f'<p class="banner">{" · ".join(labels)}</p>'
 
 
 def _asset_links(asset_prefix: str, *, script: bool = True) -> str:
@@ -297,7 +304,7 @@ def _document(title: str, head: str, body: str) -> str:
     `<meta>` 只有字元集與 viewport 兩個：不放 `http-equiv`（測試明令禁止，避免被拿來做
     自動跳轉），也不放任何外部資源。`<title>` 與內文一樣先轉義。
     """
-    return (f'<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">'
             f"<title>{escape_text(title)}</title>{head}</head>"
             f"<body>{body}</body></html>")
@@ -311,9 +318,8 @@ def _masthead(home_href: str, crumb: str) -> str:
 
 
 def _part(section: str, inner: str) -> str:
-    """版本頁的一段：固定的英文 `<h2>`（內容契約）＋中文標籤，內文原樣放進去。"""
-    return (f'<section class="part"><div class="part-head"><h2>{section}</h2>'
-            f'<span class="part-zh">{escape_text(_SECTION_ZH[section])}</span></div>'
+    """版本頁的一段：固定的 `<h2>`（內容契約，同時是讀者看到的標籤），內文原樣放進去。"""
+    return (f'<section class="part"><div class="part-head"><h2>{section}</h2></div>'
             f"{inner}</section>")
 
 
@@ -324,13 +330,13 @@ def _feature_links(tutorial: Tutorial, prefix: str) -> str:
         f'<li><a class="feature" href="{prefix}{FEATURES_DIR}/'
         f'{escape_text(folder_slug(fid))}/index.html">{escape_text(fid)}</a></li>'
         for fid in ids)
-    return f'<nav class="features" aria-label="所屬功能"><ul>{links}</ul></nav>'
+    return f'<nav class="features" aria-label="Folders"><ul>{links}</ul></nav>'
 
 
 def _tutorial_card(tutorial: Tutorial, href: str) -> str:
     """資料夾頁與站台索引共用的教學卡片；只用 `Tutorial` 上就有的欄位。"""
     assert tutorial.current_version is not None
-    retired = ('<span class="tag-retired">已退役</span>'
+    retired = ('<span class="tag-retired">Retired</span>'
                if tutorial.status == TutorialStatus.RETIRED else "")
     return (f'<li class="card"><a href="{escape_text(href)}">'
             f'<span class="topic">{escape(tutorial.topic)}</span>'
@@ -369,16 +375,17 @@ def _widget_block(tutorial: Tutorial, version: TutorialVersion,
         f"<h2>{_WIDGET_HEADING}</h2>"
         f'<p class="ratings">{ratings}</p>'
         f'<p class="categories">{chips}</p>'
-        f'<p><label for="tkb-comment">留言</label>'
+        f'<p><label for="tkb-comment">Comment</label>'
         f'<textarea id="tkb-comment" rows="3"></textarea></p>'
-        f'<p><label for="tkb-user">你的穩定使用者 ID（必填）</label>'
+        f'<p><label for="tkb-user">Your stable user ID (required)</label>'
         f'<input id="tkb-user" type="text" autocomplete="off"></p>'
         f'<p class="actions">'
-        f'<button type="button" id="tkb-download">下載回饋檔案，交由維護者匯入</button>'
-        f'<button type="button" id="tkb-view">下載瀏覽紀錄</button></p>'
-        f'<p class="not-sent">本頁不會送出任何資料：按下下載只會在你的電腦產生檔案，'
-        f"狀態一律是「{escape_text(NOT_SENT_TEXT)}」，需要維護者匯入才會進系統。</p>"
-        f'<p class="status">狀態：<span id="tkb-status">尚未產生檔案</span></p>'
+        f'<button type="button" id="tkb-download">Download feedback file</button>'
+        f'<button type="button" id="tkb-view">Download view record</button></p>'
+        f'<p class="not-sent">This page never uploads anything. Downloading only creates a '
+        f'file on your computer, and its status stays "{escape_text(NOT_SENT_TEXT)}" '
+        f"until a maintainer imports it.</p>"
+        f'<p class="status">Status: <span id="tkb-status">No file generated yet</span></p>'
         f"</section>"
     )
 
@@ -423,7 +430,7 @@ class SiteRenderer:
         stamp = (f'<p><span class="stamp">{escape_text(CURRENT_LABEL)}</span></p>'
                  if is_current else "")
         rail = (
-            f'<aside class="rail" aria-label="版本資訊">'
+            f'<aside class="rail" aria-label="Version">'
             f'<p class="version">{escape(version.version_id)}</p>'
             f"{stamp}"
             f"{_version_switch(tutorial, version)}"
@@ -433,7 +440,7 @@ class SiteRenderer:
         )
         body = (
             f'<div class="body">'
-            f'<p class="eyebrow">操作教學</p>'
+            f'<p class="eyebrow">How-to guide</p>'
             f"<h1>{escape(content.title)}</h1>"
             + _part(_SECTIONS[0], f"<p>{escape(content.problem)}</p>")
             + _part(_SECTIONS[1], f"<ul>{_items(content.prerequisites)}</ul>")
@@ -451,7 +458,7 @@ class SiteRenderer:
             f'<div class="page">{rail}{body}</div>'
             f"{_retired_block(tutorial)}</article>"
         )
-        return _document(f"{content.title}｜{version.version_id}｜{SITE_TITLE}",
+        return _document(f"{content.title} · {version.version_id} · {SITE_TITLE}",
                          _asset_links(self.asset_prefix), article)
 
     def render_tutorial_index(self, tutorial: Tutorial,
@@ -472,7 +479,7 @@ class SiteRenderer:
             if version.published_at is None:
                 continue
             is_current = version.version_id == current
-            label = escape(version.version_id) + (f"（{CURRENT_LABEL}）" if is_current else "")
+            label = escape(version.version_id) + (f" ({CURRENT_LABEL})" if is_current else "")
             stamp = (f'<span class="stamp">{escape_text(CURRENT_LABEL)}</span>'
                      if is_current else "")
             rows.append(f'<li{" class=\"is-current\"" if is_current else ""}>'
@@ -482,12 +489,12 @@ class SiteRenderer:
                    f' data-slug="{escape(tutorial.slug)}">'
                    f"{_masthead(_HOME_FROM_TUTORIAL, tutorial.slug)}"
                    f"{_banner(self.notice, self.batch)}"
-                   '<p class="eyebrow">版本紀錄</p>'
+                   '<p class="eyebrow">Version history</p>'
                    f"<h1>{escape(tutorial.topic)}</h1>"
                    f"{_feature_links(tutorial, '../../')}"
                    f'<ol class="versions">{"".join(rows)}</ol>'
                    f"{_retired_block(tutorial)}</article>")
-        return _document(f"{tutorial.topic}｜版本紀錄｜{SITE_TITLE}",
+        return _document(f"{tutorial.topic} · Version history · {SITE_TITLE}",
                          _asset_links(self.asset_prefix, script=False), article)
 
     def render_site_index(self, tutorials: list[Tutorial],
@@ -511,13 +518,14 @@ class SiteRenderer:
             cards.append(
                 f'<li class="folder"><a class="folder-link" href="{href}">'
                 f'<span class="folder-name">{escape(names.get(feature_id, feature_id))}</span>'
-                f'<span class="folder-count">{len(rows)} 篇</span></a>'
+                f'<span class="folder-count">{_count(len(rows), "tutorial")}</span></a>'
                 f'<ul class="folder-items">{chips}</ul></li>')
         article = (f'<article class="site-index">'
                    f'<header class="masthead"><span class="home">{escape_text(SITE_TITLE)}</span>'
-                   f'<span class="crumb">{len(folders)} 個資料夾 / {len(listed)} 篇</span></header>'
+                   f'<span class="crumb">{_count(len(folders), "folder")} · '
+                   f'{_count(len(listed), "tutorial")}</span></header>'
                    f"{_banner(self.notice, self.batch)}"
-                   f'<p class="eyebrow">依功能分類</p>'
+                   f'<p class="eyebrow">Browse by feature</p>'
                    f"<h1>{escape_text(SITE_TITLE)}</h1>"
                    f'<p class="lede">{escape_text(SITE_LEDE)}</p>'
                    f'<ul class="folders">{"".join(cards)}</ul></article>')
@@ -536,7 +544,7 @@ class SiteRenderer:
         aliases = ("".join(f'<span class="chip">{escape_text(alias)}</span>'
                            for alias in feature.aliases)
                    if feature is not None and feature.aliases else "")
-        alias_line = f'<p class="aliases">別名：{aliases}</p>' if aliases else ""
+        alias_line = f'<p class="aliases">Also known as: {aliases}</p>' if aliases else ""
         crumb = f"{FEATURES_DIR} / {folder_slug(feature_id)}"
         cards = "".join(
             _tutorial_card(row, f"../../{_TUTORIALS_DIR}/{row.slug}/index.html")
@@ -544,8 +552,8 @@ class SiteRenderer:
         article = (f'<article class="folder-index" data-folder="{escape_text(feature_id)}">'
                    f"{_masthead(_HOME_FROM_TUTORIAL, crumb)}"
                    f"{_banner(self.notice, self.batch)}"
-                   f'<p class="eyebrow">資料夾</p>'
+                   f'<p class="eyebrow">Folder</p>'
                    f"<h1>{escape(name)}</h1>{alias_line}"
                    f'<ul class="cards">{cards}</ul></article>')
-        return _document(f"{name}｜資料夾｜{SITE_TITLE}",
+        return _document(f"{name} · Folder · {SITE_TITLE}",
                          _asset_links(self.asset_prefix, script=False), article)

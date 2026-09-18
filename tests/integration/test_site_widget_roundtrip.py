@@ -61,7 +61,7 @@ from training_kb.publishing import (
     PublishRequest,
 )
 from training_kb.repository import Repository
-from training_kb.site import ASSET_KEYS, SiteRenderer, folder_slug
+from training_kb.site import ASSET_KEYS, NOT_SENT_TEXT, SiteRenderer, folder_slug
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ASSET_DIR = PROJECT_ROOT / "demo" / "site_assets"
@@ -77,7 +77,14 @@ USER = "u_01"
 
 NOTICE = "合成資料示範"
 BATCH = "demo-seed-01"
-CATEGORIES = ("找不到按鈕", "缺少資訊")
+CATEGORIES = ("Button not found", "Missing information")
+
+
+def claims_delivery(text: str) -> bool:
+    """頁面或腳本是否暗示「系統已收到回饋」：拿掉 `not sent` 這個片語後，sent／submitted／
+    received／thank 任一出現就算（英文版的「已送出」「感謝回饋」禁令）。"""
+    stripped = re.sub(r"(?i)not[ -]sent", "", text)
+    return re.search(r"(?i)\b(sent|submitted|received|thank)", stripped) is not None
 
 _TEXTS = ("開啟行事曆。", "選擇今天的會議。", "開啟摘要。", "確認摘要內容。")
 _TYPES = ("read", "click_ui", "click_ui", "read")
@@ -103,12 +110,12 @@ def feedback_envelope() -> dict[str, Any]:
         "kind": "feedback",
         "source": "site_widget",
         "generated_at": "2026-09-14T00:30:45Z",
-        "note": f"{NOTICE}｜此檔尚未送出，需由維護者匯入",
+        "note": f"{NOTICE} | This file is not sent yet. A maintainer must import it.",
         "items": [{
             "id": f"f_site-{SLUG}-{USER}-1789012345",
             "tutorial_version": V2,
             "rating": 4,
-            "category": "缺少資訊",
+            "category": "Missing information",
             "comment": "第三步的截圖可以再清楚一點",
             "user": USER,
             "ts": "2026-09-13T12:34:56Z",
@@ -122,7 +129,7 @@ def test_download_envelope_has_the_five_fixed_fields() -> None:
     assert set(envelope) == {"kind", "source", "generated_at", "note", "items"}
     assert envelope["kind"] in ("feedback", "view")
     assert envelope["source"] == "site_widget"
-    assert "尚未送出" in envelope["note"]
+    assert "not sent" in envelope["note"]
     item = envelope["items"][0]
     for required in ("id", "tutorial_version", "rating", "user"):
         assert required in item
@@ -152,7 +159,7 @@ def test_feedback_id_follows_the_site_widget_shape() -> None:
 def test_view_envelope_carries_no_rating_or_comment() -> None:
     """Given 下載的瀏覽紀錄／When 讀 JSON／Then 只有版本、使用者與時間三個欄位。"""
     view = {"kind": "view", "source": "site_widget", "generated_at": "2026-09-14T00:30:45Z",
-            "note": f"{NOTICE}｜此檔尚未送出，需由維護者匯入",
+            "note": f"{NOTICE} | This file is not sent yet. A maintainer must import it.",
             "items": [{"tutorial_version": V2, "user": USER, "ts": "2026-09-13T12:34:56Z"}]}
     assert set(view["items"][0]) == {"tutorial_version", "user", "ts"}
     assert json.dumps(view, ensure_ascii=False)
@@ -324,8 +331,8 @@ def test_the_published_page_carries_the_widget_and_the_not_sent_status(
     body = public_objects(bucket)[f"{PUBLIC_SITE_PREFIX}tutorials/{SLUG}/v2.html"]
     page = body.decode("utf-8")
     assert 'id="tkb-widget"' in page and 'id="tkb-download"' in page
-    assert "尚未送出" in page
-    assert "已送出" not in page.replace("尚未送出", "")
+    assert NOT_SENT_TEXT in page
+    assert not claims_delivery(page)
     assert SITE_PAGE_CONTENT_TYPE  # 公開頁一律 text/html; charset=utf-8（P24 決定）
 
 
@@ -339,7 +346,7 @@ def test_the_published_page_carries_the_widget_and_the_not_sent_status(
 def view_envelope() -> dict[str, Any]:
     """`widget.js` 的瀏覽紀錄封套；三個欄位與 `VIEW_FIELDS` 對得上。"""
     return {"kind": "view", "source": "site_widget", "generated_at": "2026-09-14T00:30:45Z",
-            "note": f"{NOTICE}｜此檔尚未送出，需由維護者匯入",
+            "note": f"{NOTICE} | This file is not sent yet. A maintainer must import it.",
             "items": [{"tutorial_version": V2, "user": USER, "ts": "2026-09-13T12:34:56Z"}]}
 
 

@@ -531,13 +531,13 @@ def test_import_saves_settled_category_and_resend_calls_no_model(
     分類接在**永久去重之後**：放到 `accept` 之前的話，每次重送都會多一次 Bedrock 呼叫
     （`COL` Rule 6 的停止點）。
     """
-    writer = FakeWriter({"category": "找不到按鈕"})
+    writer = FakeWriter({"category": "Button not found"})
     first = import_feedback(CLASSIFIED, repository=active_repo, operations=operations,
                             now=NOW, writer=writer)
     again = import_feedback(CLASSIFIED, repository=active_repo, operations=operations,
                             now=NOW, writer=writer)
     assert (first.status, again.status) == ("saved", "duplicate")
-    assert saved_feedback(active_repo, "f_50").category == "找不到按鈕"
+    assert saved_feedback(active_repo, "f_50").category == "Button not found"
     assert writer.request_attempts == 1
     assert writer.calls[0]["operation_id"] == operation_id_for("feedback", "f_50")
     assert writer.calls[0]["node"] == "classify_comment"
@@ -546,19 +546,19 @@ def test_import_saves_settled_category_and_resend_calls_no_model(
 def test_a_checked_category_is_saved_verbatim_without_the_model(
         active_repo: Repository, operations: OperationCoordinator) -> None:
     """Given 勾選了核定類別／When 匯入／Then 原樣保存，模型呼叫數 0（`COL` Rule 4）。"""
-    writer = FakeWriter({"category": "缺少資訊"})
-    payload = {**CLASSIFIED, "id": "f_12", "category": "找不到按鈕"}
+    writer = FakeWriter({"category": "Missing information"})
+    payload = {**CLASSIFIED, "id": "f_12", "category": "Button not found"}
     result = import_feedback(payload, repository=active_repo, operations=operations,
                              now=NOW, writer=writer)
     assert result.status == "saved"
-    assert saved_feedback(active_repo, "f_12").category == "找不到按鈕"
+    assert saved_feedback(active_repo, "f_12").category == "Button not found"
     assert writer.request_attempts == 0
 
 
 def test_an_unapproved_checked_category_is_stored_as_pending(
         active_repo: Repository, operations: OperationCoordinator) -> None:
     """Given 勾選「介面太醜」／When 匯入／Then 存 `待分類`，不呼叫模型、不擴充核定表。"""
-    writer = FakeWriter({"category": "找不到按鈕"})
+    writer = FakeWriter({"category": "Button not found"})
     payload = {**CLASSIFIED, "id": "f_52", "category": "介面太醜"}
     import_feedback(payload, repository=active_repo, operations=operations, now=NOW,
                     writer=writer)
@@ -582,7 +582,7 @@ def test_a_rating_only_feedback_keeps_no_category_and_calls_no_model(
         active_repo: Repository, operations: OperationCoordinator,
         comment: str | None) -> None:
     """Given 只有評分（留言缺或全空白）／When 匯入／Then `category is None`，呼叫數 0。"""
-    writer = FakeWriter({"category": "找不到按鈕"})
+    writer = FakeWriter({"category": "Button not found"})
     payload = {**CLASSIFIED, "id": "f_51", "rating": 5, "comment": comment}
     result = import_feedback(payload, repository=active_repo, operations=operations,
                              now=NOW, writer=writer)
@@ -595,7 +595,8 @@ def test_the_configured_category_table_is_used_and_never_written(
         active_repo: Repository, operations: OperationCoordinator) -> None:
     """Given 維護者匯入了三類／When 匯入一筆留言／Then 用設定值，且設定 item 逐字不變。"""
     active_repo.put_meta_item("CONFIG#feedback_categories",
-                              {"categories": ["找不到按鈕", "缺少資訊", "步驟順序錯誤"]})
+                              {"categories": ["Button not found", "Missing information",
+                                              "步驟順序錯誤"]})
     before = active_repo.get_meta_item("CONFIG#feedback_categories")
     writer = FakeWriter({"category": "步驟順序錯誤"})
     import_feedback({**CLASSIFIED, "id": "f_54"}, repository=active_repo,
@@ -614,11 +615,11 @@ def test_a_resumed_feedback_is_classified_once_because_nothing_was_saved(
     operations.accept(AcceptOperation(
         operation_id=operation_id_for("feedback", "f_50"), kind="feedback",
         canonical_id="f_50", project_id=DEFAULT_PROJECT_ID, now=NOW))
-    writer = FakeWriter({"category": "缺少資訊"})
+    writer = FakeWriter({"category": "Missing information"})
     resumed = import_feedback(CLASSIFIED, repository=active_repo, operations=operations,
                               now=NOW, writer=writer)
     assert resumed.status == "saved"
-    assert saved_feedback(active_repo, "f_50").category == "缺少資訊"
+    assert saved_feedback(active_repo, "f_50").category == "Missing information"
     assert writer.request_attempts == 1
 
 
@@ -644,13 +645,13 @@ def test_the_handler_hands_its_writer_to_the_feedback_import(
     這一條守的是 `_import_one` 有沒有把 `writer` 傳下去：沒傳的話 CDK 上的
     `bedrock:InvokeModel` 就白加了，雲端的匯入 Lambda 永遠不分類留言。
     """
-    writer = FakeWriter({"category": "缺少資訊"})
+    writer = FakeWriter({"category": "Missing information"})
     monkeypatch.setattr(import_, "_DEPS", Deps(operations=operations, now=lambda: NOW,
                                                repository=active_repo, writer=writer))
     body = import_.handler({"kind": "feedback", "items": [CLASSIFIED]}, None)
     results = body["results"]
     assert isinstance(results, list) and results[0]["status"] == "saved"
-    assert saved_feedback(active_repo, "f_50").category == "缺少資訊"
+    assert saved_feedback(active_repo, "f_50").category == "Missing information"
     assert writer.request_attempts == 1
 
 

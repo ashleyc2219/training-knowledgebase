@@ -157,10 +157,10 @@ def test_replay_reuses_recorded_version_and_base(fake_repo: FakeRepository,
         return allocate_version("prepare-meeting", "op-refine-1", fake_ops,
                                 repository=fake_repo, reason=reason, rules_applied=rules)
 
-    first = call("feedback:8 則 找不到按鈕", ["R-007"])
+    first = call("feedback:8 則 Button not found", ["R-007"])
     fake_repo.put_unpublished_version(first.version_id, supersedes=first.supersedes,
                                       reason=first.reason, rules_applied=first.rules_applied)
-    second = call("feedback:9 則 找不到按鈕", ["R-012"])
+    second = call("feedback:9 則 Button not found", ["R-012"])
     assert second.version_id == first.version_id == "prepare-meeting@v2"
     assert (second.supersedes, second.rules_applied) == ("prepare-meeting@v1", ("R-007",))
-    assert (second.reason, len(fake_ops.writes)) == ("feedback:8 則 找不到按鈕", 1)
+    assert (second.reason, len(fake_ops.writes)) == ("feedback:8 則 Button not found", 1)

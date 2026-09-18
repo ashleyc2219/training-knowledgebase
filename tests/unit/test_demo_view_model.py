@@ -37,7 +37,7 @@ from training_kb.writing.client import CallTrace
 
 SEED_DIR = Path(__file__).resolve().parents[2] / "demo" / "seed"
 BATCH = "demo-seed-01"
-APPROVED = frozenset({"找不到按鈕", "缺少資訊"})
+APPROVED = frozenset({"Button not found", "Missing information"})
 A_V1 = "prepare-meeting@v1"
 A_V2 = "prepare-meeting@v2"
 EMPTY_VERSION = "share-summary@v1"
@@ -126,7 +126,7 @@ def test_block_one_keeps_simulated_history_and_live_run_in_two_keys(
     assert block["live_run"] == {}                 # 種子全部已發布，本次現場沒有新版本
     latest = block["simulated_history"]["prepare-meeting"]
     assert latest["version_id"] == A_V2
-    assert latest["reason"] == "feedback:8 則 找不到按鈕"
+    assert latest["reason"] == "feedback:8 則 Button not found"
     assert latest["diff"] and "@@" in latest["diff"]
     assert not any(name in block for name in ("total", "all", "combined", "sum"))
 

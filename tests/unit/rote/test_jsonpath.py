@@ -10,7 +10,7 @@ import pytest
 from training_kb.adapters import resolve_jsonpath
 from training_kb.errors import PermanentError
 
-ROOT = {"event": {"payload": {"issue": {"labels": [{"name": "bug"}], "body": "找不到按鈕"}}},
+ROOT = {"event": {"payload": {"issue": {"labels": [{"name": "bug"}], "body": "Button not found"}}},
         "steps": [{"ticket": {"id": "t_gh-acme-app-12"}}]}
 
 

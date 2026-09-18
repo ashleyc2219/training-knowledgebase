@@ -29,12 +29,12 @@ VERSION = "prepare-meeting@v1"
 
 def feedback(feedback_id: str, version_id: str = VERSION) -> Feedback:
     return Feedback(id=feedback_id, tutorial_version=version_id, rating=2,
-                    category="找不到按鈕", comment=None, user="u_01",
+                    category="Button not found", comment=None, user="u_01",
                     ts=datetime(2026, 8, 2, tzinfo=UTC))
 
 
 def ticket(ticket_id: str, project_id: str = "demo") -> Ticket:
-    return Ticket(id=ticket_id, source="email", text="找不到按鈕", author="u_01",
+    return Ticket(id=ticket_id, source="email", text="Button not found", author="u_01",
                   ts=datetime(2026, 8, 3, 10, tzinfo=UTC), project_id=project_id)
 
 

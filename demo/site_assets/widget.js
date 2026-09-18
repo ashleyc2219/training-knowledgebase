@@ -2,11 +2,12 @@
  *
  * 這支腳本**只在讀者自己的瀏覽器裡產生檔案**，不會把任何東西送出去：
  *
- *   按下下載 -> 組 JSON 封套 -> Blob -> <a download> -> 狀態列寫「尚未送出」
+ *   按下下載 -> 組 JSON 封套 -> Blob -> <a download> -> 狀態列寫「not sent yet」
  *
  * 要讓回饋真的進系統，維護者得把下載的檔案走 Phase 42 的固定匯入路徑。因此：
  *   - 沒有任何網路請求（不發請求、不開連線、不送背景信標），也沒有外部網址與憑證；
- *   - 狀態列永遠不寫任何讓人以為系統已經收到回饋的字；
+ *   - 狀態列永遠不寫任何讓人以為系統已經收到回饋的字（禁用字表見
+ *     tests/unit/test_site_assets.py 的 claims_delivery，本檔連註解都不得出現）；
  *   - 使用者輸入一律用 textContent 放進畫面，不用任何會解析 HTML 的寫法（設計 §17.2）。
  *
  * 退役頁本來就不輸出 widget 區塊（site.py 的 _widget_block），這裡的 data-retired 檢查是
@@ -15,11 +16,11 @@
 (function () {
   "use strict";
 
-  var NOT_SENT = "檔案已產生，尚未送出";
-  var IDLE = "尚未產生檔案";
-  var SAVED = NOT_SENT + "。請把檔案交給維護者匯入。";
-  var NEED_USER = "請先填寫穩定使用者 ID，這個欄位是必填的。";
-  var NEED_RATING = "請先點 1 到 5 的評分。";
+  var NOT_SENT = "File generated, not sent yet";
+  var IDLE = "No file generated yet";
+  var SAVED = NOT_SENT + ". Hand the file to a maintainer to import it.";
+  var NEED_USER = "Enter your stable user ID first. This field is required.";
+  var NEED_RATING = "Pick a rating from 1 to 5 first.";
 
   var root = document.getElementById("tkb-widget");
   if (!root || root.getAttribute("data-retired") === "true") { return; }
@@ -61,7 +62,7 @@
       kind: kind,
       source: "site_widget",
       generated_at: nowIso(),
-      note: (notice ? notice + "｜" : "") + "此檔尚未送出，需由維護者匯入",
+      note: (notice ? notice + " | " : "") + "This file is not sent yet. A maintainer must import it.",
       items: items
     };
     var blob = new Blob([JSON.stringify(body, null, 2)],
@@ -83,7 +84,7 @@
       each("button.rating", function (other) {
         other.setAttribute("aria-pressed", other === button ? "true" : "false");
       });
-      setStatus("已選評分 " + rating + "，" + IDLE + "。");
+      setStatus("Rating " + rating + " selected. " + IDLE + ".");
     });
   });
 
@@ -93,7 +94,7 @@
       each("button.category", function (other) {
         other.setAttribute("aria-pressed", other === button ? "true" : "false");
       });
-      setStatus(category ? "已選類別，" + IDLE + "。" : IDLE);
+      setStatus(category ? "Category selected. " + IDLE + "." : IDLE);
     });
   });
 

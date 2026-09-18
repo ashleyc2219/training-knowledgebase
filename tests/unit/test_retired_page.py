@@ -47,7 +47,7 @@ REASON = "release:r_88"
 """私有的退役原因；`r_88` 是上游識別碼，一個字都不准出現在公開頁（設計 §13）。"""
 
 PRIVATE_USER = "u_gh-4242"
-PRIVATE_COMMENT = "這篇根本找不到按鈕，白忙一小時。"
+PRIVATE_COMMENT = "這篇根本Button not found，白忙一小時。"
 
 Rendered = tuple[Tutorial, TutorialVersion, list[TutorialStep], TutorialContent]
 

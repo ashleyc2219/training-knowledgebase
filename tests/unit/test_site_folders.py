@@ -2,7 +2,7 @@
 
 Given 幾篇用到不同功能組合的教學
 When  依 `feature_ids` 分資料夾、渲染站台索引與資料夾頁
-Then  一篇教學出現在它用到的每個資料夾、沒有功能的進「未分類」、只列已上架的、
+Then  一篇教學出現在它用到的每個資料夾、沒有功能的進「Uncategorized」、只列已上架的、
       每個連結都是相對路徑、名稱來自 `Feature.name`、惡意文字被跳脫。
 """
 
@@ -98,12 +98,12 @@ def test_folder_slug_of_all_symbols_falls_back_to_a_hash() -> None:
 def test_site_index_shows_one_folder_card_per_feature_with_links(renderer: SiteRenderer) -> None:
     page = renderer.render_site_index(ALL)
     assert 'class="folders"' in page
-    # Open Meeting／Prepare／Share Link／Settings Page／未分類
+    # Open Meeting／Prepare／Share Link／Settings Page／Uncategorized
     assert page.count('class="folder"') == 5
     assert f'href="{FEATURES_DIR}/open-meeting/index.html"' in page
     uncategorized = escape_text(folder_slug(UNCATEGORIZED_FEATURE))
     assert f'href="{FEATURES_DIR}/{uncategorized}/index.html"' in page
-    assert "2 篇" in page and "1 篇" in page
+    assert "2 tutorials" in page and "1 tutorial<" in page
     # 每個資料夾裡直接列出教學（連到教學索引），不點進資料夾也找得到
     assert 'href="tutorials/prepare-meeting/index.html"' in page
     assert 'href="tutorials/notification-settings/index.html"' in page
@@ -146,7 +146,7 @@ def test_folder_index_shows_feature_name_aliases_and_retired_tag(renderer: SiteR
     page = renderer.render_folder_index("Settings Page", [SETTINGS], feature)
     assert "<h1>設定頁</h1>" in page
     assert "Preferences" in page
-    assert '<span class="tag-retired">已退役</span>' in page
+    assert '<span class="tag-retired">Retired</span>' in page
     assert '<span class="chip">v2</span>' in page
 
 

@@ -32,8 +32,8 @@ if TYPE_CHECKING:                                    # 只給型別註記用；�
     from conftest import RecordingWriter
 
 NOW = datetime(2026, 9, 14, 3, 0, tzinfo=UTC)
-CONFIGURED = ["找不到按鈕", "缺少資訊", "步驟順序錯誤"]
-APPROVED = frozenset({"找不到按鈕", "缺少資訊"})
+CONFIGURED = ["Button not found", "Missing information", "步驟順序錯誤"]
+APPROVED = frozenset({"Button not found", "Missing information"})
 OPERATION = operation_id_for("feedback", "f_50")
 """`op-feedback-f_50`；用 P42 的產生器而不是在測試裡自創短字串（00A §3.3）。"""
 
@@ -105,7 +105,7 @@ def configured_repo() -> FakeRepository:
 def test_default_categories_are_used_when_config_item_is_absent(
         empty_repo: FakeRepository) -> None:
     """Given 沒有設定 item／When 讀核定表／Then 回初始兩類，而且讀的是那個 PK。"""
-    assert approved_categories(empty_repo) == frozenset({"找不到按鈕", "缺少資訊"})
+    assert approved_categories(empty_repo) == frozenset({"Button not found", "Missing information"})
     assert approved_categories(empty_repo) == DEFAULT_FEEDBACK_CATEGORIES
     assert empty_repo.reads == [FEEDBACK_CATEGORIES_PK, FEEDBACK_CATEGORIES_PK]
 
@@ -124,7 +124,7 @@ def test_reading_the_table_never_writes_it(configured_repo: FakeRepository) -> N
     assert configured_repo.writes == []
 
 
-@pytest.mark.parametrize("categories", [None, "找不到按鈕", [], ["", "   "], 3])
+@pytest.mark.parametrize("categories", [None, "Button not found", [], ["", "   "], 3])
 def test_broken_config_shapes_fall_back_to_the_defaults(categories: Any) -> None:
     """Given `categories` 缺欄位／非 list／空 list／全空字串／數字／When 讀／Then 退回預設兩類。
 
@@ -142,7 +142,7 @@ def test_unknown_checkbox_value_settles_to_pending(empty_repo: FakeRepository) -
     assert _settle("介面太醜", approved) == "待分類"
     assert _settle("  ", approved) is None
     assert _settle(None, approved) is None
-    assert _settle("缺少資訊", approved) == "缺少資訊"
+    assert _settle("Missing information", approved) == "Missing information"
 
 
 def test_settle_keeps_pending_itself_and_trims_whitespace(empty_repo: FakeRepository) -> None:
@@ -152,7 +152,7 @@ def test_settle_keeps_pending_itself_and_trims_whitespace(empty_repo: FakeReposi
     """
     approved = approved_categories(empty_repo)
     assert _settle(PENDING_CATEGORY, approved) == PENDING_CATEGORY
-    assert _settle("  缺少資訊  ", approved) == "缺少資訊"
+    assert _settle("  Missing information  ", approved) == "Missing information"
 
 
 # --- Task 2：四條分支、模型呼叫次數與 prompt 分區 ---------------------------------
@@ -168,11 +168,11 @@ def feedback(category: str | None = None, comment: str | None = None,
 @pytest.mark.parametrize(
     ("category", "comment", "expected", "calls"),
     [
-        ("找不到按鈕", "第三步找不到", "找不到按鈕", 0),
+        ("Button not found", "第三步找不到", "Button not found", 0),
         ("介面太醜", "第三步找不到", "待分類", 0),
         (None, None, None, 0),
         (None, "   ", None, 0),
-        (None, "第三步的按鈕在哪一頁？", "找不到按鈕", 1),
+        (None, "第三步的按鈕在哪一頁？", "Button not found", 1),
     ],
 )
 def test_category_decision_table(fake_writer: "RecordingWriter", category: str | None,
@@ -183,7 +183,7 @@ def test_category_decision_table(fake_writer: "RecordingWriter", category: str |
     `COL` Rule 4（勾選優先、0 次呼叫）、Rule 5（未核定→待分類）、Rule 6（需要分類的
     留言算一次）三條的直接 assertion。`replies` 是佇列，不呼叫就不會被取用。
     """
-    fake_writer.replies.append({"category": "找不到按鈕"})
+    fake_writer.replies.append({"category": "Button not found"})
     result = classify_feedback_category(feedback(category, comment), approved=APPROVED,
                                         writer=fake_writer, operation_id=OPERATION)
     assert result == expected
@@ -226,7 +226,7 @@ def test_the_classification_call_uses_the_fixed_node_and_schema(
     `writing/client.py::inference_config` 靠 `$id` 查 `WRITING_MAX_TOKENS`，這個 `$id`
     不在表裡，所以自動落在 `JUDGEMENT_INFERENCE_CONFIG`（00A §3.7）。
     """
-    fake_writer.replies.append({"category": "缺少資訊"})
+    fake_writer.replies.append({"category": "Missing information"})
     classify_feedback_category(feedback(None, "第三步找不到"), approved=APPROVED,
                                writer=fake_writer, operation_id=OPERATION)
     call = fake_writer.calls[0]
@@ -238,11 +238,12 @@ def test_the_classification_call_uses_the_fixed_node_and_schema(
 def test_the_prompt_lists_the_allowed_categories_including_pending(
         fake_writer: "RecordingWriter") -> None:
     """Given 核定兩類／When 產生 prompt／Then 允許清單是核定值加上 `待分類`。"""
-    fake_writer.replies.append({"category": "缺少資訊"})
+    fake_writer.replies.append({"category": "Missing information"})
     classify_feedback_category(feedback(None, "第三步找不到"), approved=APPROVED,
                                writer=fake_writer, operation_id=OPERATION)
     user = fake_writer.calls[0]["user"]
-    assert '<allowed_categories>["待分類", "找不到按鈕", "缺少資訊"]</allowed_categories>' in user
+    allowed = '["Button not found", "Missing information", "待分類"]'     # sorted()
+    assert f"<allowed_categories>{allowed}</allowed_categories>" in user
     assert "CommentClassification" in fake_writer.calls[0]["system"]
 
 
@@ -275,10 +276,10 @@ def test_a_checked_category_never_reaches_the_writer(fake_writer: "RecordingWrit
 
     `COL` Rule 4 的停止點：只要這裡出現呼叫，Phase 54 的呼叫次數驗收就被污染了。
     """
-    fake_writer.replies.append({"category": "缺少資訊"})
-    assert classify_feedback_category(feedback("找不到按鈕", "第三步找不到"), approved=APPROVED,
-                                      writer=fake_writer,
-                                      operation_id=OPERATION) == "找不到按鈕"
+    fake_writer.replies.append({"category": "Missing information"})
+    assert classify_feedback_category(feedback("Button not found", "第三步找不到"),
+                                      approved=APPROVED, writer=fake_writer,
+                                      operation_id=OPERATION) == "Button not found"
     assert fake_writer.calls == [] and fake_writer.request_attempts == 0
 
 

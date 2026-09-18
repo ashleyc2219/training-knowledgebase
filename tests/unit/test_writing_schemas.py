@@ -28,7 +28,7 @@ VALID: dict[str, dict[str, Any]] = {
         "expected_outcome": "看得到會前摘要"},
     "StepRewrite": {"steps": [{"number": 3, "type": "read", "text": "改看新版摘要",
                                "feature_id": "Prepare"}]},
-    "CommentClassification": {"category": "找不到按鈕"},
+    "CommentClassification": {"category": "Button not found"},
     "RuleProposal": {"rule": "點擊步驟要寫出按鈕所在頁面", "applies_when": "click_ui",
                      "evidence": ["fx_1", "fx_2", "fx_3", "fx_4", "fx_5"],
                      "derived_from": "prepare-meeting@v2"},

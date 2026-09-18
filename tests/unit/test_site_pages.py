@@ -12,6 +12,7 @@
 **單元測試全綠不代表 O3 通過**：本檔不碰 DynamoDB、S3，也不證明任何發布切點。
 """
 
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
@@ -30,6 +31,7 @@ from training_kb.models import (
     TutorialVersion,
 )
 from training_kb.site import (
+    CURRENT_LABEL,
     NO_PREVIOUS_TEXT,
     NOT_SENT_TEXT,
     SITE_PREFIX,
@@ -49,8 +51,15 @@ REASON = "release:r_42"
 
 NOTICE = "合成資料示範"
 BATCH = "demo-seed-01"
-CATEGORIES = ("找不到按鈕", "缺少資訊")
+CATEGORIES = ("Button not found", "Missing information")
 """類別清單由呼叫端注入（P43 的 `approved_categories`），`site.py` 一個字都不寫。"""
+
+
+def claims_delivery(text: str) -> bool:
+    """頁面或腳本是否暗示「系統已收到回饋」：拿掉 `not sent` 這個片語後，sent／submitted／
+    received／thank 任一出現就算（英文版的「已送出」「感謝回饋」禁令）。"""
+    stripped = re.sub(r"(?i)not[ -]sent", "", text)
+    return re.search(r"(?i)\b(sent|submitted|received|thank)", stripped) is not None
 
 
 def make_tutorial(*, status: TutorialStatus = TutorialStatus.ACTIVE,
@@ -115,7 +124,7 @@ def test_version_page_links_previous_diff(
     version = make_version(V3, supersedes=V2)
     page = renderer.render_version_page(tutorial, version, steps, content)
     assert 'data-published="true"' in page
-    assert "查看與 v2 的差異" in page
+    assert "View changes since v2" in page
     assert 'href="v3.diff.txt"' in page
     assert 'href="v2.html"' in page
     assert 'href="index.html"' in page
@@ -172,11 +181,11 @@ def test_version_switch_marks_the_current_version(
     """
     current = renderer.render_version_page(make_tutorial(current_version=V3),
                                            make_version(V3), steps, content)
-    assert "（目前版本）" in current
+    assert f"({CURRENT_LABEL})" in current
     older = renderer.render_version_page(make_tutorial(current_version=V3),
                                          make_version(V2, supersedes=V1),
                                          make_steps(V2), make_content())
-    assert "（目前版本）" not in older
+    assert f"({CURRENT_LABEL})" not in older
     assert 'href="v3.html"' not in older
 
 
@@ -211,7 +220,7 @@ def test_version_page_shows_the_synthetic_banner(
     """
     page = renderer.render_version_page(tutorial, make_version(V3), steps, content)
     assert NOTICE in page and BATCH in page
-    assert "已核定" not in page
+    assert "已核定" not in page and "approved" not in page.lower()
     plain = SiteRenderer().render_version_page(tutorial, make_version(V3), steps, content)
     assert 'class="banner"' not in plain
 
@@ -229,8 +238,7 @@ def test_version_page_widget_offers_download_but_never_claims_sent(
     for category in CATEGORIES:
         assert f'data-category="{escape_text(category)}"' in page
     assert NOT_SENT_TEXT in page
-    assert "已送出" not in page.replace(NOT_SENT_TEXT, "")
-    assert "感謝回饋" not in page
+    assert not claims_delivery(page)
 
 
 def test_version_page_loads_only_local_assets(
@@ -327,7 +335,7 @@ def test_tutorial_index_keeps_the_order_it_was_given(renderer: SiteRenderer) -> 
     page = renderer.render_tutorial_index(make_tutorial(), [v3, v1])
     assert page.index(V3) < page.index(V1)
     assert 'data-site-version="v3"' in page
-    assert "（目前版本）" in page
+    assert f"({CURRENT_LABEL})" in page
 
 
 def test_tutorial_index_loads_the_stylesheet_but_no_widget(renderer: SiteRenderer) -> None:

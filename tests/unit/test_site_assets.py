@@ -12,6 +12,7 @@
 ```
 """
 
+import re
 from pathlib import Path
 
 from training_kb.site import ASSET_KEYS, NOT_SENT_TEXT, SITE_PREFIX
@@ -26,6 +27,13 @@ NETWORK_CALLS = ("fetch(", "XMLHttpRequest", "sendBeacon", "WebSocket",
 HTML_INJECTION = ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write")
 
 
+def claims_delivery(text: str) -> bool:
+    """頁面或腳本是否暗示「系統已收到回饋」：拿掉 `not sent` 這個片語後，sent／submitted／
+    received／thank 任一出現就算（英文版的「已送出」「感謝回饋」禁令）。"""
+    stripped = re.sub(r"(?i)not[ -]sent", "", text)
+    return re.search(r"(?i)\b(sent|submitted|received|thank)", stripped) is not None
+
+
 def widget_source() -> str:
     return WIDGET.read_text(encoding="utf-8")
 
@@ -36,8 +44,7 @@ def test_widget_is_self_contained_and_never_claims_sent() -> None:
     for banned in NETWORK_CALLS + HTML_INJECTION:
         assert banned not in source
     assert NOT_SENT_TEXT in source
-    assert "已送出" not in source.replace("尚未送出", "")
-    assert "感謝回饋" not in source
+    assert not claims_delivery(source)
     assert "textContent" in source
 
 

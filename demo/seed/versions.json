@@ -14,12 +14,12 @@
         "published_at": "2026-08-01T00:00:00Z"
       },
       "content": {
-        "title": "準備會議：在會議開始前取得重點摘要",
-        "problem": "開會前想先看系統整理好的重點，卻不知道從哪裡打開。",
+        "title": "Prepare a meeting: get the key points before it starts",
+        "problem": "You want to read the key points the system prepared before the meeting, but do not know where to open them.",
         "prerequisites": [
-          "已登入並且至少有一場已排定的會議"
+          "You are signed in and have at least one scheduled meeting"
         ],
-        "expected_outcome": "你會看到這場會議的重點摘要，並且可以把它匯出成筆記。"
+        "expected_outcome": "You see the key-point summary for the meeting and can export it as notes."
       }
     },
     {
@@ -27,7 +27,7 @@
         "version_id": "prepare-meeting@v2",
         "slug": "prepare-meeting",
         "supersedes": "prepare-meeting@v1",
-        "reason": "feedback:8 則 找不到按鈕",
+        "reason": "feedback:8 則 Button not found",
         "rules_applied": [
           "R-007"
         ],
@@ -35,12 +35,12 @@
         "published_at": "2026-08-20T00:00:00Z"
       },
       "content": {
-        "title": "準備會議：在會議開始前取得重點摘要",
-        "problem": "開會前想先看系統整理好的重點，卻不知道從哪裡打開。",
+        "title": "Prepare a meeting: get the key points before it starts",
+        "problem": "You want to read the key points the system prepared before the meeting, but do not know where to open them.",
         "prerequisites": [
-          "已登入並且至少有一場已排定的會議"
+          "You are signed in and have at least one scheduled meeting"
         ],
-        "expected_outcome": "你會看到這場會議的重點摘要，並且可以把它匯出成筆記。"
+        "expected_outcome": "You see the key-point summary for the meeting and can export it as notes."
       }
     },
     {
@@ -54,12 +54,12 @@
         "published_at": "2026-07-20T00:00:00Z"
       },
       "content": {
-        "title": "分享摘要：把會議重點傳給沒有參加的同事",
-        "problem": "想把整理好的會議重點分享出去，卻不確定要從哪一頁產生連結。",
+        "title": "Share a summary: send the key points to colleagues who missed the meeting",
+        "problem": "You want to share the prepared key points, but are not sure which page creates the link.",
         "prerequisites": [
-          "已經有一場產生過重點摘要的會議"
+          "You have a meeting whose key-point summary has already been generated"
         ],
-        "expected_outcome": "同事會收到一個可以直接開啟的重點摘要連結。"
+        "expected_outcome": "Your colleagues receive a link that opens the key-point summary directly."
       }
     },
     {
@@ -73,12 +73,12 @@
         "published_at": "2026-07-20T00:00:00Z"
       },
       "content": {
-        "title": "設定通知：自己決定收到哪些會議提醒",
-        "problem": "會議提醒太多或太少，想自己挑要收到哪些通知、從哪個管道收。",
+        "title": "Set up notifications: choose which meeting reminders you receive",
+        "problem": "You get too many or too few meeting reminders and want to choose which notifications you receive, and through which channel.",
         "prerequisites": [
-          "已登入並且有權限修改個人設定"
+          "You are signed in and allowed to change your personal settings"
         ],
-        "expected_outcome": "你只會在自己選定的管道收到選定類型的會議提醒。"
+        "expected_outcome": "You receive only the reminder types you selected, only through the channel you chose."
       }
     },
     {
@@ -92,12 +92,12 @@
         "published_at": "2026-06-01T00:00:00Z"
       },
       "content": {
-        "title": "每週摘要：一次看完這週的會議重點",
-        "problem": "一週開了很多場會，想一次看完所有重點而不是一場一場點開。",
+        "title": "Weekly digest: read the week's meeting highlights in one place",
+        "problem": "You had many meetings this week and want to read every highlight at once instead of opening them one by one.",
         "prerequisites": [
-          "本週至少有一場已經結束的會議"
+          "At least one meeting this week has already ended"
         ],
-        "expected_outcome": "你會看到本週所有會議的重點整理，並且可以存成筆記。"
+        "expected_outcome": "You see the highlights of every meeting this week and can save them as notes."
       }
     },
     {
@@ -105,7 +105,7 @@
         "version_id": "weekly-digest@v2",
         "slug": "weekly-digest",
         "supersedes": "weekly-digest@v1",
-        "reason": "feedback:5 則 缺少資訊",
+        "reason": "feedback:5 則 Missing information",
         "rules_applied": [
           "R-012"
         ],
@@ -113,12 +113,12 @@
         "published_at": "2026-06-20T00:00:00Z"
       },
       "content": {
-        "title": "每週摘要：一次看完這週的會議重點",
-        "problem": "一週開了很多場會，想一次看完所有重點而不是一場一場點開。",
+        "title": "Weekly digest: read the week's meeting highlights in one place",
+        "problem": "You had many meetings this week and want to read every highlight at once instead of opening them one by one.",
         "prerequisites": [
-          "本週至少有一場已經結束的會議"
+          "At least one meeting this week has already ended"
         ],
-        "expected_outcome": "你會看到本週所有會議的重點整理，並且可以存成筆記。"
+        "expected_outcome": "You see the highlights of every meeting this week and can save them as notes."
       }
     },
     {
@@ -126,18 +126,18 @@
         "version_id": "weekly-digest@v3",
         "slug": "weekly-digest",
         "supersedes": "weekly-digest@v2",
-        "reason": "feedback:5 則 缺少資訊",
+        "reason": "feedback:5 則 Missing information",
         "rules_applied": [],
         "s3_key": "tutorials/weekly-digest/v3.md",
         "published_at": "2026-07-01T00:00:00Z"
       },
       "content": {
-        "title": "每週摘要：一次看完這週的會議重點",
-        "problem": "一週開了很多場會，想一次看完所有重點而不是一場一場點開。",
+        "title": "Weekly digest: read the week's meeting highlights in one place",
+        "problem": "You had many meetings this week and want to read every highlight at once instead of opening them one by one.",
         "prerequisites": [
-          "本週至少有一場已經結束的會議"
+          "At least one meeting this week has already ended"
         ],
-        "expected_outcome": "你會看到本週所有會議的重點整理，並且可以存成筆記。"
+        "expected_outcome": "You see the highlights of every meeting this week and can save them as notes."
       }
     },
     {
@@ -145,7 +145,7 @@
         "version_id": "weekly-digest@v4",
         "slug": "weekly-digest",
         "supersedes": "weekly-digest@v3",
-        "reason": "feedback:5 則 缺少資訊",
+        "reason": "feedback:5 則 Missing information",
         "rules_applied": [
           "R-012"
         ],
@@ -153,12 +153,12 @@
         "published_at": "2026-07-20T00:00:00Z"
       },
       "content": {
-        "title": "每週摘要：一次看完這週的會議重點",
-        "problem": "一週開了很多場會，想一次看完所有重點而不是一場一場點開。",
+        "title": "Weekly digest: read the week's meeting highlights in one place",
+        "problem": "You had many meetings this week and want to read every highlight at once instead of opening them one by one.",
         "prerequisites": [
-          "本週至少有一場已經結束的會議"
+          "At least one meeting this week has already ended"
         ],
-        "expected_outcome": "你會看到本週所有會議的重點整理，並且可以存成筆記。"
+        "expected_outcome": "You see the highlights of every meeting this week and can save them as notes."
       }
     }
   ]

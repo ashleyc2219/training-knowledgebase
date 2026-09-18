@@ -109,7 +109,8 @@ p.banner {
   font-family: var(--mono);
   font-size: 0.8rem;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   line-height: 1.5;
   white-space: nowrap;
   vertical-align: middle;
@@ -183,9 +184,10 @@ p.diff-note {
 
 .eyebrow {
   margin: 0 0 0.2rem;
-  font-family: var(--serif);
-  font-size: 0.85rem;
-  letter-spacing: 0.3em;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
   color: var(--teal);
 }
 
@@ -210,21 +212,11 @@ h1 {
 }
 
 .part h2 {
-  order: 2;
   margin: 0;
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.part-zh {
-  order: 1;
   font-family: var(--serif);
   font-size: 1.1rem;
   font-weight: 700;
+  letter-spacing: 0.01em;
   color: var(--ink);
 }
 

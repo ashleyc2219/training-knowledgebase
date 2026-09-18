@@ -15,7 +15,7 @@ from training_kb.errors import PermanentError
 from training_kb.models import ProcStep
 from training_kb.rote import RawEvent, execute_recorded_steps, validate_recorded_steps
 
-BODY = "找不到按鈕在哪一頁"
+BODY = "Button not found在哪一頁"
 EVENT = RawEvent(domain="github.com", adapter="github_issue", event_type="issues",
                  headers={"x-github-event": "issues"},
                  payload={"action": "opened", "issue": {"number": 12, "body": BODY}})

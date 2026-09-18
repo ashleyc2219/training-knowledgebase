@@ -85,7 +85,7 @@ NOW = datetime(2026, 9, 13, 0, 30, tzinfo=UTC)
 OP = "op-feedback-review-demo-2026-09-13"
 """當日 review operation：canonical id 是 `demo-2026-09-13`（連字號，不用 `#`；D-61）。"""
 
-CATEGORY = "找不到按鈕"
+CATEGORY = "Button not found"
 FEATURE = "Prepare"
 TABLE_NAME = "training_kb"
 TARGET_INDEX = "by_target"

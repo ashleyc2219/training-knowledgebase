@@ -57,7 +57,7 @@ def test_feature_round_trip_and_item_shape(repository, table) -> None:
 
 
 def test_embedding_survives_the_decimal_codec(repository) -> None:
-    ticket = Ticket(id="t_881", source="email", text="找不到按鈕", author="u_01",
+    ticket = Ticket(id="t_881", source="email", text="Button not found", author="u_01",
                     ts=datetime(2026, 8, 3, 10, tzinfo=UTC), project_id="demo",
                     feature_ids=[], embedding=[0.1, -0.25] + [0.0] * 1022)
     repository.put_meta(ticket)
@@ -148,7 +148,7 @@ NINE_METADATA_ENTITIES: list[tuple[str, Entity]] = [
                      published_at=TS)),
     (feature_pk("Prepare"), feature()),
     (ticket_pk("t_881"),
-     Ticket(id="t_881", source="github_issue", text="找不到按鈕", author="u_01", ts=TS,
+     Ticket(id="t_881", source="github_issue", text="Button not found", author="u_01", ts=TS,
             project_id="demo", feature_ids=["Prepare"], embedding=[0.5] * 1024)),
     (release_pk("R-007"),
      Release(id="R-007", source="changelog", feature="Prepare", kind="renamed",

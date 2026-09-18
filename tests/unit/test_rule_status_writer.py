@@ -26,7 +26,7 @@ from training_kb.handlers.analytics import validate_rules_action
 from training_kb.models import RuleStatus
 
 NOW = datetime(2026, 9, 1, tzinfo=UTC)
-APPROVED = frozenset({"找不到按鈕", "缺少資訊"})
+APPROVED = frozenset({"Button not found", "Missing information"})
 
 
 def rules_event(batch, *, now: str = "2026-09-01T00:00:00Z") -> dict:

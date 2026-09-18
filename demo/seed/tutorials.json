@@ -6,7 +6,7 @@
     {
       "slug": "prepare-meeting",
       "current_version": "prepare-meeting@v2",
-      "topic": "準備會議",
+      "topic": "Prepare a meeting",
       "feature_ids": [
         "Open Meeting",
         "Meeting List",
@@ -20,7 +20,7 @@
     {
       "slug": "share-summary",
       "current_version": "share-summary@v1",
-      "topic": "分享摘要",
+      "topic": "Share a summary",
       "feature_ids": [
         "Open Meeting",
         "Share Link",
@@ -34,7 +34,7 @@
     {
       "slug": "notification-settings",
       "current_version": "notification-settings@v1",
-      "topic": "設定通知",
+      "topic": "Set up notifications",
       "feature_ids": [
         "Settings Page",
         "Notification Settings",
@@ -48,7 +48,7 @@
     {
       "slug": "weekly-digest",
       "current_version": "weekly-digest@v4",
-      "topic": "每週摘要",
+      "topic": "Weekly digest",
       "feature_ids": [
         "Open Meeting",
         "Meeting List",

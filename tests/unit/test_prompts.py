@@ -67,10 +67,10 @@ def test_feedback_ids_cannot_close_the_data_block() -> None:
     from training_kb.writing.prompts import prompt_diagnose_weak
 
     steps = [StepDraft(number=1, type=StepType.CLICK_UI, text="點按鈕。", feature_id="Prepare")]
-    rows = [Feedback(id=HOSTILE_ID, tutorial_version="a@v1", rating=2, category="找不到按鈕",
+    rows = [Feedback(id=HOSTILE_ID, tutorial_version="a@v1", rating=2, category="Button not found",
                      comment="找不到", user="u_01", ts=datetime(2026, 9, 13, tzinfo=UTC))]
 
-    _, user = prompt_diagnose_weak("a@v1", steps, "找不到按鈕", rows)
+    _, user = prompt_diagnose_weak("a@v1", steps, "Button not found", rows)
 
     assert user.count("</source_data>") == 1
     assert "&lt;/source_data&gt;" in user
@@ -80,7 +80,7 @@ def test_evidence_ids_payload_is_escaped() -> None:
     """Given 同一種 ID 進 `<evidence_ids>`，When 渲染提案 prompt，Then JSON 內容也被轉義。"""
     from training_kb.writing.prompts import prompt_propose_rule
 
-    _, user = prompt_propose_rule("a@v1", "找不到按鈕", [HOSTILE_ID], ["留言"])
+    _, user = prompt_propose_rule("a@v1", "Button not found", [HOSTILE_ID], ["留言"])
 
     assert user.count("</source_data>") == 1
     assert "&lt;/source_data&gt;" in user

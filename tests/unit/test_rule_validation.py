@@ -17,7 +17,7 @@ from training_kb.analytics.validation import (
     validated_conflict,
 )
 
-APPROVED = frozenset({"找不到按鈕", "缺少資訊"})
+APPROVED = frozenset({"Button not found", "Missing information"})
 
 
 # --- Task 1：批次評估、兩個差值與不可判定 ------------------------------------

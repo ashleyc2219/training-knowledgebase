@@ -7,7 +7,7 @@
       "id": "f_12",
       "tutorial_version": "prepare-meeting@v1",
       "rating": 2,
-      "category": "找不到按鈕",
+      "category": "Button not found",
       "comment": "第三步沒有指出按鈕在哪一頁與位置",
       "user": "u_01",
       "ts": "2026-08-02T00:00:00Z"
@@ -16,7 +16,7 @@
       "id": "f_15",
       "tutorial_version": "prepare-meeting@v1",
       "rating": 2,
-      "category": "找不到按鈕",
+      "category": "Button not found",
       "comment": "第三步沒有指出按鈕在哪一頁與位置",
       "user": "u_02",
       "ts": "2026-08-02T00:00:00Z"
@@ -25,7 +25,7 @@
       "id": "f_19",
       "tutorial_version": "prepare-meeting@v1",
       "rating": 3,
-      "category": "找不到按鈕",
+      "category": "Button not found",
       "comment": "第三步沒有指出按鈕在哪一頁與位置",
       "user": "u_03",
       "ts": "2026-08-02T00:00:00Z"
@@ -34,7 +34,7 @@
       "id": "f_23",
       "tutorial_version": "prepare-meeting@v1",
       "rating": 3,
-      "category": "找不到按鈕",
+      "category": "Button not found",
       "comment": "第三步沒有指出按鈕在哪一頁與位置",
       "user": "u_04",
       "ts": "2026-08-02T00:00:00Z"
@@ -43,7 +43,7 @@
       "id": "f_27",
       "tutorial_version": "prepare-meeting@v1",
       "rating": 3,
-      "category": "找不到按鈕",
+      "category": "Button not found",
       "comment": "第三步沒有指出按鈕在哪一頁與位置",
       "user": "u_05",
       "ts": "2026-08-02T00:00:00Z"
@@ -52,7 +52,7 @@
       "id": "f_31",
       "tutorial_version": "prepare-meeting@v1",
       "rating": 3,
-      "category": "找不到按鈕",
+      "category": "Button not found",
       "comment": "第三步沒有指出按鈕在哪一頁與位置",
       "user": "u_06",
       "ts": "2026-08-02T00:00:00Z"
@@ -61,7 +61,7 @@
       "id": "f_34",
       "tutorial_version": "prepare-meeting@v1",
       "rating": 3,
-      "category": "找不到按鈕",
+      "category": "Button not found",
       "comment": "第三步沒有指出按鈕在哪一頁與位置",
       "user": "u_07",
       "ts": "2026-08-02T00:00:00Z"
@@ -70,7 +70,7 @@
       "id": "f_40",
       "tutorial_version": "prepare-meeting@v1",
       "rating": 4,
-      "category": "找不到按鈕",
+      "category": "Button not found",
       "comment": "第三步沒有指出按鈕在哪一頁與位置",
       "user": "u_08",
       "ts": "2026-08-02T00:00:00Z"
@@ -79,7 +79,7 @@
       "id": "f_101",
       "tutorial_version": "prepare-meeting@v2",
       "rating": 2,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "資訊仍不夠完整",
       "user": "u_01",
       "ts": "2026-08-21T00:00:00Z"
@@ -88,7 +88,7 @@
       "id": "f_102",
       "tutorial_version": "prepare-meeting@v2",
       "rating": 2,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "資訊仍不夠完整",
       "user": "u_02",
       "ts": "2026-08-21T00:00:00Z"
@@ -169,7 +169,7 @@
       "id": "f_301",
       "tutorial_version": "weekly-digest@v1",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_01",
       "ts": "2026-06-02T12:00:00Z"
@@ -178,7 +178,7 @@
       "id": "f_302",
       "tutorial_version": "weekly-digest@v1",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_02",
       "ts": "2026-06-02T12:00:00Z"
@@ -187,7 +187,7 @@
       "id": "f_303",
       "tutorial_version": "weekly-digest@v1",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_03",
       "ts": "2026-06-02T12:00:00Z"
@@ -196,7 +196,7 @@
       "id": "f_304",
       "tutorial_version": "weekly-digest@v1",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_04",
       "ts": "2026-06-02T12:00:00Z"
@@ -205,7 +205,7 @@
       "id": "f_305",
       "tutorial_version": "weekly-digest@v1",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_05",
       "ts": "2026-06-02T12:00:00Z"
@@ -259,7 +259,7 @@
       "id": "f_311",
       "tutorial_version": "weekly-digest@v2",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_01",
       "ts": "2026-06-21T12:00:00Z"
@@ -268,7 +268,7 @@
       "id": "f_312",
       "tutorial_version": "weekly-digest@v2",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_02",
       "ts": "2026-06-21T12:00:00Z"
@@ -277,7 +277,7 @@
       "id": "f_313",
       "tutorial_version": "weekly-digest@v2",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_03",
       "ts": "2026-06-21T12:00:00Z"
@@ -286,7 +286,7 @@
       "id": "f_314",
       "tutorial_version": "weekly-digest@v2",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_04",
       "ts": "2026-06-21T12:00:00Z"
@@ -295,7 +295,7 @@
       "id": "f_315",
       "tutorial_version": "weekly-digest@v2",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_05",
       "ts": "2026-06-21T12:00:00Z"
@@ -349,7 +349,7 @@
       "id": "f_321",
       "tutorial_version": "weekly-digest@v3",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_01",
       "ts": "2026-07-05T12:00:00Z"
@@ -358,7 +358,7 @@
       "id": "f_322",
       "tutorial_version": "weekly-digest@v3",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_02",
       "ts": "2026-07-05T12:00:00Z"
@@ -367,7 +367,7 @@
       "id": "f_323",
       "tutorial_version": "weekly-digest@v3",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_03",
       "ts": "2026-07-05T12:00:00Z"
@@ -376,7 +376,7 @@
       "id": "f_324",
       "tutorial_version": "weekly-digest@v3",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_04",
       "ts": "2026-07-05T12:00:00Z"
@@ -385,7 +385,7 @@
       "id": "f_325",
       "tutorial_version": "weekly-digest@v3",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_05",
       "ts": "2026-07-05T12:00:00Z"
@@ -439,7 +439,7 @@
       "id": "f_331",
       "tutorial_version": "weekly-digest@v4",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_01",
       "ts": "2026-07-21T12:00:00Z"
@@ -448,7 +448,7 @@
       "id": "f_332",
       "tutorial_version": "weekly-digest@v4",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_02",
       "ts": "2026-07-21T12:00:00Z"
@@ -457,7 +457,7 @@
       "id": "f_333",
       "tutorial_version": "weekly-digest@v4",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_03",
       "ts": "2026-07-21T12:00:00Z"
@@ -466,7 +466,7 @@
       "id": "f_334",
       "tutorial_version": "weekly-digest@v4",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_04",
       "ts": "2026-07-21T12:00:00Z"
@@ -475,7 +475,7 @@
       "id": "f_335",
       "tutorial_version": "weekly-digest@v4",
       "rating": 3,
-      "category": "缺少資訊",
+      "category": "Missing information",
       "comment": "每一步的說明太長，重點被埋住了",
       "user": "u_05",
       "ts": "2026-07-21T12:00:00Z"

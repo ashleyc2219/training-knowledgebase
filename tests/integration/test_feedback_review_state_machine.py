@@ -62,7 +62,7 @@ LOCAL_ASL = PROJECT_ROOT / ASL_LOCAL_PATH.format(pipeline="feedback-review", num
 DEFINITION_PLACEHOLDER = "${PipelineTaskFunctionArn}"
 REVIEW_TASKS = ["ListTargets", "EvaluateTargets", "PrepareBatch", "InspectBatch", "CommitBatch"]
 SCHEDULE_NAME = "training-kb-feedback-review-daily"
-CATEGORY = "找不到按鈕"
+CATEGORY = "Button not found"
 
 EXECUTION_TIMEOUT_SECONDS = 120
 POLL_SECONDS = 3

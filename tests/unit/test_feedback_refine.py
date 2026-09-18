@@ -67,8 +67,8 @@ SLUG = "prepare-meeting"
 V1 = f"{SLUG}@v1"
 V2 = f"{SLUG}@v2"
 FEATURE = "Prepare"
-CATEGORY = "找不到按鈕"
-OTHER_CATEGORY = "缺少資訊"
+CATEGORY = "Button not found"
+OTHER_CATEGORY = "Missing information"
 NOW = datetime(2026, 9, 14, tzinfo=UTC)
 PROJECT = "demo-project"
 
@@ -245,8 +245,8 @@ def test_fingerprint_is_a_sha256_hex_digest() -> None:
 
 def test_reason_counts_unique_evidence() -> None:
     """Given 八筆證據（含一筆重複），When 組 reason，Then 逐字是去重後的筆數與類別。"""
-    assert refine_reason(CATEGORY, EIGHT_IDS) == "feedback:8 則 找不到按鈕"
-    assert refine_reason(CATEGORY, [*EIGHT_IDS, "f_12"]) == "feedback:8 則 找不到按鈕"
+    assert refine_reason(CATEGORY, EIGHT_IDS) == "feedback:8 則 Button not found"
+    assert refine_reason(CATEGORY, [*EIGHT_IDS, "f_12"]) == "feedback:8 則 Button not found"
 
 
 def test_evidence_must_be_one_category(world: World) -> None:
@@ -298,7 +298,7 @@ def test_only_diagnosed_steps_change_and_others_are_byte_for_byte(world: World) 
     plan = run(world)
     assert (plan.version_id, plan.base_version_id) == (V2, V1)
     assert plan.changed_indexes == (3,)
-    assert plan.reason == "feedback:8 則 找不到按鈕"
+    assert plan.reason == "feedback:8 則 Button not found"
     assert plan.content.steps[2].text == REWRITE["text"]
     for number in (1, 2, 4):
         assert plan.content.steps[number - 1] == world.base.steps[number - 1]

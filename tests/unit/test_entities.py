@@ -29,14 +29,14 @@ def ten_fixtures() -> list[models.StrictModel]:
                             text="按下開始", feature_id="Prepare"),
         models.Feature(feature_id="Prepare", name="Prepare", aliases=["Meeting Summary"],
                        first_seen=NOW),
-        models.Ticket(id="t_881", source="email", text="找不到按鈕", author="u_01", ts=NOW,
+        models.Ticket(id="t_881", source="email", text="Button not found", author="u_01", ts=NOW,
                       project_id="demo", cluster_id=None, feature_ids=["Prepare"],
                       embedding=[0.5] * 1024),
         models.Release(id="r_42", source_event_id="42", source="github_pr", feature="Prepare",
                        kind="renamed", old_name="Meeting Summary", new_name="Prepare",
                        evidence="PR #42 diff excerpt", ts=NOW),
         models.Feedback(id="f_12", tutorial_version="prepare-meeting@v2", rating=2,
-                        category="找不到按鈕", comment="第三步沒有指出按鈕在哪一頁",
+                        category="Button not found", comment="第三步沒有指出按鈕在哪一頁",
                         user="u_01", ts=NOW),
         models.TutorialView(tutorial_version="prepare-meeting@v2", user="u_01", ts=NOW),
         models.AuthoringRule(rule_id="R-007", rule="點 UI 時寫出頁面與按鈕位置",
@@ -61,14 +61,14 @@ def test_exactly_ten_entity_models_are_public() -> None:
 
 def test_ticket_accepts_zero_or_one_feature() -> None:
     ticket = models.Ticket(
-        id="t_881", source="email", text="找不到按鈕", author="u_01",
+        id="t_881", source="email", text="Button not found", author="u_01",
         ts="2026-08-03T10:00:00Z", project_id="demo", feature_ids=[],
     )
     assert ticket.feature_ids == [] and ticket.ts.tzinfo is not None
 
 
 def test_ticket_requires_author_and_aware_ts() -> None:
-    base = dict(id="t_882", source="email", text="找不到按鈕", project_id="demo")
+    base = dict(id="t_882", source="email", text="Button not found", project_id="demo")
     with pytest.raises(ValidationError, match="author"):
         models.Ticket(**base, ts="2026-08-03T10:00:00Z")
     with pytest.raises(ValidationError, match="aware"):
@@ -94,7 +94,7 @@ def test_proven_workflow_keeps_domain_and_adapter_scope() -> None:
                                  [float("inf")] + [0.0] * 1023])
 def test_embedding_must_be_1024_finite_numbers(bad: list[float]) -> None:
     with pytest.raises(ValidationError, match="1024 finite"):
-        models.Ticket(id="t_884", source="email", text="找不到按鈕", author="u_01", ts=NOW,
+        models.Ticket(id="t_884", source="email", text="Button not found", author="u_01", ts=NOW,
                       project_id="demo", feature_ids=[], embedding=bad)
 
 

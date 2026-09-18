@@ -70,7 +70,7 @@ def repo(repository: Repository) -> Repository:
     repository.put_edge(step_pk(V2, step.number), "REFERENCES", f"FEATURE#{FEATURE}",
                         {"type": step.type.value, "text": step.text})
     repository.put_meta(Feedback(id="f_12", tutorial_version=V2, rating=2,
-                                 category="找不到按鈕", comment="找不到那個按鈕。",
+                                 category="Button not found", comment="找不到那個按鈕。",
                                  user="u_01", ts=datetime(2026, 9, 2, tzinfo=UTC)))
     repository.put_edge(feedback_pk("f_12"), "REFERS_TO", version_pk(V2))
     repository.put_object(MARKDOWN_KEY, MARKDOWN.encode("utf-8"),

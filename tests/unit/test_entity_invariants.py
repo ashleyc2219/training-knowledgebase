@@ -54,7 +54,7 @@ def test_rating_rejects_bool_and_out_of_range() -> None:
 
 def test_ticket_has_at_most_one_feature() -> None:
     with pytest.raises(ValidationError, match=r"0\.\.1"):
-        Ticket(id="t_883", source="email", text="找不到按鈕", author="u_01",
+        Ticket(id="t_883", source="email", text="Button not found", author="u_01",
                ts="2026-08-03T10:00:00Z", project_id="demo",
                feature_ids=["Prepare", "Share Summary"])
 
@@ -111,7 +111,7 @@ def test_feedback_must_carry_rating_category_or_comment() -> None:
     assert Feedback(id="f_5", tutorial_version="prepare-meeting@v1", rating=5,
                     user="u_01").rating == 5
     only_category = Feedback(id="f_6", tutorial_version="prepare-meeting@v1",
-                             category="缺少資訊", user="u_01")
+                             category="Missing information", user="u_01")
     assert only_category.rating is None
 
 
@@ -207,7 +207,7 @@ def test_every_datetime_field_rejects_sub_second_precision() -> None:
     with pytest.raises(ValidationError, match="whole seconds"):
         TutorialView(tutorial_version="prepare-meeting@v1", user="u_01", ts=SUB_SECOND)
     with pytest.raises(ValidationError, match="whole seconds"):
-        Ticket(id="t_884", source="email", text="找不到按鈕", author="u_01",
+        Ticket(id="t_884", source="email", text="Button not found", author="u_01",
                ts=SUB_SECOND, project_id="demo")
     with pytest.raises(ValidationError, match="whole seconds"):
         Release(id="r_47", source="changelog", feature="Prepare", kind="changed",
@@ -226,7 +226,7 @@ def test_every_datetime_field_rejects_sub_second_precision() -> None:
 def test_datetime_fields_normalise_to_utc_on_the_way_in() -> None:
     """`+08:00` 建模後序列化成 `Z`：`put_meta` 走的是 `model_dump(mode="json")`，
     不正規化就會把偏移量原樣寫進表，同一時刻在表裡出現兩種字串。"""
-    ticket = Ticket(id="t_885", source="email", text="找不到按鈕", author="u_01",
+    ticket = Ticket(id="t_885", source="email", text="Button not found", author="u_01",
                     ts=SAME_MOMENT_IN_TAIPEI, project_id="demo")
     assert ticket.ts.utcoffset() == timedelta(0)
     assert ticket.model_dump(mode="json")["ts"] == "2026-08-03T10:00:00Z"

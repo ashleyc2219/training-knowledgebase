@@ -174,9 +174,9 @@ def test_non_string_category_or_comment_is_rejected() -> None:
 
 def test_the_category_value_is_kept_verbatim_for_phase_43() -> None:
     """Given 來源勾了一個類別／When 驗證／Then 原值保留，本 Phase 不收斂也不分類。"""
-    feedback = validate_feedback({**FEEDBACK, "category": "找不到按鈕",
+    feedback = validate_feedback({**FEEDBACK, "category": "Button not found",
                                   "comment": "第三步沒有指出按鈕在哪一頁"}, now=NOW)
-    assert feedback.category == "找不到按鈕"
+    assert feedback.category == "Button not found"
 
 
 def test_project_id_is_allowed_but_never_reaches_the_model() -> None:
