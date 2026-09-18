@@ -66,7 +66,7 @@ from training_kb.publishing import (
     promote_site_objects,
 )
 from training_kb.repository import Repository
-from training_kb.site import SiteRenderer
+from training_kb.site import SiteRenderer, folder_slug
 
 FEATURE = "Prepare"
 SLUG_A = "prepare-meeting"
@@ -82,6 +82,8 @@ PENDING_KEY = f"operations/{OPERATION}/pending-promote.json"
 NEW_PAGES = (f"site/tutorials/{SLUG_A}/v3.html", f"site/tutorials/{SLUG_B}/v2.html")
 NEW_PUBLIC = [f"site/tutorials/{SLUG_A}/v3.html", f"site/tutorials/{SLUG_A}/v3.diff.txt",
               f"site/tutorials/{SLUG_B}/v2.html", f"site/tutorials/{SLUG_B}/v2.diff.txt"]
+FOLDER_PAGE = f"site/features/{folder_slug(FEATURE)}/index.html"
+"""成功發布後多出來的功能資料夾頁（兩篇都只用到 `FEATURE`，所以只有一個）。"""
 OLD_PUBLIC = sorted(["site/index.html",
                      f"site/tutorials/{SLUG_A}/index.html", f"site/tutorials/{SLUG_A}/v2.html",
                      f"site/tutorials/{SLUG_B}/index.html", f"site/tutorials/{SLUG_B}/v1.html"])
@@ -411,7 +413,7 @@ def test_batch_happy_path_switches_both_generations(
     """沒有注入失敗：兩篇一起切到新版，兩個公開世代同時前進，`site/` 只有已發布內容。"""
     assert publish_batch(aws_publisher).published == (A3, B2)
     print(site_reader.report("happy"))
-    assert site_reader.public_keys() == sorted(OLD_PUBLIC + NEW_PUBLIC)
+    assert site_reader.public_keys() == sorted(OLD_PUBLIC + NEW_PUBLIC + [FOLDER_PAGE])
     assert site_reader.generation(SLUG_A) == "v3" and site_reader.generation(SLUG_B) == "v2"
     for key in site_reader.public_keys():
         body = site_reader.read(key)

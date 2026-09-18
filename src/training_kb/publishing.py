@@ -72,7 +72,7 @@ from training_kb.keys import META, OPERATIONS_PREFIX, operation_ref, tutorial_pk
 from training_kb.models import Tutorial, TutorialContent, TutorialVersion, bare_id
 from training_kb.operations import OperationCoordinator
 from training_kb.repository import Repository, item_to_model
-from training_kb.site import SiteRenderer
+from training_kb.site import FEATURES_DIR, SiteRenderer, folder_slug, group_by_feature
 
 SITE_PAGE_CONTENT_TYPE = "text/html; charset=utf-8"
 """公開 HTML 的 content type；教學索引與站台索引也用同一個值。"""
@@ -163,6 +163,20 @@ def tutorial_index_key(slug: str) -> str:
 def site_index_key() -> str:
     """站台索引：`index.html`（**不含** `site/` 前綴）。"""
     return "index.html"
+
+
+SITE_FEATURES_DIR = FEATURES_DIR
+"""資料夾頁那一層的 **S3 key** 目錄名；值與 `site.FEATURES_DIR`（瀏覽器路徑）相同。"""
+
+
+def folder_index_key(feature_id: str) -> str:
+    """功能資料夾頁的相對 key：`features/<folder_slug>/index.html`（**不含** `site/` 前綴）。
+
+    slug 由 `site.folder_slug` 決定（那是 href 也在用的同一個函式），這裡只負責把它放進
+    key 的位置；兩個不同 `feature_id` 縮成同一個 slug 時由 `Publisher._write_site_index`
+    擋下，不在這裡猜。
+    """
+    return f"{SITE_FEATURES_DIR}/{folder_slug(feature_id)}/index.html"
 
 
 def site_diff_key(version_id: str) -> str:
@@ -694,7 +708,7 @@ class Publisher:
         self._write_tutorial_index(slug)
 
     def write_site_index(self) -> None:
-        """重建站台索引（公開方法）；同 `write_tutorial_index` 的理由。"""
+        """重建站台索引與**全部功能資料夾頁**（公開方法）；同 `write_tutorial_index` 的理由。"""
         self._write_site_index()
 
     def publish_recorded_pages(self, slug: str) -> tuple[str, ...]:
@@ -753,9 +767,30 @@ class Publisher:
                         self._renderer.render_tutorial_index(tutorial, versions))
 
     def _write_site_index(self) -> None:
-        """重建站台索引；整批只寫**一次**，而且一定在所有教學索引之後。"""
+        """重建站台索引與每個功能資料夾頁；整批只寫**一次**，而且一定在所有教學索引之後。
+
+        資料夾由 `site.group_by_feature` 從 `TUTORIAL` item 分出來（與站台索引同一份分組），
+        名稱從 `FEATURE` item 拿（沒有那個 item 就印 `feature_id`）。先寫資料夾頁再寫站台索引，
+        讀者從索引點進去時頁面一定已經在。兩個不同 `feature_id` 縮成同一個 slug 會互相覆蓋，
+        所以在寫之前擋下（`PublishError`）。不再被任何教學引用的舊資料夾頁不會被刪
+        （可重建投影沒有刪除路徑），它只是沒有連結指過去。
+        """
         tutorials = sorted(self._tutorials(), key=lambda row: row.slug)
-        self._put_index(site_index_key(), self._renderer.render_site_index(tutorials))
+        folders = group_by_feature(tutorials)
+        features = [row for row in (self._repository.get_feature(feature_id)
+                                    for feature_id, _ in folders) if row is not None]
+        by_name = {row.feature_id: row for row in features}
+        slugs: dict[str, str] = {}
+        for feature_id, rows in folders:
+            slug = folder_slug(feature_id)
+            if slugs.setdefault(slug, feature_id) != feature_id:
+                raise PublishError(
+                    f"功能 {feature_id!r} 與 {slugs[slug]!r} 的資料夾名稱都是 {slug}")
+            self._put_index(folder_index_key(feature_id),
+                            self._renderer.render_folder_index(
+                                feature_id, rows, by_name.get(feature_id)))
+        self._put_index(site_index_key(),
+                        self._renderer.render_site_index(tutorials, features))
 
     def _put_index(self, relative: str, page: str) -> None:
         """兩個索引頁的唯一寫入點；覆寫語意，但守門與版本頁同一個 `_put_public_object`。"""

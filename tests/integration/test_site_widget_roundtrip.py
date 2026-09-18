@@ -61,7 +61,7 @@ from training_kb.publishing import (
     PublishRequest,
 )
 from training_kb.repository import Repository
-from training_kb.site import ASSET_KEYS, SiteRenderer
+from training_kb.site import ASSET_KEYS, SiteRenderer, folder_slug
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ASSET_DIR = PROJECT_ROOT / "demo" / "site_assets"
@@ -302,9 +302,14 @@ def test_every_in_page_link_resolves_to_a_real_object(
 
 def test_the_public_site_contains_exactly_the_expected_keys(
         published_site: Repository, bucket: Any) -> None:
-    """Given 發布完成的站／When 列出 `site/`／Then 只有四種頁面加兩支資產，沒有多餘物件。"""
+    """Given 發布完成的站／When 列出 `site/`／Then 只有五種頁面加兩支資產，沒有多餘物件。
+
+    第五種是功能資料夾頁（2026-09-17 站台改成依功能分類）：這篇教學只用到 `FEATURE`
+    一個功能，所以恰好一個資料夾頁。
+    """
     assert sorted(public_objects(bucket)) == sorted([
         f"{PUBLIC_SITE_PREFIX}index.html",
+        f"{PUBLIC_SITE_PREFIX}features/{folder_slug(FEATURE)}/index.html",
         f"{PUBLIC_SITE_PREFIX}tutorials/{SLUG}/index.html",
         f"{PUBLIC_SITE_PREFIX}tutorials/{SLUG}/v1.html",
         f"{PUBLIC_SITE_PREFIX}tutorials/{SLUG}/v2.diff.txt",

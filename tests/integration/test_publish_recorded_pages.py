@@ -78,3 +78,40 @@ def test_tutorial_without_published_versions_writes_nothing(repository: Reposito
     apply_seed(load_seed(SEED_DIR), repository=repository, now=NOW)
     publisher = Publisher(repository, SiteRenderer(), OperationCoordinator(repository))
     assert publisher.publish_recorded_pages("no-such-tutorial") == ()
+
+
+# --- 資料夾頁（2026-09-17 站台依功能分類）----------------------------------------
+
+
+def test_site_index_rebuild_writes_one_folder_page_per_feature(repository: Repository) -> None:
+    """Given 種子的四篇教學 When 重建站台索引 Then 每個被引用的功能都有資料夾頁，
+    首頁連到每個資料夾、資料夾連到每篇教學，名稱來自 FEATURE item。"""
+    from training_kb.publishing import folder_index_key
+    from training_kb.site import group_by_feature
+
+    apply_seed(load_seed(SEED_DIR), repository=repository, now=NOW)
+    publisher = Publisher(repository, SiteRenderer(), OperationCoordinator(repository))
+    publisher.write_site_index()
+
+    tutorials = [row for row in (repository.get_tutorial(slug) for slug in
+                 ("prepare-meeting", "share-summary", "notification-settings", "weekly-digest"))
+                 if row is not None]
+    folders = group_by_feature(tutorials)
+    assert folders, "種子教學至少要分出一個資料夾"
+    home = _public(repository, "index.html")
+    assert home is not None
+    home_text = home.decode("utf-8")
+    for feature_id, rows in folders:
+        key = folder_index_key(feature_id)
+        assert f'href="{key}"' in home_text
+        page = _public(repository, key)
+        assert page is not None, key
+        text = page.decode("utf-8")
+        for row in rows:
+            assert f'href="../../tutorials/{row.slug}/index.html"' in text
+        feature = repository.get_feature(feature_id)
+        if feature is not None:
+            assert f"<h1>{feature.name}</h1>" in text
+    # "Export Notes" 四篇都用到，所以它的資料夾列出四張卡片
+    export = _public(repository, folder_index_key("Export Notes"))
+    assert export is not None and export.decode("utf-8").count('class="card"') == 4

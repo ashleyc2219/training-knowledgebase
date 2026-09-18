@@ -25,18 +25,29 @@ render_site_index     站台索引    只列 current_version 非空的 Tutorial
 
 **版面（2026-09-17）**：每一頁都是完整的 HTML 文件（`<!doctype html>` … `</html>`），
 `<article>` 仍是內容根節點、機器可讀標記都掛在它身上。版本頁左欄是「版本欄」（版號、
-上一版、版本紀錄、差異），右欄是內文；教學索引是版本時間軸；站台索引是教學清單。
+上一版、版本紀錄、差異、所屬功能），右欄是內文；教學索引是版本時間軸。
+
+**站台用「功能資料夾」分類（2026-09-17）**：讀者先在站台索引看到一格一格的資料夾，每個
+資料夾就是一個產品功能（`Tutorial.feature_ids` 裡的 `feature_id`），點進去是該功能底下
+所有教學的卡片，再點卡片才到版本紀錄與版本頁。一篇教學用到幾個功能就出現在幾個資料夾裡
+（像標籤，不像硬碟目錄）；完全沒有 `feature_ids` 的教學放進「未分類」。分組邏輯只有
+`group_by_feature` 一份，站台索引與 `Publisher` 寫資料夾頁都用它。
+
 所有連結一律是**瀏覽器相對路徑**（D-78），不含 `http://`、`https://` 或 CDN。
 
 **所有使用者可見文字一律先 `html.escape` 再拼字串**（同時轉 `&`、`<`、`>`、`"`、`'`）。
 它與 Phase 22 的 `escape_markdown` 不是同一層，不得互換：那個是給 Markdown 全文用的。
 """
 
+import re
+from collections.abc import Iterable, Sequence
+from hashlib import sha1
 from html import escape
 
 from training_kb.content import PUBLIC_SITE_PREFIX, RETIRED_NOTICE, parse_version_id
 from training_kb.errors import PermanentError, PublishError
 from training_kb.models import (
+    Feature,
     Tutorial,
     TutorialContent,
     TutorialStatus,
@@ -95,10 +106,50 @@ _TUTORIALS_DIR = "tutorials"
 _HOME_FROM_TUTORIAL = "../../index.html"
 """版本頁與教學索引都公開在 `site/tutorials/<slug>/`，回站台索引要往上兩層（D-78 的相對路徑）。"""
 
+FEATURES_DIR = "features"
+"""資料夾頁的那一層目錄名（瀏覽器相對路徑的一段）；`publishing.SITE_FEATURES_DIR` 是同一個
+字面值的 **S3 key** 版本，兩邊各自宣告的理由同 `_TUTORIALS_DIR`。"""
+
+UNCATEGORIZED_FEATURE = "未分類"
+"""沒有任何 `feature_ids` 的教學所在的資料夾；它不是 `FEATURE` item，只是站台的一格。"""
+
+_FOLDER_SLUG_UNSAFE = re.compile(r"[^\w]+", re.UNICODE)
+
 _WIDGET_HEADING = "這篇有幫助嗎？"
 _UNSELECTED_CATEGORY = "未選擇"
 _RATINGS = (1, 2, 3, 4, 5)
 """評分只有 1–5 的整數（收集教學回饋.feature Rule 3）；頁面不提供其他值，匯入端再驗一次。"""
+
+
+def folder_slug(feature_id: str) -> str:
+    """資料夾在 URL 裡的名字：小寫、非文字字元一律變 `-`；中文字保留（S3 key 與 href 都可以）。
+
+    `feature_id` 本身允許空白（`Open Meeting`），直接放進路徑會變成 `%20`；這裡給一個穩定、
+    可讀的版本：`open-meeting`。整個 ID 都是符號時（例如 `***`）會變成空字串，改用 SHA-1 的
+    前十碼保底，確保永遠有名字、而且同一個 ID 永遠得到同一個名字。兩個不同 ID 縮成同一個
+    slug 的情況由 `Publisher` 在寫資料夾頁時擋下（`PublishError`），renderer 不猜。
+    """
+    slug = _FOLDER_SLUG_UNSAFE.sub("-", feature_id.strip().lower()).strip("-")
+    return slug or "f-" + sha1(feature_id.encode("utf-8")).hexdigest()[:10]
+
+
+def group_by_feature(tutorials: Iterable[Tutorial]) -> list[tuple[str, list[Tutorial]]]:
+    """把已上架（`current_version` 非空）的教學依 `feature_ids` 分進資料夾。
+
+    回傳 `[(feature_id, [tutorial, ...]), ...]`：教學數多的資料夾在前、同數依 `feature_id`
+    排序；每個資料夾內依 `slug` 排序。一篇教學用到幾個功能就進幾個資料夾（標籤語意）；
+    `feature_ids` 是空的就進 `UNCATEGORIZED_FEATURE`。站台索引與 `Publisher` 寫資料夾頁
+    共用這一份，分組規則因此只有一處。
+    """
+    folders: dict[str, list[Tutorial]] = {}
+    for tutorial in tutorials:
+        if tutorial.current_version is None:
+            continue
+        for feature_id in (tutorial.feature_ids or [UNCATEGORIZED_FEATURE]):
+            folders.setdefault(feature_id, []).append(tutorial)
+    for rows in folders.values():
+        rows.sort(key=lambda row: row.slug)
+    return sorted(folders.items(), key=lambda item: (-len(item[1]), item[0]))
 
 
 def escape_text(value: str) -> str:
@@ -266,6 +317,29 @@ def _part(section: str, inner: str) -> str:
             f"{inner}</section>")
 
 
+def _feature_links(tutorial: Tutorial, prefix: str) -> str:
+    """一篇教學所屬的資料夾連結（版本頁與教學索引都從 `site/tutorials/<slug>/` 往上兩層）。"""
+    ids = tutorial.feature_ids or [UNCATEGORIZED_FEATURE]
+    links = "".join(
+        f'<li><a class="feature" href="{prefix}{FEATURES_DIR}/'
+        f'{escape_text(folder_slug(fid))}/index.html">{escape_text(fid)}</a></li>'
+        for fid in ids)
+    return f'<nav class="features" aria-label="所屬功能"><ul>{links}</ul></nav>'
+
+
+def _tutorial_card(tutorial: Tutorial, href: str) -> str:
+    """資料夾頁與站台索引共用的教學卡片；只用 `Tutorial` 上就有的欄位。"""
+    assert tutorial.current_version is not None
+    retired = ('<span class="tag-retired">已退役</span>'
+               if tutorial.status == TutorialStatus.RETIRED else "")
+    return (f'<li class="card"><a href="{escape_text(href)}">'
+            f'<span class="topic">{escape(tutorial.topic)}</span>'
+            f'<span class="slug">{escape_text(tutorial.slug)}</span>'
+            f'<span class="meta"><span class="chip">'
+            f'{escape_text(_version_number(tutorial.current_version))}</span>{retired}</span>'
+            f"</a></li>")
+
+
 def _widget_block(tutorial: Tutorial, version: TutorialVersion,
                   categories: tuple[str, ...], notice: str) -> str:
     """回饋與瀏覽紀錄的下載區；退役教學整段不輸出（設計 §8.4、§13）。
@@ -354,6 +428,7 @@ class SiteRenderer:
             f"{stamp}"
             f"{_version_switch(tutorial, version)}"
             f"{_diff_block(tutorial, version)}"
+            f"{_feature_links(tutorial, '../../')}"
             f"</aside>"
         )
         body = (
@@ -409,36 +484,68 @@ class SiteRenderer:
                    f"{_banner(self.notice, self.batch)}"
                    '<p class="eyebrow">版本紀錄</p>'
                    f"<h1>{escape(tutorial.topic)}</h1>"
+                   f"{_feature_links(tutorial, '../../')}"
                    f'<ol class="versions">{"".join(rows)}</ol>'
                    f"{_retired_block(tutorial)}</article>")
         return _document(f"{tutorial.topic}｜版本紀錄｜{SITE_TITLE}",
                          _asset_links(self.asset_prefix, script=False), article)
 
-    def render_site_index(self, tutorials: list[Tutorial]) -> str:
-        """站台索引；**只列 `current_version` 非空的 Tutorial**（還沒發布過的不上架）。
+    def render_site_index(self, tutorials: list[Tutorial],
+                          features: Sequence[Feature] | None = None) -> str:
+        """站台索引：一格一格的**功能資料夾**；**只列 `current_version` 非空的 Tutorial**。
 
-        連結是 `tutorials/<slug>/index.html`：站台索引公開在 `site/index.html`，教學索引在
-        `site/tutorials/<slug>/index.html`，所以從這一頁看過去就是往下兩層的相對路徑
-        （同 D-78 的規則，不是 S3 key）。沒發布過的教學連 slug 都不輸出。每一列顯示
-        主題、目前版號，退役的教學加上標籤（連結仍可點，讀者會在教學索引看到後繼）。
+        每個資料夾卡片連到 `features/<slug>/index.html`，卡片裡直接列出裡面的教學
+        （連到 `tutorials/<slug>/index.html`），所以不點進資料夾也找得到每一篇。分組交給
+        `group_by_feature`；`features` 只是拿來顯示 `Feature.name`（沒給、或表裡沒有那個
+        `FEATURE` item 時就印 `feature_id`）。連結都是相對路徑（D-78），不是 S3 key。
         """
-        rows = []
-        for tutorial in tutorials:
-            if tutorial.current_version is None:
-                continue
-            retired = ('<span class="tag-retired">已退役</span>'
-                       if tutorial.status == TutorialStatus.RETIRED else "")
-            rows.append(
-                f'<li><a href="{_TUTORIALS_DIR}/{escape_text(tutorial.slug)}/index.html">'
-                f'<span class="topic">{escape(tutorial.topic)}</span>'
-                f'<span class="chip">'
-                f'{escape_text(_version_number(tutorial.current_version))}</span>'
-                f"{retired}</a></li>")
+        names = {row.feature_id: row.name for row in features or ()}
+        folders = group_by_feature(tutorials)
+        listed = {row.slug for _, rows in folders for row in rows}
+        cards = []
+        for feature_id, rows in folders:
+            href = f"{FEATURES_DIR}/{escape_text(folder_slug(feature_id))}/index.html"
+            chips = "".join(
+                f'<li><a href="{_TUTORIALS_DIR}/{escape_text(row.slug)}/index.html">'
+                f"{escape(row.topic)}</a></li>" for row in rows)
+            cards.append(
+                f'<li class="folder"><a class="folder-link" href="{href}">'
+                f'<span class="folder-name">{escape(names.get(feature_id, feature_id))}</span>'
+                f'<span class="folder-count">{len(rows)} 篇</span></a>'
+                f'<ul class="folder-items">{chips}</ul></li>')
         article = (f'<article class="site-index">'
                    f'<header class="masthead"><span class="home">{escape_text(SITE_TITLE)}</span>'
-                   f'<span class="crumb">{len(rows)} 篇</span></header>'
+                   f'<span class="crumb">{len(folders)} 個資料夾 / {len(listed)} 篇</span></header>'
                    f"{_banner(self.notice, self.batch)}"
+                   f'<p class="eyebrow">依功能分類</p>'
                    f"<h1>{escape_text(SITE_TITLE)}</h1>"
                    f'<p class="lede">{escape_text(SITE_LEDE)}</p>'
-                   f'<ul class="tutorials">{"".join(rows)}</ul></article>')
+                   f'<ul class="folders">{"".join(cards)}</ul></article>')
         return _document(SITE_TITLE, _asset_links(self.asset_prefix, script=False), article)
+
+    def render_folder_index(self, feature_id: str, tutorials: list[Tutorial],
+                            feature: Feature | None = None) -> str:
+        """一個功能資料夾：該功能底下所有已上架教學的卡片。
+
+        `tutorials` 由呼叫端用 `group_by_feature` 分好再傳進來；這裡仍只印
+        `current_version` 非空的。`feature` 有給就用 `Feature.name` 當標題並列出別名
+        （改名後舊名還能被找到）；沒給就印 `feature_id`。教學卡片連到
+        `../../tutorials/<slug>/index.html`（資料夾頁公開在 `site/features/<slug>/`）。
+        """
+        name = feature.name if feature is not None else feature_id
+        aliases = ("".join(f'<span class="chip">{escape_text(alias)}</span>'
+                           for alias in feature.aliases)
+                   if feature is not None and feature.aliases else "")
+        alias_line = f'<p class="aliases">別名：{aliases}</p>' if aliases else ""
+        crumb = f"{FEATURES_DIR} / {folder_slug(feature_id)}"
+        cards = "".join(
+            _tutorial_card(row, f"../../{_TUTORIALS_DIR}/{row.slug}/index.html")
+            for row in tutorials if row.current_version is not None)
+        article = (f'<article class="folder-index" data-folder="{escape_text(feature_id)}">'
+                   f"{_masthead(_HOME_FROM_TUTORIAL, crumb)}"
+                   f"{_banner(self.notice, self.batch)}"
+                   f'<p class="eyebrow">資料夾</p>'
+                   f"<h1>{escape(name)}</h1>{alias_line}"
+                   f'<ul class="cards">{cards}</ul></article>')
+        return _document(f"{name}｜資料夾｜{SITE_TITLE}",
+                         _asset_links(self.asset_prefix, script=False), article)

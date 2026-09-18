@@ -284,10 +284,11 @@ def test_commit_refuses_when_base_version_moved(
 
 def test_commit_writes_public_page_and_diff_copy_and_indexes(
         publisher: Publisher, repo: RecordingRepository) -> None:
-    """每篇兩個公開物件，加上教學索引與站台索引；staging 與公開 bytes 完全相同。"""
+    """每篇兩個公開物件，加上教學索引、功能資料夾頁與站台索引；staging 與公開 bytes 完全相同。"""
     prepared = publisher.prepare(PublishRequest((V2,), OPERATION), now=NOW)
     publisher.commit(prepared, now=NOW)
-    assert site_keys(repo) == [
+    assert sorted(site_keys(repo)) == [
+        "site/features/prepare/index.html",
         "site/index.html",
         "site/tutorials/prepare-meeting/index.html",
         "site/tutorials/prepare-meeting/v2.diff.txt",

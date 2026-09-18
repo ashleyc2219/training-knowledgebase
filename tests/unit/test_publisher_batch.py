@@ -82,6 +82,7 @@ BATCH_SITE_KEYS = [
 BATCH_INDEX_KEYS = [
     "site/tutorials/prepare-meeting/index.html",
     "site/tutorials/share-summary/index.html",
+    "site/features/prepare/index.html",   # 兩篇都只用到 Prepare，所以恰好一個資料夾頁
     "site/index.html",
 ]
 
@@ -375,9 +376,7 @@ def test_commit_records_pending_keys_then_promotes_in_fixed_order(
                                     "site/tutorials/prepare-meeting/v3.diff.txt",
                                     "site/tutorials/share-summary/v2.html",
                                     "site/tutorials/share-summary/v2.diff.txt"]
-    assert repo.site_writes == pending["site_keys"] + [
-        "site/tutorials/prepare-meeting/index.html",
-        "site/tutorials/share-summary/index.html", "site/index.html"]
+    assert repo.site_writes == pending["site_keys"] + BATCH_INDEX_KEYS
 
 
 def test_pending_promote_list_exists_when_the_first_restage_breaks(

@@ -78,7 +78,7 @@ fi
 if [[ "$mode" == "all" || "$mode" == "--index" ]]; then
   # 索引頁可重建、會變，叫瀏覽器每次都回來問（否則會看到舊版面）；版本頁不可覆寫，不用管。
   echo "[publish_site] 索引頁加上 Cache-Control: no-cache"
-  for key in $(aws s3 ls "s3://$bucket/site/" --recursive --region "$region" | awk '{print $4}' | grep -E '(^site/index\.html$|^site/tutorials/[^/]+/index\.html$)'); do
+  for key in $(aws s3 ls "s3://$bucket/site/" --recursive --region "$region" | awk '{print $4}' | grep -E '(^site/index\.html$|^site/(tutorials|features)/[^/]+/index\.html$)'); do
     aws s3api copy-object --region "$region" --bucket "$bucket" --key "$key" \
       --copy-source "$bucket/$key" --metadata-directive REPLACE \
       --content-type "text/html; charset=utf-8" --cache-control "no-cache" >/dev/null

@@ -3,7 +3,9 @@
  * 規則不變：只用系統字型與純色，不引外部字型、圖片或任何其他樣式表（設計 §13 的
  * 「不連外部資源」；website endpoint 只有 HTTP，混進加密來源會被部分瀏覽器擋下）。
  *
- * 設計語言：一本會長大的操作手冊。
+ * 設計語言：一座依功能分櫃的手冊庫。
+ *   - 站台索引是一格一格的「資料夾」（.folder，卡片左上角有檔案夾標籤），點進去是該功能
+ *     底下所有教學的卡片（.card）；再點卡片才到版本紀錄與版本頁。
  *   - 版本是這個站最有個性的東西，所以「版本印章」（.stamp）是全站唯一的重色：
  *     芥末黃底、等寬字、雙線框，像圖書館的日期章。
  *   - 標題用宋體（襯線）、內文用黑體（無襯線）、版號與識別碼用等寬字。
@@ -331,33 +333,166 @@ article.tutorial-index ol.versions li.is-current::before {
 article.tutorial-index ol.versions a { font-family: var(--mono); font-size: 0.95rem; }
 article.tutorial-index ol.versions .stamp { margin-left: 0.6rem; }
 
-/* --- 站台索引：教學清單 --------------------------------------------------- */
+/* --- 站台索引：功能資料夾 gallery ------------------------------------------- */
 
-article.site-index ul.tutorials {
+ul.folders {
   list-style: none;
   margin: 0;
   padding: 0;
-  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 1rem;
 }
 
-article.site-index ul.tutorials li {
+li.folder {
+  position: relative;
   margin: 0;
-  border-bottom: 1px solid var(--line);
+  padding: 1.6rem 1rem 0.9rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--teal);
 }
 
-article.site-index ul.tutorials a {
+/* 檔案夾左上角的標籤耳 */
+li.folder::before {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: 0.9rem;
+  width: 3.2rem;
+  height: 0.7rem;
+  background: var(--teal);
+  border-radius: 0 0 4px 4px;
+}
+
+li.folder a.folder-link {
   display: flex;
-  flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.4rem 0.8rem;
-  padding: 0.85rem 0.25rem;
+  justify-content: space-between;
+  gap: 0.6rem;
   color: var(--ink);
   text-decoration: none;
 }
 
-article.site-index ul.tutorials a:hover { background: var(--card); }
-article.site-index ul.tutorials .topic { flex: 1 1 14rem; font-family: var(--serif); font-size: 1.1rem; font-weight: 600; }
-article.site-index ul.tutorials a:hover .topic { color: var(--teal); }
+li.folder a.folder-link:hover .folder-name { color: var(--teal); text-decoration: underline; }
+
+.folder-name {
+  font-family: var(--serif);
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.folder-count {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+ul.folder-items {
+  list-style: none;
+  margin: 0.7rem 0 0;
+  padding: 0.6rem 0 0;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.5rem;
+}
+
+ul.folder-items li { margin: 0; }
+
+ul.folder-items a {
+  display: inline-block;
+  padding: 0 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 0.85rem;
+  line-height: 1.7;
+  text-decoration: none;
+}
+
+ul.folder-items a:hover { border-color: var(--teal); color: var(--teal); }
+
+/* --- 資料夾頁：教學卡片 ------------------------------------------------------ */
+
+ul.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 1rem;
+}
+
+li.card { margin: 0; }
+
+li.card a {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  height: 100%;
+  padding: 1rem 1rem 0.9rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--stamp);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+li.card a:hover { border-color: var(--teal); }
+li.card a:hover .topic { color: var(--teal); }
+
+li.card .topic {
+  font-family: var(--serif);
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+li.card .slug {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+li.card .meta { margin-top: auto; display: flex; gap: 0.4rem; align-items: center; }
+
+p.aliases { margin: -0.75rem 0 1.25rem; color: var(--muted); font-size: 0.9rem; }
+p.aliases .chip { margin-right: 0.3rem; }
+
+/* --- 所屬功能連結（版本欄與教學索引）------------------------------------------ */
+
+nav.features ul {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0 0;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.4rem;
+}
+
+nav.features li { margin: 0; }
+
+nav.features a.feature {
+  display: inline-block;
+  padding: 0 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.7;
+  text-decoration: none;
+}
+
+nav.features a.feature:hover { border-color: var(--teal); color: var(--teal); }
+
+article.tutorial-index nav.features ul { border-top: none; margin: -0.5rem 0 1rem; padding: 0; }
 
 .lede { margin: 0 0 1.5rem; color: var(--muted); }
 

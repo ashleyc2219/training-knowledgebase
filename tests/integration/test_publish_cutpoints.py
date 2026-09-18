@@ -57,7 +57,7 @@ from training_kb.publishing import (
     PublishRequest,
 )
 from training_kb.repository import Repository
-from training_kb.site import SiteRenderer
+from training_kb.site import SiteRenderer, folder_slug
 
 SLUG = "prepare-meeting"
 FEATURE = "Prepare"
@@ -73,6 +73,8 @@ _TYPES = ("read", "click_ui", "click_ui", "read")
 _SITE_VERSION = re.compile(r'data-site-version="(v[0-9]+)"')
 OLD_PUBLIC = ["site/index.html", TUTORIAL_INDEX, f"site/tutorials/{SLUG}/v1.html"]
 """上一次發布（v1）留下的公開物件；三個失敗切點之後 `site/` 必須還是這三個。"""
+FOLDER_PAGE = f"site/features/{folder_slug(FEATURE)}/index.html"
+"""成功發布後多出來的功能資料夾頁（站台依功能分類）。"""
 
 
 # --- 共用器材 ---------------------------------------------------------------
@@ -284,9 +286,9 @@ def test_happy_path_switches_generation_after_the_transaction(
     assert found.published_at == NOW.isoformat()
     assert found.current_version == V2
     assert found.site_generation == "v2"
-    assert public_keys(bucket) == [
-        *OLD_PUBLIC, f"site/tutorials/{SLUG}/v2.diff.txt", VERSION_PAGE,
-    ]
+    assert public_keys(bucket) == sorted([
+        *OLD_PUBLIC, FOLDER_PAGE, f"site/tutorials/{SLUG}/v2.diff.txt", VERSION_PAGE,
+    ])
     for key in public_keys(bucket):
         body = repository.get_object(key)
         assert body is not None
