@@ -8,8 +8,7 @@
 #             新版面只會套用在之後發布的新版本，但新的 CSS 對舊頁一樣生效）。
 #
 # 用法（在專案根目錄）：
-#   export TKB_AWS_REGION=us-east-1
-#   export TKB_CONTENT_BUCKET=training-kb-content-example
+#   已 export 的 TKB_* 優先；缺的才讀 .env；再缺就停。
 #   demo/scripts/publish_site.sh            # 上傳資產 + 補缺的版本頁 + 重建索引
 #   demo/scripts/publish_site.sh --assets   # 只上傳資產（改 CSS／JS 時）
 #   demo/scripts/publish_site.sh --pages    # 只補缺的版本頁（seed --apply 之後）
@@ -18,8 +17,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-: "${TKB_AWS_REGION:?請先 export TKB_AWS_REGION=us-east-1}"
-: "${TKB_CONTENT_BUCKET:?請先 export TKB_CONTENT_BUCKET=<bucket 名稱>}"
+if [[ -f .env ]]; then
+  eval "$(uv run python -c 'from training_kb.config import dotenv_exports_for_shell; print(dotenv_exports_for_shell())')"
+fi
+: "${TKB_AWS_REGION:?請設 TKB_AWS_REGION（環境變數或 .env）}"
+: "${TKB_CONTENT_BUCKET:?請設 TKB_CONTENT_BUCKET（環境變數或 .env）}"
 
 mode="${1:-all}"
 bucket="$TKB_CONTENT_BUCKET"
